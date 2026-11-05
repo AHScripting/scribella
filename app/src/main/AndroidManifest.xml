@@ -1,0 +1,63 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <!-- P118: optional handwriting language-model downloads. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- P390: optional platform fingerprint prompt; no biometric SDK or account. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- P203: gate folder sync on the default network transport; no location permission. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- P205: persist the user-enabled periodic sync job across reboot. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- P247: the scan screen's live camera (user approved 23 October 2026); the picture stays on the tablet. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <!-- P197 (B34): lists the apps an import can come from (file managers, photo apps), so the user picks one. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.GET_CONTENT" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.PICK" />
+            <data android:mimeType="image/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.APP_GALLERY" />
+        </intent>
+    </queries>
+    <application android:name=".NotesApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@style/Theme.Scribella" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true">
+        <service android:name=".BackgroundSyncService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" />
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Notebook and document shares commonly use generic application MIME types. Validate actual files on receipt. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/*" />
+            </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+            <intent-filter>
+                <action android:name="com.samsung.android.support.REMOTE_ACTION" />
+            </intent-filter>
+            <meta-data android:name="com.samsung.android.support.REMOTE_ACTION" android:resource="@xml/air_actions" />
+        </activity>
+        <!-- P086: copied handwriting as a PNG on the Android clipboard; read access is granted per clip. -->
+        <provider android:name=".ClipboardImageProvider" android:authorities="${applicationId}.clipboard" android:exported="false" android:grantUriPermissions="true" />
+        <!-- P083: the system camera writes document scans here (since P247 only when the in-app camera is off, as in tests). -->
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.scans" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/scan_paths" />
+        </provider>
+        <!-- P084: attached files are copied to cache and opened or shared read-only from here. -->
+        <provider android:name=".AttachmentFileProvider" android:authorities="${applicationId}.attachments" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/attachment_paths" />
+        </provider>
+        <service android:name=".SafetyRecoveryService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" android:process=":recovery" />
+    </application>
+</manifest>

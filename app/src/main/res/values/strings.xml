@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Scribella</string>
+    <!-- P105 (F138): launcher shortcut labels. -->
+    <string name="quick_note_short">Quick note</string>
+    <string name="quick_note_long">New quick note</string>
+    <!-- P386: Samsung Air Actions reuse existing keyboard commands; no SDK. -->
+    <string name="air_actions_title">Scribella commands</string>
+    <string name="air_next_page">Next page</string>
+    <string name="air_previous_page">Previous page</string>
+    <string name="air_undo">Undo</string>
+    <string name="air_redo">Redo</string>
+    <string name="air_copy">Copy</string>
+    <string name="air_cut">Cut</string>
+    <string name="air_paste">Paste</string>
+    <string name="air_search">Search notebook</string>
+</resources>

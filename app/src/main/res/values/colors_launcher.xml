@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launch-screen colours. launcher_background is the pale glass behind the icon, also used for the icon's own circle at
+     night; launcher_field_night mirrors Glass.desk(night = true) in GlassKit.kt. -->
+<resources>
+    <color name="launcher_background">#e6f0fd</color>
+    <color name="launcher_field_night">#1a1d24</color>
+</resources>

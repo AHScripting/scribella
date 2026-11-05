@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- P201: where a Glass kit group draws the hairline under a row (GlassKit.kt). -->
+    <item name="kit_inset" type="id" />
+</resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- See PersonalTools.kt. -->
+    <bool name="personal_tools">false</bool>
+    <string name="sync_folder">Scribella sync</string>
+    <string name="backup_folder">Scribella backup</string>
+    <string name="encrypted_backup_folder">Scribella encrypted backup</string>
+    <string name="safety_folder">Scribella Safety</string>
+</resources>

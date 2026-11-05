@@ -1,0 +1,215 @@
+THIRD-PARTY NOTICES FOR SCRIBELLA
+
+Scribella uses the libraries and fonts below. Each one stays under its own licence, not under the licence of Scribella.
+The full Apache License 2.0 text is in Apache-2.0.txt and the Pdfium Android licence in pdfiumandroid-2.0.3-LICENSE.txt, both in this folder.
+Each font comes with its own SIL Open Font License file, in the assets/hands folder of the app.
+Licences of code included inside the Google libraries are in GOOGLE-LIBRARY-NOTICES.txt.
+
+LIBRARIES
+
+The Apache Software License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0.txt>
+  androidx.activity:activity:1.10.1
+  androidx.activity:activity-ktx:1.10.1
+  androidx.annotation:annotation:1.10.0
+  androidx.annotation:annotation-experimental:1.4.1
+  androidx.annotation:annotation-jvm:1.10.0
+  androidx.appcompat:appcompat:1.6.1
+  androidx.appcompat:appcompat-resources:1.6.1
+  androidx.arch.core:core-common:2.2.0
+  androidx.arch.core:core-runtime:2.2.0
+  androidx.collection:collection:1.4.3
+  androidx.collection:collection-jvm:1.4.3
+  androidx.collection:collection-ktx:1.4.3
+  androidx.concurrent:concurrent-futures:1.1.0
+  androidx.core:core:1.16.0
+  androidx.core:core-ktx:1.16.0
+  androidx.core:core-viewtree:1.0.0
+  androidx.cursoradapter:cursoradapter:1.0.0
+  androidx.customview:customview:1.0.0
+  androidx.customview:customview-poolingcontainer:1.0.0
+  androidx.drawerlayout:drawerlayout:1.0.0
+  androidx.emoji2:emoji2:1.2.0
+  androidx.emoji2:emoji2-views-helper:1.2.0
+  androidx.exifinterface:exifinterface:1.0.0
+  androidx.fragment:fragment:1.5.7
+  androidx.fragment:fragment-ktx:1.5.7
+  androidx.graphics:graphics-core:1.0.4
+  androidx.ink:ink-authoring:1.0.0
+  androidx.ink:ink-authoring-android:1.0.0
+  androidx.ink:ink-brush:1.0.0
+  androidx.ink:ink-brush-android:1.0.0
+  androidx.ink:ink-geometry:1.0.0
+  androidx.ink:ink-geometry-android:1.0.0
+  androidx.ink:ink-nativeloader:1.0.0
+  androidx.ink:ink-nativeloader-android:1.0.0
+  androidx.ink:ink-rendering:1.0.0
+  androidx.ink:ink-rendering-android:1.0.0
+  androidx.ink:ink-strokes:1.0.0
+  androidx.ink:ink-strokes-android:1.0.0
+  androidx.interpolator:interpolator:1.0.0
+  androidx.lifecycle:lifecycle-common:2.6.2
+  androidx.lifecycle:lifecycle-livedata:2.6.2
+  androidx.lifecycle:lifecycle-livedata-core:2.6.2
+  androidx.lifecycle:lifecycle-livedata-core-ktx:2.6.2
+  androidx.lifecycle:lifecycle-process:2.6.2
+  androidx.lifecycle:lifecycle-runtime:2.6.2
+  androidx.lifecycle:lifecycle-runtime-ktx:2.6.2
+  androidx.lifecycle:lifecycle-service:2.6.2
+  androidx.lifecycle:lifecycle-viewmodel:2.6.2
+  androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.2
+  androidx.lifecycle:lifecycle-viewmodel-savedstate:2.6.2
+  androidx.loader:loader:1.0.0
+  androidx.profileinstaller:profileinstaller:1.4.0
+  androidx.recyclerview:recyclerview:1.4.0
+  androidx.resourceinspection:resourceinspection-annotation:1.0.1
+  androidx.room:room-common:2.2.5
+  androidx.room:room-runtime:2.2.5
+  androidx.savedstate:savedstate:1.2.1
+  androidx.savedstate:savedstate-ktx:1.2.1
+  androidx.sqlite:sqlite:2.1.0
+  androidx.sqlite:sqlite-framework:2.1.0
+  androidx.startup:startup-runtime:1.2.0
+  androidx.test.espresso:espresso-idling-resource:3.5.0
+  androidx.tracing:tracing:1.2.0
+  androidx.vectordrawable:vectordrawable:1.1.0
+  androidx.vectordrawable:vectordrawable-animated:1.1.0
+  androidx.versionedparcelable:versionedparcelable:1.1.1
+  androidx.viewpager:viewpager:1.0.0
+  androidx.work:work-runtime:2.7.0
+  com.google.android.datatransport:transport-api:2.2.1
+  com.google.android.datatransport:transport-backend-cct:2.3.3
+  com.google.android.datatransport:transport-runtime:2.2.6
+  com.google.firebase:firebase-annotations:16.0.0
+  com.google.firebase:firebase-components:16.1.0
+  com.google.firebase:firebase-encoders:16.1.0
+  com.google.firebase:firebase-encoders-json:17.1.0
+  com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava
+  com.squareup.okio:okio:3.18.1
+  com.squareup.okio:okio-jvm:3.18.1
+  com.tom-roush:pdfbox-android:2.0.27.0
+  javax.inject:javax.inject:1
+
+ML Kit Terms of Service <https://developers.google.com/ml-kit/terms>
+  com.google.android.gms:play-services-mlkit-text-recognition:19.0.1
+  com.google.android.gms:play-services-mlkit-text-recognition-common:19.1.0
+  com.google.mlkit:common:18.11.0
+  com.google.mlkit:digital-ink-common:16.0.0
+  com.google.mlkit:digital-ink-recognition:19.0.0
+  com.google.mlkit:text-recognition:16.0.1
+  com.google.mlkit:text-recognition-bundled-common:17.0.0
+  com.google.mlkit:vision-common:17.3.0
+  com.google.mlkit:vision-interfaces:16.3.0
+
+The Apache Software License, Version 2.0 <https://www.apache.org/licenses/LICENSE-2.0.txt>
+  com.squareup.okhttp3:okhttp:5.5.1
+  com.squareup.okhttp3:okhttp-android:5.5.1
+  org.jetbrains:annotations:23.0.0
+  org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3
+  org.jetbrains.kotlinx:kotlinx-coroutines-bom:1.7.3
+  org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3
+  org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.7.3
+
+Apache-2.0 <https://www.apache.org/licenses/LICENSE-2.0.txt>
+  org.jetbrains.kotlinx:kotlinx-serialization-bom:1.9.0
+  org.jetbrains.kotlinx:kotlinx-serialization-core:1.9.0
+  org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.9.0
+  org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0
+  org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.9.0
+
+Android Software Development Kit License <https://developer.android.com/studio/terms.html>
+  com.google.android.gms:play-services-base:18.5.0
+  com.google.android.gms:play-services-basement:18.4.0
+  com.google.android.gms:play-services-tasks:18.2.0
+  com.google.android.odml:image:1.0.0-beta1
+
+Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0.txt>
+  com.google.guava:failureaccess:1.0.3
+  com.google.guava:guava:33.6.0-android
+  com.google.j2objc:j2objc-annotations:3.1
+
+Apache License, Version 2.0 / The Apache Software License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0>
+  io.legere:pdfiumandroid:2.0.3
+  io.legere:pdfiumandroid-api:2.0.3
+  io.legere:pdfiumandroid-core:2.0.3
+
+Bouncy Castle Licence <http://www.bouncycastle.org/licence.html>
+  org.bouncycastle:bcpkix-jdk15to18:1.72
+  org.bouncycastle:bcprov-jdk15to18:1.72
+  org.bouncycastle:bcutil-jdk15to18:1.72
+
+The Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0.txt>
+  org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.20
+  org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.20
+  org.jspecify:jspecify:1.0.0
+
+Apache-2.0 <http://www.apache.org/licenses/LICENSE-2.0.txt>
+  org.jetbrains.kotlin:kotlin-stdlib:2.4.21
+  org.jetbrains.kotlin:kotlin-stdlib-common:2.4.21
+
+Apache 2.0 <http://www.apache.org/licenses/LICENSE-2.0.txt>
+  com.google.errorprone:error_prone_annotations:2.47.0
+
+ATTRIBUTION
+
+PdfBox-Android, by Tom Roush, based on Apache PDFBox. Its NOTICE file reads:
+
+Apache PDFBox
+Copyright 2014 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Based on source code originally developed in the PDFBox and
+FontBox projects.
+
+Copyright (c) 2002-2007, www.pdfbox.org
+
+Based on source code originally developed in the PaDaF project.
+Copyright (c) 2010 Atos Worldline SAS
+
+Includes the Adobe Glyph List
+Copyright 1997, 1998, 2002, 2007, 2010 Adobe Systems Incorporated.
+
+Includes the Zapf Dingbats Glyph List
+Copyright 2002, 2010 Adobe Systems Incorporated.
+
+Includes the Script Property (Scripts-10.0.0.txt)
+Copyright 2017 Unicode, Inc.
+
+BOUNCY CASTLE LICENCE
+
+Copyright (c) 2000-2022 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org) 
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software 
+and associated documentation files (the "Software"), to deal in the Software without restriction, 
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, 
+and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+FONTS, SIL OPEN FONT LICENSE 1.1
+
+american-cursive: Copyright 2023 The Playwrite Project Authors (https://github.com/TypeTogether/Playwrite)
+british-joined: Copyright 2023 The Playwrite Project Authors (https://github.com/TypeTogether/Playwrite)
+casual-marker: Copyright 2014 The Caveat Project Authors (https://github.com/googlefonts/caveat)
+copperplate: Copyright 2024 The Pinyon Project Authors (https://github.com/SorkinType/Pinyon)
+flowing: Copyright 2016 The Dancing Script Project Authors (https://github.com/googlefonts/DancingScript), with Reserved Font Name 'Dancing Script'.
+formal: Copyright (c) 2011, Pablo Impallari (www.impallari.com|impallari@gmail.com), Copyright (c) 2011, Brenda Gallo. (gbrenda1987@gmail.com), Copyright (c) 2011, Rodrigo Fuenzalida (www.rfuenzalida.com|hello@rfuenzalida.com), with Reserved Font Name Petit Formal Script.
+french-cursive: Copyright 2023 The Playwrite Project Authors (https://github.com/TypeTogether/Playwrite)
+grand-script: Copyright 2015 The Great Vibes Pro Project Authors (https://github.com/googlefonts/great-vibes)
+modern-italic: Copyright 2023 The Playwrite Project Authors (https://github.com/TypeTogether/Playwrite)
+natural-cursive: Copyright (c) 2010, Kimberly Geswein (kimberlygeswein.com)
+neat-print: Copyright 2023 The Playwrite Project Authors (https://github.com/TypeTogether/Playwrite)
+rounded-print: Copyright (c) 2010-2012 Patrick Wagesreiter (mail@patrickwagesreiter.at)
+school-print: Copyright 2022 The AU School Handwriting Fonts Project Authors (https://github.com/MezMerrit/AU-School-Handwriting-Fonts)
+slanted-casual: Copyright (c) 2014, Indian Type Foundry (info@indiantypefoundry.com).
+thin-script: Copyright (c) 2012, Brian J. Bonislawsky DBA Astigmatic (AOETI) (astigma@astigmatic.com), with Reserved Font Names 'Sacramento'

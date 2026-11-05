@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dialog window: the Glass sheet surface (G7, P182) with the 20 dp card radius and a white edge, inset like the
+     platform's own. Glass.sheet() replaces this with a bottom sheet for the page, paper and text forms. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetLeft="16dp" android:insetRight="16dp" android:insetTop="16dp" android:insetBottom="16dp">
+    <shape android:shape="rectangle">
+        <corners android:radius="20dp" />
+        <solid android:color="@color/glass_sheet" />
+        <stroke android:width="1dp" android:color="@color/glass_sheet_edge" />
+    </shape>
+</inset>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P563: the same Quick note shortcut for the release app id. Shortcut files cannot read the app id at build time. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="quick_note" android:enabled="true" android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/quick_note_short" android:shortcutLongLabel="@string/quick_note_long">
+        <intent android:action="dev.ownednotes.app.QUICK_NOTE" android:targetPackage="dev.ownednotes.app.release" android:targetClass="dev.ownednotes.app.MainActivity" />
+    </shortcut>
+</shortcuts>

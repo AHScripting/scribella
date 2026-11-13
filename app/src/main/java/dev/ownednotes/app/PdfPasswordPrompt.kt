@@ -24,7 +24,7 @@ internal class PdfPasswordPrompt(private val activity: MainActivity, private val
         add(Kit.text(activity,"Enter this PDF’s password. Its original file stays protected; Scribella can display, search and export unlocked pages."))
         add(password)
         add(Kit.row(activity,"Show password",trailing=show) { show.performClick() })
-        add(Kit.row(activity,"Remember on this device",detail="Encrypted on this tablet only; never included in notebooks or sync.",trailing=remember) { remember.performClick() })
+        add(Kit.row(activity,"Remember on this device",detail="Encrypted on this device only; never included in notebooks or sync.",trailing=remember) { remember.performClick() })
     }
     init { sheet.dialog.setOnDismissListener { password.text.clear();if(!completed)cancelled() } }
     fun show() { sheet.show() }

@@ -30,6 +30,8 @@ class PageOrganizer(
 ) : FrameLayout(c) {
     private val night = c.night
     val grid = PagePanel(c, repository, thumbnails)
+    /** P612: the held page's actions (Duplicate, Settings, Delete). */
+    internal val holdBar = PageHoldBar(activity, night)
     internal val title = TextView(c)
     internal val subtitle = TextView(c)
     internal val select = TextView(c)
@@ -70,6 +72,9 @@ class PageOrganizer(
         grid.night = night; grid.background = null; grid.grid = true; grid.footer = c.dp(110f)
         grid.onPageSelected = { id -> post { onOpen(id) } }
         grid.onPageActions = { activity.pagePanelActions(it) }
+        // P612: as in the strip, the held page's actions show at once.
+        grid.onPageHeld = { id, bounds -> holdBar.show(grid, id, bounds) }
+        grid.onPageHeldEnd = { holdBar.hide() }
         grid.onRefused = { activity.message(it) }
         grid.onChoiceChanged = { showChoice() }
         body.addView(grid, LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -86,22 +91,32 @@ class PageOrganizer(
     }
 
     override fun onAttachedToWindow() { super.onAttachedToWindow(); repository.listen(observer) }
-    override fun onDetachedFromWindow() { epoch++; repository.unlisten(observer); super.onDetachedFromWindow() }
+    override fun onDetachedFromWindow() { epoch++; repository.unlisten(observer); holdBar.hide(); super.onDetachedFromWindow() }
 
     /** Back: stop choosing first, then leave the organizer. */
     fun back() { if(pdfChoosing){pdfChoosing=false;pdfChosen.clear();showContents();showChoice()}else if (grid.choosing) grid.stopChoosing() else onClose() }
 
     private fun topBar() = FrameLayout(c).apply {
         setPadding(c.dpi(24f), c.dpi(16f), c.dpi(24f), c.dpi(16f))
-        addView(Kit.button(c, "Done", Kit.Button.GLASS) { onClose() }.apply { contentDescription = "Close all pages" },
-            LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.START or Gravity.CENTER_VERTICAL))
+        // P592: large text on a phone squeezed the notebook's name between Done and Select ("Note…"); there the name
+        // goes on its own line under the two buttons.
+        val under = c.largeText && c.resources.configuration.screenWidthDp < 600
+        val done = Kit.button(c, "Done", Kit.Button.GLASS) { onClose() }.apply { contentDescription = "Close all pages" }
+        addView(done, LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.START or if (under) Gravity.TOP else Gravity.CENTER_VERTICAL))
         val names = LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
-            title.apply { textSize = 19f; typeface = Kit.Type.TITLE.typeface; setTextColor(Glass.text(night)); maxLines = 1; ellipsize = TextUtils.TruncateAt.END; isAccessibilityHeading = true }
+            title.apply { textSize = 19f; typeface = Kit.Type.TITLE.typeface; setTextColor(Glass.text(night)); maxLines = if (under) 2 else 1; ellipsize = TextUtils.TruncateAt.END; isAccessibilityHeading = true }
             subtitle.apply { textSize = 12.5f; typeface = Tokens.SANS_MEDIUM; setTextColor(Glass.secondary(night)); maxLines = 1 }
+            if (under) { title.gravity = Gravity.CENTER_HORIZONTAL; subtitle.gravity = Gravity.CENTER_HORIZONTAL }
             addView(title); addView(subtitle)
         }
-        addView(names, LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER).apply { leftMargin = c.dpi(120f); rightMargin = c.dpi(120f) })
+        if (under) {
+            addView(names, LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP))
+            done.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, _ ->
+                val top = maxOf(bottom, paddingTop + c.dpi(52f)) - paddingTop + c.dpi(10f)
+                (names.layoutParams as LayoutParams).let { if (it.topMargin != top) { it.topMargin = top; names.post { names.requestLayout() } } }
+            }
+        } else addView(names, LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER).apply { leftMargin = c.dpi(120f); rightMargin = c.dpi(120f) })
         val pill = LinearLayout(c).apply {
             background = Glass.pane(c, night, 26f); elevation = c.dp(4f); gravity = Gravity.CENTER_VERTICAL
             setPadding(c.dpi(5f), c.dpi(5f), c.dpi(5f), c.dpi(5f))
@@ -115,7 +130,7 @@ class PageOrganizer(
             }
             addView(select, LinearLayout.LayoutParams(WRAP_CONTENT, c.dpi(40f)))
         }
-        addView(pill, LayoutParams(WRAP_CONTENT, c.dpi(52f), Gravity.END or Gravity.CENTER_VERTICAL))
+        addView(pill, LayoutParams(WRAP_CONTENT, c.dpi(52f), Gravity.END or if (under) Gravity.TOP else Gravity.CENTER_VERTICAL))
     }
 
     /** One of the bulk bar's actions: its icon over a short word, as on the board. */

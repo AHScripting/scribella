@@ -27,16 +27,39 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * P186: thickness of the docked tool strip, in dp: a 76 dp palette (shorter than the board's 112 dp at the user's review,
- * so the page gets the room), 14 dp from its edge, 6 dp toward the page.
+ * P186: thickness of the docked tool strip, in dp: the palette (P614, board 8: 58 dp, from 112 and then 76 dp, so the page
+ * gets the room), 12 dp from its edge, 6 dp toward the page.
  */
-private const val TOOL_STRIP = 96f
+private const val TOOL_STRIP = 76f
 /** P560: a side rail: two 48 dp columns, 6 dp from its edge and 6 dp toward the page. */
 private const val TOOL_RAIL = 108f
 /** P560: a tool's slot on a rail, short enough that four rows of tools leave the palette whole on a landscape screen. */
 private const val RAIL_SLOT = 62f
 /** P186: the floating app bar's height: the Glass board's single row of 52 dp pills, 14 dp from the top, 8 dp below. */
 private const val TOP_BAR = 74f
+/**
+ * P628 (board 12): the fold into the slim bar, in ms. The full bars dip away over SLIM_DIP (fading over SLIM_DIP_FADE);
+ * coming back they drop in over SLIM_DROP (fading in over SLIM_DROP_FADE), the palette SLIM_PALETTE after the app bar,
+ * and its tools pop in one by one from SLIM_TOOLS, SLIM_TOOL_STEP apart, each over SLIM_TOOL.
+ */
+private const val SLIM_DIP = 170f
+private const val SLIM_DIP_FADE = 150f
+private const val SLIM_DROP = 380f
+private const val SLIM_DROP_FADE = 180f
+private const val SLIM_PALETTE = 50f
+private const val SLIM_TOOLS = 100f
+private const val SLIM_TOOL_STEP = 24f
+private const val SLIM_TOOL = 320f
+private const val SLIM_TOOL_FADE = 140f
+/** P629: the page glides to its new fit over PAGE_GLIDE ms when the toolbars swap; a chrome change within PAGE_GLIDE_WINDOW of the swap glides. */
+private const val PAGE_GLIDE = 300L
+private const val PAGE_GLIDE_WINDOW = 600L
+/** P630: the preference behind "Fold into the slim bar when I write". */
+private const val AUTO_SLIM = "autoSlimBar"
+/** P607: the Pages card's corners, as on the design canvas board. */
+private const val PAGE_CARD_RADIUS = 24f
+/** P578: below this width (dp) the editor is a phone editor: a shorter top bar and a palette whose tools scroll. */
+private const val COMPACT_WIDTH = 600f
 private const val PANE_TAB = 40f
 private const val PANE_MIN = 240f
 private const val PANE_GAP = 2f
@@ -45,6 +68,11 @@ private const val PANE_HIT = 18f
 internal const val FIND_COMMAND = "Find a command…"
 /** P186: the first row of the "Page and paper" menu. */
 internal const val PAPER_SETTINGS = "Paper and page settings…"
+/** P605: the icon-grid menus' search field, and the Page and paper menu's two section names, as the redesign sketch has them. */
+internal const val FIND_PILL = "Find a command"
+internal const val PAPER_CAPTION = "Paper"
+internal const val PAGE_CAPTION = "This page"
+/** P605: the icon-grid menus' corners, in dp. */
 /** P183 (G8): the width of the Settings group list, in dp. */
 private const val SETTINGS_SIDEBAR = 300f
 
@@ -100,16 +128,24 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     private val desk = FrameLayout(c)
     /** B07 (P131): the empty page after the last one, with an "Add page" button. */
     val addPageCard = AddPageCard(c, { addPageAtEnd() }, { turnBackFromAddPage() })
+    private val addSlotLeft = RectF()
+    private val addSlotRight = RectF()
     private var shownNotebook: dev.ownednotes.core.Notebook? = null
     private var shownPageId: String? = null
     private var syncingStrip = false
     private var awaitingStripLayout = false
     private var selectingFromStrip = false
 
-    /** Saved pens (build-order step 3); `pen` is the first and stays the default. */
-    val pens = List(PenPresets.COUNT) { ChromeButton(c, "Pen ${it + 1}") }
+    /**
+     * Saved pens (build-order step 3); `pen` is the first and stays the default. P619 (board 10): one button per saved pen
+     * and per saved highlighter, each group followed by its +; `highlighter` is the chosen highlighter.
+     */
+    val pens = mutableListOf<ChromeButton>()
     val pen get() = pens[0]
-    val highlighter = ChromeButton(c, "Highlighter")
+    val highlighters = mutableListOf<ChromeButton>()
+    val highlighter get() = highlighters[markers.selected]
+    val addPen = ChromeButton(c, "Add a pen", Glyph.PLUS)
+    val addHighlighter = ChromeButton(c, "Add a highlighter", Glyph.PLUS)
     val eraser = ChromeButton(c, "Eraser", Glyph.ERASER_STROKE)
     /** B31 (P193): the paint brush, standing after the eraser as a paint roller in the pen's colour. */
     val paintBrush = ChromeButton(c, "Paint brush")
@@ -192,6 +228,9 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     /** Tool bar docking (build-order step 2). The top app bar never moves; only the tool bar does. */
     enum class Dock(val label: String) { TOP("Top"), BOTTOM("Bottom"), LEFT("Left"), RIGHT("Right") }
     private val preferences = (c.application as NotesApplication).let { it.getSharedPreferences(it.preferencesName, 0) }
+    val presets = PenPresets(preferences, ink.penStyle)
+    /** P619: the saved highlighters, kept like the pens. */
+    val markers = PenPresets.highlighters(preferences, ink.highlighterStyle)
     private var continuousPreferred = preferences.getBoolean("continuousMode", false)
     /** P530: side-by-side panes stay single-page; the saved choice returns when the companion closes. */
     val continuousMode get() = continuousPreferred && companionCanvas == null
@@ -232,6 +271,33 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     private val actionPill = pill()
     private val libraryPill = pill()
     private val namedPill = pill()
+    /** P578: true while the editor is under [COMPACT_WIDTH] wide; see [setCompact]. */
+    var compact = false
+        private set
+    private val paletteRow = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+    /** P578: on a phone the tools and colours scroll sideways inside the palette; the handle and Undo/Redo stay put. */
+    internal val paletteScroll = object : android.widget.HorizontalScrollView(c) {
+        // A row that fits never takes a sideways drag from its tools.
+        override fun onInterceptTouchEvent(ev: android.view.MotionEvent) =
+            (canScrollHorizontally(1) || canScrollHorizontally(-1)) && super.onInterceptTouchEvent(ev)
+    }.apply {
+        isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER; isFillViewport = true; addView(paletteRow)
+    }
+    /**
+     * P622: a top or bottom palette wider than its edge (a tablet in portrait with many pens and highlighters) scrolls its
+     * tools and colours like a phone's; it goes back to the plain row once the row fits again.
+     */
+    private var paletteTooWide = false
+    internal val paletteScrolls get() = paletteScroll.parent != null
+    private val railColumn = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
+    /**
+     * P591: a side rail's tools and colours stand in a vertical scroll under the handle and Undo/Redo. Where the rail fits
+     * (a tablet) it is exactly as tall as its content and never scrolls; on a phone held sideways it scrolls instead of
+     * running off the foot of the screen.
+     */
+    internal val railScroll = android.widget.ScrollView(c).apply {
+        isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER; addView(railColumn)
+    }
     /**
      * P176 (G1b): the page fills the editor and the chrome floats over it. [stage] holds the page area with, above it, the
      * app bar (and the tool bar when docked top) in [topChrome]; a bottom tool bar floats at its foot. Side rails stay beside the page.
@@ -247,27 +313,69 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     /** The edge a grip drag would snap to, or null when no drag is in progress. */
     var dragTarget: Dock? = null; private set
     /** P178 (G3): the open page strip: a Select/Done button above the previews and, while choosing, the bulk bar at its foot. */
-    private val pageStrip = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(if (night) PagePanel.NIGHT_PANE else PagePanel.LIGHT_PANE) }
-    val choosePages = stripButton(PageStripAction.SELECT.label)
+    // P607: a floating glass card with corners of 24 (the design canvas's Pages-Panel board), not a grey strip on the edge.
+    private val pageStrip = LinearLayout(c).apply {
+        orientation = LinearLayout.VERTICAL; background = Glass.float(c, night, PAGE_CARD_RADIUS)
+        elevation = c.dp(12f); clipToOutline = true
+    }
+    /** P607: Select is a round icon button beside All pages; while choosing it fills with the accent and reads Done. */
+    private val selectIcon = Kit.Icon(MenuIcons.SELECT, Glass.accent(night), c.dpi(22f))
+    /** P612: while choosing, Select shows a filled accent disc with a white tick (inside the button, so the card never cuts it). */
+    private val selectDone = android.graphics.drawable.LayerDrawable(arrayOf(
+        Kit.Icon(MenuIcons.SELECT_DISC, Glass.accent(night), c.dpi(22f), fill = true), Kit.Icon(MenuIcons.SELECT_TICK, Color.WHITE, c.dpi(22f))))
+    val choosePages = roundStripButton(selectIcon, "Select pages")
+    /** P612: the held page's actions, shown beside it while the finger is still down (Pages-Panel board). */
+    internal val pageHoldBar = PageHoldBar(activity, night)
+    /** P607: the page count beside the "Pages" title. */
+    internal val pageCountChip = TextView(c).apply {
+        // P610: the card is 188 dp at every text size, so its header stops growing with large text (as the top bar does).
+        setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 12f); typeface = Tokens.SANS_MEDIUM; setTextColor(Glass.secondary(night)); fontFeatureSettings = "tnum"
+        background = rounded(if (night) 0x14ffffff else 0x121d2433, c.dp(10f)); setPadding(c.dpi(7f), c.dpi(2f), c.dpi(7f), c.dpi(2f))
+    }
     val movePages = stripButton(PageStripAction.MOVE.label)
     val deletePages = stripButton(PageStripAction.DELETE.label)
     /** P201 step 6: opens the page organizer from the strip's header. */
-    val allPages = android.widget.ImageView(c).apply {
-        setImageDrawable(Kit.Icon(PageOrganizer.GRID, Glass.accent(night), c.dpi(20f))); scaleType = android.widget.ImageView.ScaleType.CENTER
-        contentDescription = PageStripAction.ALL.label; tooltipText = PageStripAction.ALL.label
-        background = ripple(night, c.dp(20f)); isClickable = true; isFocusable = true
+    val allPages = roundStripButton(Kit.Icon(PageOrganizer.GRID, Glass.accent(night), c.dpi(20f)), PageStripAction.ALL.label).apply {
         setOnClickListener { openOrganizer() }
     }
     internal val chosenCount = TextView(c)
     private val bulkBar = LinearLayout(c)
+    /**
+     * P621 (design canvas board 10, "Slim-Bar"): the editor folded into one 26 dp strip under the status bar, in place of the
+     * app bar and the palette. [slimPeek] shows the tip of the pen under the finger; [foldToSlim] at the palette's end folds
+     * the full toolbar into the strip again and the strip's pin brings it back. Remembered as "slimBar"; off until chosen.
+     */
+    internal val slimBar = SlimBar(c, night)
+    internal val slimPeek = SlimPeek(c, night)
+    var slim = false
+        private set
+    val foldToSlim = android.widget.ImageView(c).apply {
+        setImageDrawable(Kit.Icon(SlimBar.FOLD, Glass.accent(night), c.dpi(22f))); scaleType = android.widget.ImageView.ScaleType.CENTER
+        contentDescription = "Fold into the slim bar"; tooltipText = contentDescription
+        background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(if (night) 0x30ffffff else 0x1f0a66d9),
+            rounded((Glass.accent(night) and 0xffffff) or 0x1f000000, c.dp(23f)), null)
+        isClickable = true; isFocusable = true
+    }
+    private lateinit var appBar: View
+    /** The full toolbar's controls and their places on the slim bar, so a menu opens from the slot that was tapped. */
+    private val slimAnchors = mutableMapOf<View, View>()
+    private val slimPens = mutableListOf<SlimBar.Slot>()
+    private val slimMarkers = mutableListOf<SlimBar.Slot>()
+    private val slimDots = mutableListOf<SlimBar.Slot>()
+    private val slimMirrors = mutableListOf<Pair<SlimBar.Slot, ChromeButton>>()
+    private val slimEdits = mutableListOf<SlimBar.Slot>()
+    private var slimName: SlimBar.Slot? = null
+    private var slimHold = false
 
     init {
-        (pens + listOf(library, previous, pages, next, pageSettings, insert, capture, study, search, share, more, panelToggle,
-            highlighter, eraser, paintBrush, lasso, shapes, undo, redo, zoomOut, fit, zoomIn)).forEach { it.glass = true; it.night = night }
+        matchToolButtons()
+        (listOf(addPen, addHighlighter, library, previous, pages, next, pageSettings, insert, capture, study, search, share, more, panelToggle,
+            eraser, paintBrush, lasso, shapes, undo, redo, zoomOut, fit, zoomIn)).forEach { it.glass = true; it.night = night }
+        listOf(addPen, addHighlighter).forEach { it.emphasis = true }
         (inkDots + allColours).forEach { it.night = night }
         library.emphasis = true
         eraser.uprightTool = ToolArt.Tool.ERASER; paintBrush.uprightTool = ToolArt.Tool.PAINT; lasso.uprightTool = ToolArt.Tool.LASSO; shapes.uprightTool = ToolArt.Tool.RULER
-        topChrome.addView(topBar(), LinearLayout.LayoutParams(MATCH_PARENT, c.dpi(TOP_BAR)))
+        topChrome.addView(topBar().also { appBar = it }, LinearLayout.LayoutParams(MATCH_PARENT, c.dpi(TOP_BAR)))
         topChrome.addView(faultBar(), LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         continuous.deskColor = if (activity.dark) Tokens.DESK_DARK else Tokens.DESK
         continuous.visibility = if (continuousMode) View.VISIBLE else View.GONE
@@ -301,16 +409,32 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         column.addView(stage, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         buildToolBar()
         placeToolBar()
+        root.addOnLayoutChangeListener { _, l, _, r, _, oldL, _, oldR, _ ->
+            val narrow = r - l in 1 until c.dpi(COMPACT_WIDTH)
+            if (narrow != compact) root.post { setCompact(narrow) }
+            if (r - l != oldR - oldL) root.post { fitSlim() }
+        }
+        toolBar.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val vertical = dock == Dock.LEFT || dock == Dock.RIGHT
+            if (vertical || compact || toolBar.width == 0) return@addOnLayoutChangeListener
+            val room = toolBar.width - toolBar.paddingLeft - toolBar.paddingRight
+            val wide = if (paletteScrolls) toolPill.measuredWidth - paletteScroll.measuredWidth + paletteRow.measuredWidth + c.dpi(16f) > room
+                else toolPill.measuredWidthAndState and View.MEASURED_STATE_TOO_SMALL != 0 || toolPill.measuredWidth > room
+            if (wide != paletteTooWide) { paletteTooWide = wide; toolBar.post { placeToolBar() } }
+        }
         val chrome = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> placeUnderChrome() }
         topChrome.addOnLayoutChangeListener(chrome); toolBar.addOnLayoutChangeListener(chrome); desk.addOnLayoutChangeListener(chrome)
         root.addView(column, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         root.addView(dockHint)
         root.addView(settingsScreen(), FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         pagePanel.onPageActions = { activity.pagePanelActions(it) }
+        pagePanel.onPageHeld = { id, bounds -> pageHoldBar.show(pagePanel, id, bounds, besideAnchor = true) }
+        pagePanel.onPageHeldEnd = { pageHoldBar.hide() }
         pagePanel.onPageSelected = { revealPage(it) }
         pagePanel.onRefused = { activity.message(it) }
-        pagePanel.night = night
+        pagePanel.night = night; pagePanel.background = null
         pagePanel.onChoiceChanged = { showPageChoice() }
+        pagePanel.onNewPage = { addPageAtEnd() }
         wireCanvas(primaryCanvas)
         buildPageStrip()
         continuous.onRenderFailed = { _, error -> activity.message("Page preview failed: $error") }
@@ -323,6 +447,11 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         }
         configureStrip()
         placePanel()
+        slimBar.onOver = ::slimOver
+        slimPeek.visibility = View.GONE; slimPeek.elevation = c.dp(8f)
+        stage.addView(slimPeek, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.LEFT))
+        foldToSlim.setOnClickListener { act { setSlim(true) } }
+        if (preferences.getBoolean("slimBar", false)) setSlim(true, refresh = false)
     }
 
     /** P176 (G1b): a fitted page, the continuous strip's ends and the selection bars stay clear of the floating chrome. */
@@ -330,19 +459,107 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val top = topChrome.height
         val bottom = if (dock == Dock.BOTTOM && toolBar.parent === stage) toolBar.height else 0
         if (top == chromeTop && bottom == chromeBottom) return
+        // P630: after an automatic fold the page stays where it was written on; the freed band stays free until the
+        // chrome grows back (pinning the full toolbar, which then has nothing to move) or the page is fitted anew.
+        if (pageHeld && top <= shownTop && bottom <= shownBottom) {
+            chromeTop = top; chromeBottom = bottom
+            layoutPanes(); positionSelectionBar(); placeStudy()
+            return
+        }
+        pageHeld = false
+        // P629: while the slim and full toolbars swap, the page glides to its new place instead of jumping there.
+        val glide = chromeTop > 0 && android.os.SystemClock.uptimeMillis() < glideUntil && android.animation.ValueAnimator.areAnimatorsEnabled()
         chromeTop = top; chromeBottom = bottom
-        applyPaneInsets()
+        if (glide) glidePage() else { stopGlide(); showInsets(top.toFloat(), bottom.toFloat()) }
         layoutPanes()
-        continuous.setInsets(top.toFloat(), bottom.toFloat())
         positionSelectionBar()
         placeStudy()
     }
+    /** P630: true from an automatic fold until the chrome grows back: the page keeps the insets it was written under. */
+    private var pageHeld = false
+    /** P630: "Fold into the slim bar when I write" (Settings, Pages & layout, Toolbar); off until chosen. */
+    internal var autoSlim: Boolean
+        get() = preferences.getBoolean(AUTO_SLIM, false)
+        set(value) { preferences.edit().putBoolean(AUTO_SLIM, value).apply() }
+    /** P630: a stroke was written; with [autoSlim] on, the full toolbar folds into the slim bar and the page stays still. */
+    private fun inkWritten() {
+        if (slim || !autoSlim || !root.isLaidOut || !slimFits || activity.libraryScreen != null || foldOnIdle != null) return
+        // Between strokes only: while a pen is still on the page, look again a little later.
+        val fold = object : Runnable {
+            override fun run() {
+                if (slim || !autoSlim || !slimFits || activity.libraryScreen != null) { foldOnIdle = null; return }
+                if (!idle) { root.postDelayed(this, 150); return }
+                foldOnIdle = null
+                pageHeld = true
+                act { setSlim(true) }
+            }
+        }
+        foldOnIdle = fold
+        root.post(fold)
+    }
+    private var foldOnIdle: Runnable? = null
+    /** P632: the slim bar fits across the editor (its buttons never shrink); unknown before the first layout counts as fitting. */
+    internal val slimFits get() = topChrome.width <= 0 || slimBar.needed() <= topChrome.width
+    /**
+     * P632: where the slim bar does not fit (a phone, or a tablet held upright with many pens and highlighters) the editor
+     * shows the full toolbar and hides the fold button; the slim bar chosen stays remembered and comes back once it fits
+     * again (turned back to landscape, or a pen removed). Pinning by hand still forgets it.
+     */
+    private fun fitSlim() {
+        if (topChrome.width <= 0) return
+        val fits = slimFits
+        val shown = if (fits) View.VISIBLE else View.GONE
+        if (foldToSlim.visibility != shown) foldToSlim.visibility = shown
+        val change = (slim && !fits) || (!slim && fits && preferences.getBoolean("slimBar", false))
+        if (!change) return
+        if (slimSwap != null || slimMotion != null) { root.postDelayed({ fitSlim() }, 200); return }
+        setSlim(!slim, remember = false)
+    }
+    /** P629: the floating chrome's height, for tests. */
+    internal val chromeHeight get() = topChrome.height
+    /** P629: the insets the page is fitted to right now; they trail [chromeTop] and [chromeBottom] while the page glides. */
+    private var shownTop = 0f
+    private var shownBottom = 0f
+    /** P629: until this uptime, a change in the chrome's height glides the page (set when the toolbars swap). */
+    private var glideUntil = 0L
+    private var pageGlide: android.animation.ValueAnimator? = null
+    private fun showInsets(top: Float, bottom: Float) {
+        shownTop = top; shownBottom = bottom
+        applyPaneInsets(top, bottom)
+        continuous.setInsets(top, bottom)
+    }
+    /** P629 (board 12's page): from the insets shown now to the chrome's, over PAGE_GLIDE ms, cubic-bezier(.2, .8, .2, 1). */
+    private fun glidePage() {
+        stopGlide()
+        val fromTop = shownTop; val fromBottom = shownBottom
+        val toTop = chromeTop.toFloat(); val toBottom = chromeBottom.toFloat()
+        val motion = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = PAGE_GLIDE; interpolator = android.view.animation.PathInterpolator(.2f, .8f, .2f, 1f)
+            addUpdateListener { val q = it.animatedValue as Float; showInsets(fromTop + (toTop - fromTop) * q, fromBottom + (toBottom - fromBottom) * q) }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (pageGlide !== animation) return
+                    pageGlide = null
+                    showInsets(chromeTop.toFloat(), chromeBottom.toFloat())
+                }
+            })
+        }
+        pageGlide = motion
+        motion.start()
+    }
+    /** P629: drops a glide where it is (a new one takes over from there). */
+    private fun stopGlide() { val motion = pageGlide ?: return; pageGlide = null; motion.cancel() }
+    /** P629: a touch on the page ends its glide at once, so the page never moves under a finger or pen. */
+    private fun finishGlide() { pageGlide?.end() }
 
     // ---- P530 (F081/F082): two panes under one shared toolbar. Each canvas keeps its own document, page and zoom. ----
     private fun wireCanvas(canvas: InkCanvas) {
         canvas.onPdfTextSelectionChanged = { positionSelectionBar() }
+        canvas.onTouchDown = { finishGlide() }
+        canvas.onInkWritten = { inkWritten() }
         canvas.onShapeSnapped = { kind, after -> showSnapToast(kind, after) }
-        canvas.onViewportChanged = { positionSelectionBar(); showFit(); zoomWriting?.viewportChanged(); if (addPageCard.covering) placeAddPage() }
+        canvas.onViewportChanged = { positionSelectionBar(); showFit(); zoomWriting?.viewportChanged(); placeAddPage() }
+        canvas.onBookFlipChanged = { placeAddPage() }
         canvas.onZoomWritingRequested = { openZoomWriting() }
         canvas.onFingerHold = { x, y -> quickRing(x, y) }
     }
@@ -353,7 +570,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     private val paneDivider by lazy { PaneDivider() }
     /** A pane's title strip: the notebook's name, the active pane's accent line, and Close on the companion. */
     private inner class PaneTab(private var canvas: InkCanvas?, closes: Boolean) : LinearLayout(c) {
-        private val name = Kit.text(c, "").apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.END; textSize = 13f }
+        private val name = Kit.text(c, "", name = true).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.END; textSize = 13f }
         private val line = android.graphics.Paint()
         var active = false; private set
         init {
@@ -447,10 +664,10 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     /** Portrait keeps two panes: each stays at least this wide, or half of a very narrow window. */
     private fun paneMin(width: Int) = minOf(c.dpi(PANE_MIN), width / 2)
     private fun paneSplit(width: Int) = (width * paneRatio).toInt().coerceIn(paneMin(width), width - paneMin(width))
-    private fun applyPaneInsets() {
-        val top = chromeTop + if (companionCanvas != null) c.dpi(PANE_TAB) else 0
-        primaryCanvas.setFitInsets(0f, top.toFloat(), 0f, chromeBottom.toFloat())
-        companionCanvas?.setFitInsets(0f, top.toFloat(), 0f, chromeBottom.toFloat())
+    private fun applyPaneInsets(top: Float = shownTop, bottom: Float = shownBottom) {
+        val paneTop = top + if (companionCanvas != null) c.dpi(PANE_TAB) else 0
+        primaryCanvas.setFitInsets(0f, paneTop, 0f, bottom)
+        companionCanvas?.setFitInsets(0f, paneTop, 0f, bottom)
     }
     private fun View.placeInDesk(left: Int, top: Int, width: Int, height: Int) {
         val params = layoutParams as FrameLayout.LayoutParams
@@ -587,7 +804,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
 
     fun setPanelOpen(open: Boolean): Boolean {
         if (!idle) return false
-        if (!open) pagePanel.stopChoosing()
+        if (!open) { pagePanel.stopChoosing(); pageHoldBar.hide() }
         panelOpen = open
         preferences.edit().putBoolean("pagePanelOpen", open).apply()
         placePanel(animate = open); activity.refresh()
@@ -601,10 +818,17 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val right = dock != Dock.RIGHT
         if (panelOpen) {
             val index = if (right) middle.childCount else 0
+            // P610: on a phone the notebook's name stands on its own strip under the bar; the card starts below it.
+            val nameStrip = if (compact && namedPill.parent === topChrome) {
+                namedPill.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                namedPill.measuredHeight
+            } else 0
             // P176 (G1b): the strip starts below the floating app bar and clears a docked tool bar.
+            // P607: it floats 12 dp in from the edge and the foot, 10 dp under the app bar, as on the board.
             middle.addView(pageStrip, index, LinearLayout.LayoutParams(c.dpi(PagePanel.PREFERRED_WIDTH_DP), MATCH_PARENT).apply {
-                topMargin = c.dpi(TOP_BAR) + if (dock == Dock.TOP) c.dpi(TOOL_STRIP) else 0
-                bottomMargin = if (dock == Dock.BOTTOM) c.dpi(TOOL_STRIP) else 0
+                topMargin = c.dpi(TOP_BAR + 10f) + nameStrip + if (dock == Dock.TOP) c.dpi(TOOL_STRIP) else 0
+                bottomMargin = c.dpi(12f) + if (dock == Dock.BOTTOM) c.dpi(TOOL_STRIP) else 0
+                if (right) marginEnd = c.dpi(12f) else marginStart = c.dpi(12f)
             })
             // Opening slides the strip in from its edge with a short fade; the page area resizes once, at the start.
             if (animate && Motion.enabled) {
@@ -641,6 +865,8 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val pages = repository.session?.notebook?.pages ?: return false
         if (continuousMode || !idle || !canAddPage || !atLastDisplayedPage) return false
         if (ink.pageRect == null) return false
+        // P585: the final spread's empty right slot already shows the new page; nothing slides over the pages.
+        if (ink.spreadEndsEmpty) return true
         addPageCard.paperColor = pages.last().paper.color.toInt()
         addPageCard.covering = true; placeAddPage()
         addPageCard.animate().cancel(); addPageCard.translationX = 0f; addPageCard.alpha = 1f
@@ -687,9 +913,16 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
 
     /** Follows the empty slot after the last page in continuous mode; keeps a shown card on the page in single-page mode. */
     private fun placeAddPage() {
+        // P585: in a landscape spread the new page has a fixed place. After an odd page count it waits in the final
+        // spread's empty right slot, always in view; after an even count a swipe past the end turns to a fresh spread
+        // with the new page on the left. It was put over whichever page was selected, hiding the last page in its place.
+        val spread = !continuousMode && ink.spreadSlots(addSlotLeft, addSlotRight)
+        fun card(r: RectF) = RectF(r).apply { offset(0f, -addPageCardTop.toFloat()) }
         addPageCard.ghost = when {
-            addPageCard.covering -> ink.pageRect?.let { RectF(it).apply { offset(0f, -addPageCardTop.toFloat()) } }
+            addPageCard.covering -> if (spread) card(addSlotLeft) else ink.pageRect?.let { card(it) }
             continuousMode -> continuous.addPageBounds?.takeIf { it.bottom > 0 && it.top < continuous.height }
+            // Not while a sheet turns over that slot.
+            spread && ink.spreadEndsEmpty && canAddPage && !ink.bookFlipActive -> card(addSlotRight)
             else -> null
         }
     }
@@ -779,7 +1012,6 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         if (opened && selected != null) restoreStrip(notebook!!.id, selected)
     }
 
-    val presets = PenPresets(preferences, ink.penStyle)
     /** Selects saved pen [index] as the drawing tool. Refused during pen or file activity. */
     fun selectPen(index: Int): Boolean {
         if (!idle) return false
@@ -817,7 +1049,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val slices = listOf(
             QuickRing.Slice(c, night, "Undo", "Undo", enabled = undo.isEnabled) { canvas, p -> Glyphs.draw(canvas, Glyph.UNDO, p) }.runs(undo, always = true),
             QuickRing.Slice(c, night, "Redo", "Redo", enabled = redo.isEnabled) { canvas, p -> Glyphs.draw(canvas, Glyph.REDO, p) }.runs(redo, always = true)
-        ) + pens.indices.map { index ->
+        ) + pens.indices.take(PenPresets.COUNT).let { if (presets.selected in it) it else it.take(PenPresets.COUNT - 1) + presets.selected }.map { index ->
             // Pens are told apart by their ink, as in the palette: the colour's name, else the pen kind.
             val style = presets[index]; val name = names[style.color] ?: style.kind.label
             QuickRing.Slice(c, night, name, "Pen ${index + 1}, ${style.kind.label}, $name", on = pens[index].active) { canvas, _ ->
@@ -833,8 +1065,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             QuickRing.Slice(c, night, "Lasso", "Lasso", on = lasso.active) { canvas, p -> Glyphs.draw(canvas, lasso.glyph ?: Glyph.LASSO_FREEFORM, p) }.runs(lasso),
             QuickRing.Slice(c, night, "Colour", "Colour, " + (names[now] ?: "saved colour %06X".format(now and 0xffffff))) { canvas, p -> QuickRing.swatch(canvas, now, night, p) }
                 .apply { setOnClickListener { ring?.dismiss(); act { colourCircle(allColours, drawingWithHighlighter, centre) { applyRingColor(it) } } } })
-        val pasteable = ink.canPasteInk
-        val label = ink.clipboardLabel
+        val (label, pasteable) = ink.pasteState()
         val paste = QuickRing.Slice(c, night, "Paste", if (pasteable) label else "Paste, nothing copied", enabled = pasteable,
             detail = if (pasteable) label.removePrefix("Paste ") else "Nothing copied") { canvas, p -> Glyphs.draw(canvas, Glyph.PASTE, p) }
         paste.setOnClickListener { val at = ink.pagePoint(x, y); ring?.dismiss(); act { if (idle && ink.canPasteInk) ink.pasteInk(at) } }
@@ -871,38 +1102,297 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         return true
     }
 
+    /**
+     * P578: a phone-width editor. Study (in the Search menu) and Share (its Export commands join the notebook menu) leave the
+     * top bar, Library shows only its arrow, the notebook's name moves to a strip under the bar, and the palette's tools scroll.
+     */
+    private fun setCompact(narrow: Boolean) {
+        if (narrow == compact) return
+        compact = narrow
+        listOf(record, share).forEach { it.visibility = if (narrow) View.GONE else View.VISIBLE }
+        (libraryPill.parent as? View)?.let { val side = c.dpi(if (narrow) 10f else 32f); it.setPadding(side, it.paddingTop, side, it.paddingBottom) }
+        library.text = if (narrow) null else "Library"
+        // The notebook's name and page stand on their own small strip under the bar, which keeps only buttons.
+        val bar = libraryPill.parent as ViewGroup
+        (namedPill.parent as? ViewGroup)?.removeView(namedPill)
+        namedPill.translationX = 0f
+        if (narrow) {
+            namedPill.setPadding(c.dpi(16f), c.dpi(5f), c.dpi(16f), c.dpi(6f)); namedPill.minimumWidth = 0
+            topChrome.addView(namedPill, if (slim) 2 else 1, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
+            val cap = (root.width - c.dpi(if (dock == Dock.LEFT || dock == Dock.RIGHT) 2 * TOOL_RAIL + 32f else 64f)).coerceAtLeast(c.dpi(120f))
+            title.maxWidth = cap; statusText.maxWidth = cap
+        } else {
+            namedPill.setPadding(c.dpi(26f), 0, c.dpi(26f), 0); namedPill.minimumWidth = c.dpi(180f)
+            bar.addView(namedPill, FrameLayout.LayoutParams(WRAP_CONTENT, c.dpi(52f), Gravity.CENTER))
+        }
+        namedPill.visibility = if (narrow && slim) View.GONE else View.VISIBLE
+        popover?.dismiss()
+        placeToolBar()
+        if (panelOpen) placePanel()
+    }
+
+    /**
+     * P621 (board 10): folds the app bar and the palette into the slim bar ([on]) or brings them back. The fault bar stays
+     * under it; the choice is remembered.
+     */
+    fun setSlim(on: Boolean, refresh: Boolean = true, remember: Boolean = true) {
+        if (on == slim) return
+        slimSwap?.invoke()
+        slimMotion?.cancel()
+        slim = on
+        if (remember) preferences.edit().putBoolean("slimBar", on).apply()
+        popover?.dismiss()
+        slimPeek.visibility = View.GONE
+        // P628 (board 12): folding dips the full bars away (up 8 dp, to 96%, fading), then the slim bar stretches out of
+        // its pin; pinning rolls the slim bar back into the pin, then the full bars drop in and their tools pop in one by
+        // one. P629: between the two halves the page glides to its new fit (placeUnderChrome) instead of jumping.
+        val animate = refresh && root.isLaidOut && android.animation.ValueAnimator.areAnimatorsEnabled()
+        val swap = {
+            slimSwap = null
+            slimMotion?.cancel()
+            if (animate) glideUntil = android.os.SystemClock.uptimeMillis() + PAGE_GLIDE_WINDOW
+            listOf(appBar, toolBar).forEach { dip(it, 0f, 1f) }
+            appBar.visibility = if (on) View.GONE else View.VISIBLE
+            if (namedPill.parent === topChrome) namedPill.visibility = if (on) View.GONE else View.VISIBLE
+            (slimBar.parent as? ViewGroup)?.removeView(slimBar)
+            if (on) topChrome.addView(slimBar, 0, LinearLayout.LayoutParams(MATCH_PARENT, c.dpi(SlimBar.HEIGHT)))
+            placeToolBar()
+            if (refresh) activity.refresh() else refreshSlim()
+        }
+        if (!animate) { swap(); return }
+        slimSwap = swap
+        if (!on) { slimBar.conceal { if (slimSwap === swap) { swap(); slimDrop() } }; return }
+        val leaving = listOfNotNull(appBar.takeIf { it.isShown }, toolBar.takeIf { it.isShown })
+        slimPlay(SLIM_DIP, { t ->
+            val q = SlimBar.AWAY.getInterpolation((t / SLIM_DIP).coerceIn(0f, 1f))
+            leaving.forEach { dip(it, q, (1 - t / SLIM_DIP_FADE).coerceIn(0f, 1f)) }
+        }) { if (slimSwap === swap) { swap(); slimBar.reveal() } }
+    }
+    /** P626: the half of the fold still to come, run at once if the bar is folded or pinned again before it ends. */
+    private var slimSwap: (() -> Unit)? = null
+    /** P628: the full bars' own part of the fold, or null. */
+    private var slimMotion: android.animation.ValueAnimator? = null
+    /** P628: false while the fold or the pin is still moving. */
+    internal val slimSettled get() = slimMotion == null && slimSwap == null && slimBar.settled && pageGlide == null
+    /** Runs [frame] with the time in ms from 0 to [total], then [end] (also when cut short). */
+    private fun slimPlay(total: Float, frame: (Float) -> Unit, end: () -> Unit) {
+        slimMotion?.cancel()
+        val motion = android.animation.ValueAnimator.ofFloat(0f, total).apply {
+            duration = total.toLong(); interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener { frame(it.animatedValue as Float) }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (slimMotion === animation) slimMotion = null
+                    end()
+                }
+            })
+        }
+        slimMotion = motion
+        frame(0f)
+        motion.start()
+    }
+    /** A full bar [q] of the way to gone: up 8 dp and down to 96% from its top centre, at opacity [alpha]. */
+    private fun dip(view: View, q: Float, alpha: Float) {
+        view.pivotX = view.width / 2f; view.pivotY = 0f
+        val s = 1 - .04f * q
+        view.scaleX = s; view.scaleY = s; view.translationY = -c.dp(8f) * q; view.alpha = alpha
+    }
+    /** P628: the full bars drop back in, the palette 50 ms after the app bar, then its tools pop in one by one. */
+    private fun slimDrop() {
+        val bars = listOfNotNull(appBar, toolBar.takeIf { it.parent != null && it.visibility == View.VISIBLE })
+        val tools = (pens + addPen + highlighters + addHighlighter + eraser + paintBrush + lasso + shapes)
+            .filter { it.parent != null && it.visibility == View.VISIBLE }
+        val kept = tools.map { it.alpha }
+        val total = maxOf(SLIM_PALETTE + SLIM_DROP, SLIM_TOOLS + (tools.size - 1).coerceAtLeast(0) * SLIM_TOOL_STEP + SLIM_TOOL)
+        slimPlay(total, { t ->
+            bars.forEachIndexed { i, view ->
+                val d = i * SLIM_PALETTE
+                dip(view, 1 - SlimBar.SOFT.getInterpolation(((t - d) / SLIM_DROP).coerceIn(0f, 1f)), ((t - d) / SLIM_DROP_FADE).coerceIn(0f, 1f))
+            }
+            tools.forEachIndexed { i, tool ->
+                val d = SLIM_TOOLS + i * SLIM_TOOL_STEP
+                val q = SlimBar.SPRING.getInterpolation(((t - d) / SLIM_TOOL).coerceIn(0f, 1f))
+                val s = .8f + .2f * q
+                tool.scaleX = s; tool.scaleY = s; tool.translationY = c.dp(6f) * (1 - q)
+                tool.alpha = kept[i] * ((t - d) / SLIM_TOOL_FADE).coerceIn(0f, 1f)
+            }
+        }) {
+            bars.forEach { dip(it, 0f, 1f) }
+            tools.forEachIndexed { i, tool -> tool.scaleX = 1f; tool.scaleY = 1f; tool.translationY = 0f; tool.alpha = kept[i] }
+        }
+    }
+    /** P621: the slim bar's slots, built again when a pen or highlighter is added or removed. */
+    private fun buildSlim() {
+        slimAnchors.clear(); slimPens.clear(); slimMarkers.clear(); slimDots.clear(); slimMirrors.clear(); slimEdits.clear()
+        val bar = slimBar
+        fun slot(kind: SlimBar.Kind, w: Float, label: String, path: String? = null, mirror: ChromeButton? = null, tap: () -> Unit) =
+            bar.Slot(kind, w, label, path).also { s ->
+                s.setOnClickListener { tap() }
+                mirror?.let { slimAnchors[it] = s; slimMirrors += s to it }
+            }
+        val divider = { bar.Slot(SlimBar.Kind.DIVIDER) }
+        val left = mutableListOf<SlimBar.Slot>()
+        left += slot(SlimBar.Kind.ACTION, SlimBar.BACK_W, "Back to the Library", SlimBar.BACK, library) { library.performClick() }
+        left += slot(SlimBar.Kind.NAME, 0f, "Rename notebook") { if (title.isEnabled) activity.renameDialog() }.also { slimName = it; slimAnchors[namedPill] = it }
+        left += bar.Slot(SlimBar.Kind.GAP)
+        fun tools(buttons: List<ChromeButton>, highlighter: Boolean, into: MutableList<SlimBar.Slot>) = buttons.forEachIndexed { index, button ->
+            val s = bar.Slot(SlimBar.Kind.PEN, SlimBar.PEN_W, if (highlighter) "Highlighter ${index + 1}" else "Pen ${index + 1}")
+            s.marker = highlighter
+            s.setOnClickListener { slimTool(highlighter, index) }
+            s.setOnLongClickListener { act { offerRemove(button, highlighter, index) }; true }
+            slimAnchors[button] = s; into += s; left += s
+        }
+        tools(pens, false, slimPens)
+        left += slot(SlimBar.Kind.ADD, SlimBar.ADD_W, "Add a pen", SlimBar.ADD, addPen) { addPen.performClick() }
+        left += divider()
+        tools(highlighters, true, slimMarkers)
+        left += slot(SlimBar.Kind.ADD, SlimBar.ADD_W, "Add a highlighter", SlimBar.ADD, addHighlighter) { addHighlighter.performClick() }
+        left += divider()
+        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Eraser", SlimBar.ERASER, eraser) { eraser.performClick() }
+        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Lasso", SlimBar.LASSO, lasso) { lasso.performClick() }
+        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Shapes", SlimBar.SHAPES, shapes) { shapes.performClick() }
+        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Text box", SlimBar.TEXT) { runCommand(EditorCommand.TEXT) }.also { slimEdits += it }
+        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Study tape", MenuIcons.TAPE) { slimTape() }.also { slimEdits += it }
+        left += divider()
+        repeat(3) { left += slot(SlimBar.Kind.COLOUR, SlimBar.COLOUR_W, "Colour") { }.also { slimDots += it } }
+        slimDots.forEach { s -> s.setOnClickListener { s.colour?.let { color -> act { applyRingColor(color.toLong() and 0xffffffffL) } } } }
+        val right = listOf(
+            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Undo", SlimBar.UNDO, undo) { undo.performClick() },
+            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Redo", SlimBar.REDO, redo) { redo.performClick() },
+            divider(),
+            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Study", SlimBar.STUDY, study) { study.performClick() },
+            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Search", SlimBar.SEARCH, search) { search.performClick() },
+            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Notebook menu", SlimBar.MORE, more) { more.performClick() },
+            divider(),
+            slot(SlimBar.Kind.PIN, SlimBar.PIN_W, "Pin the full toolbar", SlimBar.PIN) { act { setSlim(false) } })
+        bar.setSlots(left, right)
+        refreshSlim()
+        root.post { fitSlim() }
+    }
+    /**
+     * P621: a pen or highlighter not yet held is taken. P623: the one held opens its whole board (kind, colour, size,
+     * opacity and the rest) by its slim slot, as its button does on the full toolbar, in place of the small card.
+     */
+    private fun slimTool(highlighter: Boolean, index: Int) {
+        val button = (if (highlighter) highlighters else pens).getOrNull(index) ?: return
+        if (button.isEnabled) button.performClick()
+    }
+    /** P621: study tape covers the lasso's ink; with nothing chosen it covers or reveals the page's tape, else asks for the lasso. */
+    private fun slimTape() {
+        if (!idle) return
+        when {
+            ink.lassoEnabled && ink.selectedIds.isNotEmpty() && !repository.readOnly -> act { ink.tapeSelection(); activity.refresh() }
+            commandEnabled(EditorCommand.TAPE) -> runCommand(EditorCommand.TAPE)
+            else -> { if (!ink.lassoEnabled && lasso.isEnabled) lasso.performClick(); activity.message("Circle ink with the lasso, then tap Study tape to cover it.") }
+        }
+    }
+    /** P621: the name the peek and the card give a pen ("Fountain pen") or a highlighter ("Highlighter, yellow chisel"). */
+    internal fun slimLabel(style: PenStyle, highlighter: Boolean) = if (highlighter) {
+        "Highlighter, ${ColorNames.of(style.color)} ${if (style.width <= ToolArt.FINE_HIGHLIGHTER) "fine" else "chisel"}"
+    } else when (style.kind) {
+        PenKind.PRESSURE -> "Pressure pen"; PenKind.BALLPOINT -> "Ballpoint"; PenKind.DASHED -> "Dashed pen"; PenKind.CALLIGRAPHY -> "Calligraphy"
+        PenKind.PENCIL -> "Pencil"; PenKind.FOUNTAIN -> "Fountain pen"; PenKind.FOUNTAIN_SOFT -> "Soft fountain pen"
+    }
+    /** P621: the faded tip of the pen under the finger, glided from pen to pen; hidden over other slots and while a card is open. */
+    private fun slimOver(slot: SlimBar.Slot?) {
+        val style = slot?.style
+        if (slot == null || slot.kind != SlimBar.Kind.PEN || style == null || !slot.isEnabled || popover?.window?.isShowing == true) {
+            slimPeek.animate().cancel(); slimPeek.visibility = View.GONE; return
+        }
+        slimPeek.show(style, slot.marker, slimLabel(style, slot.marker))
+        val w = c.dp(SlimPeek.WIDTH)
+        val x = (slimBar.left + slot.left + slot.width / 2f - w / 2).coerceIn(c.dp(4f), maxOf(c.dp(4f), stage.width - w - c.dp(4f)))
+        val y = topChrome.top + slimBar.bottom.toFloat()
+        if (slimPeek.visibility == View.VISIBLE) slimPeek.animate().translationX(x).translationY(y).alpha(1f).setDuration(160).start()
+        else {
+            slimPeek.translationX = x; slimPeek.translationY = y - c.dp(4f); slimPeek.alpha = 0f
+            slimPeek.visibility = View.VISIBLE; slimPeek.bringToFront()
+            slimPeek.animate().translationY(y).alpha(1f).setDuration(180).start()
+        }
+    }
+    /** P621: the slim bar follows the full toolbar: chosen tools, enabled states, the pens' looks and the colour dots. */
+    private fun refreshSlim() {
+        if (!slim) return
+        slimBar.holding = slimHold
+        slimPens.forEachIndexed { index, s ->
+            val button = pens.getOrNull(index) ?: return@forEachIndexed
+            s.style = presets[index]; s.chosen = button.active; s.isEnabled = button.isEnabled
+            s.contentDescription = "Pen ${index + 1}, ${slimLabel(presets[index], false)}" + if (button.active) ", selected" else ""
+        }
+        slimMarkers.forEachIndexed { index, s ->
+            val button = highlighters.getOrNull(index) ?: return@forEachIndexed
+            s.style = markers[index]; s.chosen = button.active; s.isEnabled = button.isEnabled
+            s.contentDescription = slimLabel(markers[index], true).let { if (highlighters.size > 1) it.replaceFirst("Highlighter", "Highlighter ${index + 1}") else it } +
+                if (button.active) ", selected" else ""
+        }
+        slimMirrors.forEach { (s, button) ->
+            s.isEnabled = button.isEnabled; s.chosen = button.active
+            s.contentDescription = s.label + if (!button.active) "" else if (button === shapes) ", shape pen on" else ", selected"
+        }
+        slimEdits.forEach { it.isEnabled = lasso.isEnabled }
+        slimName?.let { it.text = title.text.toString(); it.isEnabled = title.isEnabled }
+        val marker = drawingWithHighlighter
+        val colors = InkColors(preferences).quick(marker).take(slimDots.size)
+        val current = (if (marker) ink.highlighterStyle else ink.penStyle).color
+        val drawing = !ink.eraser && !ink.lassoEnabled
+        slimDots.forEachIndexed { index, s ->
+            val color = colors.getOrNull(index)
+            val shown = if (color == null) View.INVISIBLE else View.VISIBLE
+            if (s.visibility != shown) s.visibility = shown
+            s.colour = color?.toInt(); s.chosen = drawing && color == current; s.isEnabled = pens.first().isEnabled
+            s.contentDescription = (color?.let { ColorNames.of(it).replaceFirstChar { ch -> ch.uppercase() } } ?: "Colour") + if (s.chosen) ", selected" else ""
+        }
+    }
+    /** P621: in the slim bar a menu of a hidden full-toolbar control opens from its slot, or from the notebook menu's. */
+    private fun shown(anchor: View): View = if (!slim || anchor.isShown) anchor else slimAnchors[anchor] ?: slimAnchors[more] ?: anchor
+
     private fun placeToolBar() {
         (toolBar.parent as? ViewGroup)?.removeView(toolBar)
         val vertical = dock == Dock.LEFT || dock == Dock.RIGHT
         val bar = c.dpi(if (vertical) TOOL_RAIL else TOOL_STRIP)
         toolBar.orientation = if (vertical) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         // P186: the palette floats 14 dp from its edge; a rail's two columns stand a little closer to theirs.
-        val edge = c.dpi(if (vertical) 6f else 14f)
+        val edge = c.dpi(if (vertical) 6f else 12f)
         toolBar.gravity = when (dock) {
             Dock.BOTTOM -> Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM; Dock.TOP -> Gravity.CENTER_HORIZONTAL or Gravity.TOP
             Dock.LEFT -> Gravity.CENTER_VERTICAL or Gravity.LEFT; Dock.RIGHT -> Gravity.CENTER_VERTICAL or Gravity.RIGHT
         }
         when (dock) {
             Dock.BOTTOM -> toolBar.setPadding(0, 0, 0, edge); Dock.TOP -> toolBar.setPadding(0, c.dpi(4f), 0, 0)
-            Dock.LEFT -> toolBar.setPadding(edge, 0, 0, 0); Dock.RIGHT -> toolBar.setPadding(0, 0, edge, 0)
+            // P591: a rail keeps 10 dp clear of the screen's foot, so a rail that fills the height keeps its rounded end.
+            Dock.LEFT -> toolBar.setPadding(edge, 0, 0, c.dpi(10f)); Dock.RIGHT -> toolBar.setPadding(0, 0, edge, c.dpi(10f))
         }
         listOf(toolPill, toolGroup, zoomGroup, dotGroup).forEach { it.orientation = toolBar.orientation; it.gravity = Gravity.CENTER }
+        // P578: a top or bottom palette on a phone keeps its handle and Undo/Redo still and scrolls its tools and colours.
+        val scrolls = (compact || paletteTooWide) && !vertical
+        toolPill.removeAllViews(); paletteRow.removeAllViews(); railColumn.removeAllViews()
+        listOf(grip, undoGroup, historyRule).forEach { toolPill.addView(it) }
+        val into = if (scrolls) paletteRow else if (vertical) railColumn else toolPill
+        listOf(toolGroup, zoomGroup, colourRule, dotGroup).forEach { into.addView(it) }
+        (foldToSlim.parent as? ViewGroup)?.removeView(foldToSlim)
+        // P631: a palette that scrolls keeps the fold button still at its end, as the handle and Undo/Redo stay still at its
+        // start, so the slim bar is one tap away in tablet portrait and on a phone, not at the far end of the scroll.
+        val fold = LinearLayout.LayoutParams(c.dpi(46f), c.dpi(46f)).apply {
+            gravity = Gravity.CENTER; if (vertical) { topMargin = c.dpi(6f); bottomMargin = c.dpi(4f) } else { marginStart = c.dpi(6f) }
+        }
+        if (!scrolls) into.addView(foldToSlim, fold)
+        if (scrolls) { toolPill.addView(paletteScroll); toolPill.addView(foldToSlim, fold) } else if (vertical) toolPill.addView(railScroll)
         // Undo and Redo stand side by side at every edge (P186 review: stacked, they made the palette too thick).
         undoGroup.orientation = LinearLayout.HORIZONTAL; undoGroup.gravity = Gravity.CENTER
         // The handle lies at the palette's start, inside its rounded end.
         if (vertical) toolPill.setPadding(0, c.dpi(4f), 0, c.dpi(10f)) else toolPill.setPadding(c.dpi(6f), 0, c.dpi(14f), 0)
         grip.across = vertical
-        grip.layoutParams = LinearLayout.LayoutParams(if (vertical) c.dpi(96f) else c.dpi(36f), if (vertical) c.dpi(38f) else c.dpi(76f))
+        grip.layoutParams = LinearLayout.LayoutParams(if (vertical) c.dpi(96f) else c.dpi(36f), if (vertical) c.dpi(38f) else c.dpi(ChromeButton.SLOT))
         // The board's hairlines between history, tools and colours, 44 dp in the shorter palette.
         fun rule(view: View, before: Float, after: Float) {
-            view.layoutParams = LinearLayout.LayoutParams(if (vertical) c.dpi(72f) else c.dpi(1f), if (vertical) c.dpi(1f) else c.dpi(44f)).apply {
+            view.layoutParams = LinearLayout.LayoutParams(if (vertical) c.dpi(72f) else c.dpi(1f), if (vertical) c.dpi(1f) else c.dpi(40f)).apply {
                 if (vertical) { topMargin = c.dpi(before); bottomMargin = c.dpi(after) } else { marginStart = c.dpi(before); marginEnd = c.dpi(after) }
             }
         }
         rule(historyRule, 4f, 8f); rule(colourRule, 8f, 8f)
         // P560: every tool looks the same at every edge: tip up, sunk in its slot until it is chosen. A rail keeps them
         // upright in rows of two, each row on a hairline shelf, so the whole palette fits a landscape screen.
-        val tools = pens + highlighter + eraser + paintBrush + lasso + shapes
+        val tools = pens + addPen + highlighters + addHighlighter + eraser + paintBrush + lasso + shapes
         val dots = inkDots + allColours
         arrange(toolGroup, tools, vertical, shelves = true)
         arrange(dotGroup, dots, vertical)
@@ -912,10 +1402,13 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             it.layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
         }
         dots.forEach { it.layoutParams = LinearLayout.LayoutParams(if (vertical) c.dpi(48f) else c.dpi(40f), if (vertical) c.dpi(42f) else WRAP_CONTENT) }
-        toolPill.layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+        toolPill.layoutParams = if (scrolls) LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { marginStart = c.dpi(8f); marginEnd = c.dpi(8f) }
+            else LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+        paletteScroll.layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+        railScroll.layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
         listOf(toolGroup, zoomGroup, dotGroup, undoGroup).forEach { it.layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT) }
         // P176 (G1b): top and bottom bars float over the page; side rails stand beside it, below the app bar.
-        when (dock) {
+        if (!slim) when (dock) {
             Dock.TOP -> topChrome.addView(toolBar, LinearLayout.LayoutParams(MATCH_PARENT, bar))
             Dock.BOTTOM -> stage.addView(toolBar, FrameLayout.LayoutParams(MATCH_PARENT, bar, Gravity.BOTTOM))
             Dock.LEFT -> middle.addView(toolBar, 0, LinearLayout.LayoutParams(bar, MATCH_PARENT).apply { topMargin = c.dpi(TOP_BAR) })
@@ -1000,7 +1493,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     /** P175 (G1): a frosted Glass pill floating on the desk. */
     private fun pill(vararg views: View) = LinearLayout(c).apply {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-        background = Glass.pane(c, night); elevation = dp(6f)
+        background = Glass.pane(c, night); elevation = dp(8f)
         setPadding(dpi(2f), dpi(2f), dpi(2f), dpi(2f))
         views.forEach { addView(it) }
     }
@@ -1056,9 +1549,10 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         // The title never runs under the side pills: centred on the screen when it fits, else in the room between them,
         // and capped to that room.
         addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (namedPill.parent !== this) return@addOnLayoutChangeListener
             val gapLeft = libraryPill.right + dpi(12f); val gapRight = actionPill.left - dpi(12f)
             val cap = maxOf(dpi(68f), gapRight - gapLeft - dpi(52f))
-            if (title.maxWidth != cap) post { title.maxWidth = cap; statusText.maxWidth = cap }
+            if (title.maxWidth != cap) post { if (namedPill.parent === this) { title.maxWidth = cap; statusText.maxWidth = cap } }
             val shift = when {
                 namedPill.left < gapLeft || namedPill.right > gapRight -> (gapLeft + gapRight) / 2f - (namedPill.left + namedPill.right) / 2f
                 else -> 0f
@@ -1075,33 +1569,17 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         // B14: only Fit is shown, and P186 shows it only while the page is zoomed; pinch zooms. zoomOut/zoomIn stay detached.
         zoomGroup.apply { addView(fit) }
         toolPill.apply {
-            background = Glass.pane(c, night, 36f); elevation = dp(10f); clipChildren = true
+            background = Glass.pane(c, night, 29f); elevation = dp(10f); clipChildren = true
             addView(grip); addView(undoGroup); addView(historyRule); addView(toolGroup); addView(zoomGroup); addView(colourRule); addView(dotGroup)
         }
         addView(toolPill)
         bindGrip()
         inkDots.forEach { dot -> dot.setOnClickListener { dot.color?.let { color -> act { applyRingColor(color.toLong() and 0xffffffffL) } } } }
         allColours.onTap { colourCircle(allColours, drawingWithHighlighter) { applyRingColor(it) } }
-        // Tapping the active tool again opens its settings; tapping another tool selects it.
-        pens.forEachIndexed { index, button ->
-            button.onTap {
-                if(ink.laserEnabled) ink.selectLaser(false)
-                if (button.active) open(button, width = 452f, toward = true, tool = true) {
-                    ToolControls.pen(it, ink, "Pen ${index + 1} of ${pens.size}") {
-                        colourCircle(button, highlighter = false) { color -> ink.selectPenStyle(ink.penStyle.copy(color = color)); activity.refresh() }
-                    }
-                }
-                else { selectPen(index); tick(button) }
-            }
-        }
-        highlighter.onTap { if(ink.laserEnabled) ink.selectLaser(false);
-            if (highlighter.active) open(highlighter, width = 452f, toward = true, tool = true) {
-                ToolControls.highlighter(it, ink) {
-                    colourCircle(highlighter, highlighter = true) { color -> ink.selectHighlighterStyle(ink.highlighterStyle.copy(color = color)); activity.refresh() }
-                }
-            }
-            else { ink.selectLasso(false); ink.eraser = false; ink.painter = false; ink.selectHighlighter(true); tick(highlighter); activity.refresh() }
-        }
+        // Tapping the active tool again opens its settings; tapping another tool selects it. The pens and highlighters are
+        // bound in matchToolButtons, as they come and go (P619).
+        addPen.onTap { chooseNewTool(highlighter = false) }
+        addHighlighter.onTap { chooseNewTool(highlighter = true) }
         eraser.onTap { if(ink.laserEnabled) ink.selectLaser(false);
             if (eraser.active) open(eraser, width = 420f, toward = true, tool = true) { ToolControls.eraser(it, ink) { activity.refresh() } }
             else { ink.selectHighlighter(false); ink.selectLasso(false); ink.eraser = true; tick(eraser); activity.refresh() }
@@ -1126,6 +1604,124 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         // F089: long-press Fit locks or unlocks the zoom level.
         fit.setOnLongClickListener { act { ink.selectZoomLock(!ink.zoomLocked); tick(fit); activity.refresh() }; true }
         zoomIn.onTap { ink.zoom(1.25f) }
+    }
+
+    /** P619: one button per saved pen and highlighter, bound to its place; called again after one is added or removed. */
+    private fun matchToolButtons() {
+        fun match(buttons: MutableList<ChromeButton>, count: Int, name: String, bind: (Int, ChromeButton) -> Unit) {
+            while (buttons.size > count) buttons.removeAt(buttons.lastIndex)
+            while (buttons.size < count) buttons += ChromeButton(c, "$name ${buttons.size + 1}").also { it.glass = true; it.night = night }
+            buttons.forEachIndexed { index, button -> bind(index, button) }
+        }
+        match(pens, presets.size, "Pen", ::bindPen)
+        match(highlighters, markers.size, "Highlighter", ::bindHighlighter)
+        buildSlim()
+    }
+    private fun bindPen(index: Int, button: ChromeButton) {
+        button.onTap {
+            if(ink.laserEnabled) ink.selectLaser(false)
+            if (button.active) openTool(button) {
+                ToolControls.pen(it, ink, "Pen ${index + 1} of ${pens.size}") {
+                    colourCircle(button, highlighter = false) { color -> ink.selectPenStyle(ink.penStyle.copy(color = color)); activity.refresh() }
+                }
+            }
+            else { selectPen(index); tick(button) }
+        }
+        button.setOnLongClickListener { act { offerRemove(button, highlighter = false, index) }; true }
+    }
+    private fun bindHighlighter(index: Int, button: ChromeButton) {
+        button.onTap {
+            if(ink.laserEnabled) ink.selectLaser(false)
+            if (button.active) openTool(button) {
+                ToolControls.highlighter(it, ink) {
+                    colourCircle(button, highlighter = true) { color -> ink.selectHighlighterStyle(ink.highlighterStyle.copy(color = color)); activity.refresh() }
+                }
+            }
+            else { selectHighlighter(index); tick(button) }
+        }
+        button.setOnLongClickListener { act { offerRemove(button, highlighter = true, index) }; true }
+    }
+    /** P619: chooses saved highlighter [index] as the drawing tool. */
+    fun selectHighlighter(index: Int) {
+        markers.select(index)
+        if (ink.highlighterStyle != markers[index]) ink.selectHighlighterStyle(markers[index])
+        ink.selectLasso(false); ink.eraser = false; ink.painter = false; ink.selectHighlighter(true)
+        activity.refresh()
+    }
+    /**
+     * P619 (board 10): the + after the pens or the highlighters adds one in a colour not on the bar yet, chooses it and
+     * opens its settings, so its kind, colour and size can be picked. Up to [PenPresets.MAX] of each.
+     */
+    internal fun addTool(highlighter: Boolean, openSettings: Boolean = true, kind: PenKind? = null, fine: Boolean? = null): Boolean {
+        if (!idle || repository.readOnly) return false
+        val store = if (highlighter) markers else presets
+        if (!store.canAdd) return false
+        val index = store.add()
+        matchToolButtons(); placeToolBar()
+        if (highlighter) selectHighlighter(index) else selectPen(index)
+        // P625: the + menu's choice: the new pen takes that kind; the new highlighter a chisel or a fine width.
+        if (kind != null && !highlighter) { ink.selectPenStyle(ink.penStyle.copy(kind = kind)); presets.sync(ink.penStyle) }
+        if (fine != null && highlighter) {
+            val width = ink.highlighterStyle.width
+            val next = if (fine) width.takeIf { it <= ToolArt.FINE_HIGHLIGHTER } ?: ToolArt.FINE_MARKER else width.takeIf { it > ToolArt.FINE_HIGHLIGHTER } ?: ToolArt.CHISEL_MARKER
+            ink.selectHighlighterStyle(ink.highlighterStyle.copy(width = next)); markers.sync(ink.highlighterStyle)
+        }
+        if (kind != null || fine != null) activity.refresh()
+        val button = (if (highlighter) highlighters else pens)[index]
+        if (openSettings) button.post { if ((button.isAttachedToWindow || slim) && button.active) button.performClick() }
+        return true
+    }
+    /**
+     * P625: the + after the pens or the highlighters opens a menu of what to add, the six pen kinds or a chisel or fine
+     * highlighter, each drawn as it looks; choosing one adds it, in a colour not on the bar yet, and takes it.
+     */
+    internal fun chooseNewTool(highlighter: Boolean) {
+        val add = if (highlighter) addHighlighter else addPen
+        if (!add.isEnabled || !idle || repository.readOnly || justClosed(add)) return
+        val pen = if (night) 0xffe8ebf2.toInt() else Tokens.INK
+        val marker = ToolArt.mix(0xffffe600.toInt(), Tokens.INK, .1f)
+        val choices = if (highlighter) listOf(
+            AddChoice(c, ToolArt.Tool.HIGHLIGHTER, "Chisel", marker) to { addTool(true, openSettings = false, fine = false) },
+            AddChoice(c, ToolArt.Tool.HIGHLIGHTER, "Fine", marker, fine = true) to { addTool(true, openSettings = false, fine = true) })
+        else ToolArt.PEN_KINDS.map { kind -> AddChoice(c, ToolArt.of(kind), kind.label, pen) to { addTool(false, openSettings = false, kind = kind) } }
+        open(add, width = if (highlighter) 268f else 452f, toward = true, tool = true, passThrough = true) { column ->
+            ToolControls.title(column, if (highlighter) "Add a highlighter" else "Add a pen")
+            column.addView(LinearLayout(c).apply {
+                choices.forEach { (tile, choose) ->
+                    tile.setOnClickListener { popover?.dismiss(); choose() }
+                    addView(tile, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
+                }
+            }, LinearLayout.LayoutParams(MATCH_PARENT, c.dpi(AddChoice.TALL)).apply { topMargin = c.dpi(12f) })
+        }
+    }
+    /** P619: holding a pen or highlighter offers to remove it; the last one of each stays. */
+    private fun offerRemove(button: ChromeButton, highlighter: Boolean, index: Int) {
+        if (!button.isEnabled) return
+        shown(button).performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        slimPeek.visibility = View.GONE
+        val store = if (highlighter) markers else presets
+        val name = if (highlighter) "highlighter" else "pen"
+        open(button, width = 280f, toward = true, tool = true) { column ->
+            ToolControls.title(column, (if (highlighter) "Highlighter " else "Pen ") + (index + 1))
+            if (store.canRemove) column.addView(ToolControls.pill(c, "Remove this $name", MenuIcons.TRASH) {
+                popover?.dismiss(); act { removeTool(highlighter, index) }
+            }, ToolControls.pillParams(c))
+            else column.addView(ToolControls.tileCaption(c, "Your only $name stays. Add another with +."))
+        }
+    }
+    /** P619: removes saved pen or highlighter [index] (never the last); a removed chosen one hands over to its neighbour. */
+    internal fun removeTool(highlighter: Boolean, index: Int): Boolean {
+        if (!idle || repository.readOnly) return false
+        val store = if (highlighter) markers else presets
+        if (!store.canRemove || index !in 0 until store.size) return false
+        val chosen = index == store.selected
+        store.remove(index)
+        // The buttons match the shorter list first: choosing a style refreshes the tool bar at once.
+        matchToolButtons(); placeToolBar()
+        // The live style follows the new choice before anything syncs the removed one into it.
+        if (chosen) { if (highlighter) ink.selectHighlighterStyle(markers[markers.selected]) else ink.selectPenStyle(presets[presets.selected]) }
+        activity.refresh()
+        return true
     }
 
     /** Fault bar actions are pills: the first (primary) filled white, the rest outlined; disabled ones fade. */
@@ -1211,7 +1807,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         if ((moved && (popover == null || popover !== refinePopover)) || selectionBar.visibility != View.VISIBLE) popover?.dismiss()
     }
 
-    private fun settingsScreen() = settings.apply { visibility = View.GONE; isClickable = true }
+    private fun settingsScreen() = settings.apply { visibility = View.GONE; Kit.blockTouches(this) }
     /** P567: public builds only, beside the app's name and version. */
     private fun updateButton() = if (c.personalTools) null else Kit.button(c, "Check for updates", Kit.Button.TINTED, small = true) { UpdateCheck.show(c) }
     fun openSettings() {
@@ -1255,8 +1851,12 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         fun LinearLayout.put(view: View) = addView(view, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         // P569: the guide sits first where someone looks when a gesture doesn't do what they expected.
-        fun guide(page: LinearLayout) = block(page, "Gesture guide") { card ->
-            card.addView(Kit.row(c, "Gestures", "What fingers and pens do on the page.", chevron = true) { GestureGuide.show(activity) })
+        val guides = mutableListOf<View>()
+        fun guide(page: LinearLayout) {
+            block(page, "Gesture guide") { card ->
+                card.addView(Kit.row(c, "Gestures", "What fingers and pens do on the page.", chevron = true) { GestureGuide.show(activity) })
+            }
+            guides += blocks[settingsPages.indexOf(page)].last().first
         }
         val pen = page("Pen & stylus")
         guide(pen)
@@ -1276,7 +1876,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
                 it.addView(ToolControls.demo(GestureDemo(c, GestureDemo.Kind.HOLD)))
                 it.put(Kit.slider(c, "Hold delay", 250f, 1500f, ink.holdSettings.delayMs.toFloat(), { value -> "${value.toInt()} ms" },
                     { value -> (value / 50).toInt() * 50f }) { value -> ink.selectHoldSettings(ink.holdSettings.copy(delayMs = value.toLong())) })
-                it.put(Kit.slider(c, "Movement tolerance", .5f, 3f, ink.holdSettings.toleranceMm, { value -> "%.1f mm".format(value) },
+                it.put(Kit.slider(c, "Movement tolerance", .5f, 3f, ink.holdSettings.toleranceMm, { value -> "%.1f mm".format(java.util.Locale.ROOT, value) },
                     { value -> kotlin.math.round(value * 10) / 10 }) { value -> ink.selectHoldSettings(ink.holdSettings.copy(toleranceMm = value)) })
                 it.put(note("Choose Freehand, Line or Shapes separately in each tool. Hold still after drawing to apply assistance; one undo restores your drawing. Choosing Line or Shapes turns assistance on. Off disables both tools without losing their choices."))
             }
@@ -1300,7 +1900,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
                 ink.selectFingerSettings(ink.fingerSettings.copy(handLock = on))
             })
             card.body {
-                it.put(Kit.slider(c, "Hand lock grace", .3f, 3f, ink.fingerSettings.graceMs / 1000f, { value -> "%.1f s".format(value) },
+                it.put(Kit.slider(c, "Hand lock grace", .3f, 3f, ink.fingerSettings.graceMs / 1000f, { value -> "%.1f s".format(java.util.Locale.ROOT, value) },
                     { value -> kotlin.math.round(value * 10) / 10 }) { value -> ink.selectFingerSettings(ink.fingerSettings.copy(graceMs = kotlin.math.round(value * 10).toLong() * 100)) })
                 it.put(note("How long your hand stays ignored after the pen moves away."))
             }
@@ -1313,6 +1913,9 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
                     .apply { contentDescription = "Toolbar position" })
                 it.put(note("You can also drag the tool palette by its edge to any side of the screen."))
             }
+            // P630: the user asked for the full toolbar to turn into the slim bar on its own when writing starts.
+            card.addView(switchRow("Fold into the slim bar when I write", autoSlim, "Fold into the slim bar when writing",
+                "The pin brings the full toolbar back.") { on -> autoSlim = on })
         }
         block(layout, "Pages") { card ->
             card.body {
@@ -1349,7 +1952,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val storage = page("Privacy & storage")
         block(storage, "Your notebooks") { card ->
             card.body {
-                it.put(Kit.text(c, "Notebooks are stored on this tablet only, in the app's private storage. Use Export notebook to keep a copy elsewhere. Undo lasts while a notebook is open. Deleted notebooks can be restored from Library → Trash."))
+                it.put(Kit.text(c, "Notebooks are stored on this device only, in the app's private storage. Use Export notebook to keep a copy elsewhere. Undo lasts while a notebook is open. Deleted notebooks can be restored from Library → Trash."))
             }
         }
         // P108 (F190): the search index is a rebuildable cache; rebuilding never touches notebooks.
@@ -1365,7 +1968,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
                     addView(Kit.text(c, "Printed text in PDF and photo pages"), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                     addView(value)
                 })
-                it.put(note("Kept on this tablet so search is quick. The app periodically trims older cached text to about 32 MB or 4,000 entries; missing text is read again when needed. Rebuilding empties this cache and reads the open notebook again. Notebook files and earlier versions are kept."))
+                it.put(note("Kept on this device so search is quick. The app periodically trims older cached text to about 32 MB or 4,000 entries; missing text is read again when needed. Rebuilding empties this cache and reads the open notebook again. Notebook files and earlier versions are kept."))
                 lateinit var rebuild: View
                 rebuild = Kit.button(c, "Rebuild search index", Kit.Button.TINTED, small = true) {
                     rebuild.isEnabled = false; value.text = "Rebuilding…"
@@ -1383,6 +1986,12 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             }
             // P566: only where the public APK is what is installed. The owner's debug app has another id and key.
             if (!c.personalTools) card.addView(Kit.row(c, "Check for updates", chevron = true) { UpdateCheck.show(c) })
+            // P574: off until turned on; the app makes no other network calls of its own.
+            if (!c.personalTools) AutoUpdateCheck.preferences(c).let { saved ->
+                card.addView(switchRow("Check automatically", AutoUpdateCheck.enabled(saved), "Check for updates automatically",
+                    "Once a day, when the Library opens. Nothing about your notebooks is sent.") { AutoUpdateCheck.setEnabled(saved, it) })
+            }
+            WhatsNew.current(c)?.let { lines -> card.addView(Kit.row(c, "What’s new", chevron = true) { WhatsNew.show(c, UpdateCheck.currentVersion(c), lines) }) }
             card.addView(Kit.row(c, "Licences and notices", chevron = true) { AboutNotices.show(c) })
         }
 
@@ -1396,6 +2005,11 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
                     block.visibility = if (hit) View.VISIBLE else View.GONE; hit
                 }
                 page.visibility = if (found > 0 && (query.isNotEmpty() || !split || i == settingsChosen)) View.VISIBLE else View.GONE
+            }
+            // P650: when several groups show at once (a phone, or a search), the gesture guide shows once, in the first.
+            guides.filter { it.visibility == View.VISIBLE && (it.parent as View).visibility == View.VISIBLE }.drop(1).forEach { g ->
+                g.visibility = View.GONE
+                settingsPages.indexOfFirst { it === g.parent }.takeIf { it >= 0 }?.let { i -> if (blocks[i].none { it.first.visibility == View.VISIBLE }) settingsPages[i].visibility = View.GONE }
             }
             empty.visibility = if (settingsPages.none { it.visibility == View.VISIBLE }) View.VISIBLE else View.GONE
             settingsNavRows.forEachIndexed { i, row ->
@@ -1417,7 +2031,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             orientation = LinearLayout.VERTICAL
             settingsPages.forEach { page -> put(page) }
             put(empty)
-            put(Kit.privacy(c, "Your ink never leaves this tablet unless you export it yourself.").apply {
+            put(Kit.privacy(c, "Your ink never leaves this device unless you export it yourself.").apply {
                 (this.layoutParams as? ViewGroup.MarginLayoutParams)
             })
             (getChildAt(childCount - 1).layoutParams as LinearLayout.LayoutParams).topMargin = dpi(24f)
@@ -1429,10 +2043,21 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             // By day the board's frosted sidebar reads pale blue-grey over the desk, so its white cards stand out.
             background = if (night) Glass.pane(c, true, 32f) else rounded(Kit.group(false), dp(32f), Color.WHITE, dpi(1f))
             setPadding(dpi(18f), dpi(20f), dpi(18f), dpi(18f))
+            // P595: with large text the title can't share its row with Done without breaking the word ("Settin gs"),
+            // so Done sits above it at the end and the title has the whole width.
+            val stacked = c.largeText
             addView(LinearLayout(c).apply {
-                gravity = Gravity.CENTER_VERTICAL; setPadding(dpi(6f), 0, 0, 0)
-                addView(Kit.text(c, "Settings", Kit.Type.LARGE_TITLE).apply { isAccessibilityHeading = true }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-                addView(Kit.button(c, "Done", Kit.Button.PLAIN) { closeSettings() }.apply { contentDescription = "Close settings" })
+                setPadding(dpi(6f), 0, 0, 0)
+                val title = Kit.text(c, "Settings", Kit.Type.LARGE_TITLE).apply { isAccessibilityHeading = true }
+                val done = Kit.button(c, "Done", Kit.Button.PLAIN) { closeSettings() }.apply { contentDescription = "Close settings" }
+                if (stacked) {
+                    orientation = LinearLayout.VERTICAL
+                    addView(done, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { gravity = Gravity.END })
+                    addView(title, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                } else {
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(title, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); addView(done)
+                }
             })
             addView(search, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dpi(14f) })
         }
@@ -1452,7 +2077,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
                     orientation = LinearLayout.VERTICAL
                     addView(Kit.text(c, c.getString(R.string.app_name), Kit.Type.HEADLINE))
                     addView(Kit.text(c, "$notebooks ${if (notebooks == 1) "notebook" else "notebooks"} · ${UpdateCheck.display(version)}", Kit.Type.CAPTION, secondary = true)
-                        .apply { textSize = 13f; setPadding(0, dpi(4f), 0, 0); fontFeatureSettings = "tnum"; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+                        .apply { textSize = 13f; setPadding(0, dpi(4f), 0, 0); fontFeatureSettings = "tnum"; maxLines = if (c.largeText) 3 else 1; ellipsize = android.text.TextUtils.TruncateAt.END })
                 }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
             }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = c.dpi(16f) })
             updateButton()?.let { sidebar.addView(it, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = c.dpi(10f) }) }
@@ -1467,14 +2092,17 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
                     rows.forEach { (name, path, tint) ->
                         val index = settingsNavRows.size
                         val row = TextView(c).apply {
-                            text = name; textSize = 15f; gravity = Gravity.CENTER_VERTICAL; maxLines = 1
-                            setPadding(dpi(10f), 0, dpi(12f), 0); compoundDrawablePadding = dpi(12f)
+                            text = name; textSize = 15f; gravity = Gravity.CENTER_VERTICAL
+                            // P595: with large text a group's name wraps onto a second line instead of losing its last word.
+                            if (c.largeText) { maxLines = 3; minHeight = dpi(48f); setPadding(dpi(10f), dpi(8f), dpi(12f), dpi(8f)) }
+                            else { maxLines = 1; setPadding(dpi(10f), 0, dpi(12f), 0) }
+                            compoundDrawablePadding = dpi(12f)
                             setCompoundDrawablesRelative(Kit.Icon(path, tint, dpi(30f), square = true).apply { setBounds(0, 0, dpi(30f), dpi(30f)) }, null, null, null)
                             foreground = ripple(night, dp(14f)); isClickable = true; isFocusable = true; contentDescription = "$name settings"
                             setOnClickListener { search.setText(""); settingsChosen = index; show(); detail.scrollTo(0, 0) }
                         }
                         settingsNavRows += row
-                        addView(row, LinearLayout.LayoutParams(MATCH_PARENT, dpi(48f)))
+                        addView(row, LinearLayout.LayoutParams(MATCH_PARENT, if (c.largeText) WRAP_CONTENT else dpi(48f)))
                     }
                 }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = c.dpi(16f) })
             }
@@ -1529,6 +2157,15 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val open = organizer ?: return
         organizer = null; root.removeView(open); activity.refresh()
     }
+    /** P607: a 36 dp round button in the Pages card's header: an accent icon on accent at 10%, as on the board. */
+    private fun roundStripButton(icon: android.graphics.drawable.Drawable, label: String) = android.widget.ImageView(c).apply {
+        setImageDrawable(icon); scaleType = android.widget.ImageView.ScaleType.CENTER
+        contentDescription = label; tooltipText = label
+        // P612: the icon alone, as the user asked: the faded disc behind it was cut by the card's edge. A press still ripples.
+        background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(if (night) 0x30ffffff else 0x1f0a66d9),
+            null, rounded(Color.WHITE, c.dp(17f)))
+        isClickable = true; isFocusable = true
+    }
     /** P178 (G3): a text chip in the page strip, in the Glass accent. */
     private fun stripButton(label: String) = TextView(c).apply {
         text = label; textSize = 15f; typeface = Tokens.SANS_MEDIUM; gravity = Gravity.CENTER; maxLines = 1
@@ -1536,13 +2173,20 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         background = ripple(night, c.dp(Glass.CHIP)); isClickable = true; isFocusable = true
     }
     private fun buildPageStrip() {
-        val header = LinearLayout(c).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(c.dpi(14f), c.dpi(4f), c.dpi(6f), 0) }
-        header.addView(TextView(c).apply { text = "Pages"; textSize = 14f; typeface = Tokens.SANS_MEDIUM; setTextColor(Glass.secondary(night)) },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        header.addView(allPages, LinearLayout.LayoutParams(c.dpi(40f), c.dpi(40f)))
-        header.addView(choosePages)
+        // P607: the board's header: "Pages" and its count, then All pages and Select as round buttons, a hairline below.
+        val header = LinearLayout(c).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(c.dpi(16f), c.dpi(14f), c.dpi(12f), c.dpi(10f)) }
+        header.addView(TextView(c).apply {
+            text = "Pages"; setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 17f); typeface = android.graphics.Typeface.create(android.graphics.Typeface.SANS_SERIF, 700, false)
+            setTextColor(Glass.text(night)); maxLines = 1
+        })
+        header.addView(pageCountChip, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = c.dpi(6f) })
+        header.addView(View(c), LinearLayout.LayoutParams(0, 1, 1f))
+        header.addView(allPages, LinearLayout.LayoutParams(c.dpi(34f), c.dpi(34f)).apply { marginStart = c.dpi(4f) })
+        header.addView(choosePages, LinearLayout.LayoutParams(c.dpi(34f), c.dpi(34f)).apply { marginStart = c.dpi(2f) })
         choosePages.setOnClickListener { if (pagePanel.choosing) pagePanel.stopChoosing() else pagePanel.startChoosing() }
         pageStrip.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        pageStrip.addView(View(c).apply { setBackgroundColor(if (night) 0x14ffffff else 0x141d2433) },
+            LinearLayout.LayoutParams(MATCH_PARENT, c.dpi(1f)).apply { marginStart = c.dpi(12f); marginEnd = c.dpi(12f) })
         pageStrip.addView(pagePanel, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         bulkBar.orientation = LinearLayout.VERTICAL
         bulkBar.background = Glass.pane(c, night, Glass.CHIP + 2f); bulkBar.elevation = c.dp(4f)
@@ -1562,21 +2206,41 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     /** P178 (G3): Select becomes Done while choosing; the bulk bar counts the chosen pages and keeps one page back. */
     private fun showPageChoice() {
         val on = pagePanel.choosing; val count = pagePanel.chosenIds.size; val all = count >= pagePanel.pageCount
-        choosePages.text = if (on) PageStripAction.DONE.label else PageStripAction.SELECT.label
+        // P612: Select's tick fills while choosing; its name says Done.
+        choosePages.setImageDrawable(if (on) selectDone else selectIcon)
         choosePages.contentDescription = if (on) "Done choosing pages" else "Select pages"
+        choosePages.tooltipText = if (on) PageStripAction.DONE.label else PageStripAction.SELECT.label
         bulkBar.visibility = if (on) View.VISIBLE else View.GONE
         chosenCount.text = when { count == 0 -> "Tap pages to choose"; all -> "All chosen · one must stay"; else -> "$count chosen" }
         listOf(movePages, deletePages).forEach { it.isEnabled = count > 0 && !all; it.alpha = if (it.isEnabled) 1f else .4f }
     }
 
     /** Side of a tool bar control that faces the page. */
-    private val pageSide get() = when (dock) { Dock.TOP -> Gravity.BOTTOM; Dock.BOTTOM -> Gravity.TOP; Dock.LEFT -> Gravity.END; Dock.RIGHT -> Gravity.START }
+    private val pageSide get() = if (slim) Gravity.BOTTOM else when (dock) { Dock.TOP -> Gravity.BOTTOM; Dock.BOTTOM -> Gravity.TOP; Dock.LEFT -> Gravity.END; Dock.RIGHT -> Gravity.START }
+    /**
+     * P624: a [passThrough] board (a pen's, a highlighter's, the + menu) lets the page have the touch that closes it, so
+     * starting to write closes it and the stroke is drawn. It cannot take Back itself, so a callback closes it while shown.
+     */
     private fun open(anchor: View, alignEnd: Boolean = false, width: Float? = 340f, toward: Boolean = false, above: Boolean = false,
-        tool: Boolean = false, build: (LinearLayout) -> Unit) {
+        tool: Boolean = false, radius: Float? = null, passThrough: Boolean = false, build: (LinearLayout) -> Unit) {
         popover?.dismiss()
-        popover = Popover(anchor, width, tool, build).also {
+        popover = Popover(shown(anchor), width, tool, passThrough, build).also {
+            radius?.let { r -> it.window.setBackgroundDrawable(Glass.float(c, night, r)) }
+            if (passThrough) {
+                val back = object : androidx.activity.OnBackPressedCallback(true) { override fun handleOnBackPressed() = it.dismiss() }
+                activity.onBackPressedDispatcher.addCallback(back)
+                it.window.setOnDismissListener { back.remove(); closedBy = anchor; closedAt = android.os.SystemClock.uptimeMillis() }
+            }
             if (above) it.showAboveOrBelow() else if (toward) it.showToward(pageSide) else it.show(alignEnd)
         }
+    }
+    private var closedBy: View? = null
+    private var closedAt = 0L
+    /** P624: the touch on a pen that closed its pass-through board also reaches the pen; that tap does not open it again. */
+    private fun justClosed(anchor: View) = closedBy === anchor && android.os.SystemClock.uptimeMillis() - closedAt < 400
+    /** The pen board, a pass-through popover. Its colour circle, eyedropper and the rest still close it as before. */
+    private fun openTool(button: ChromeButton, build: (LinearLayout) -> Unit) {
+        if (!justClosed(button)) open(button, width = 452f, toward = true, tool = true, passThrough = true, build = build)
     }
     /**
      * P190: the colour circle pops out beside [anchor] toward the page, in place of the old centred dialog. It starts at the
@@ -1587,7 +2251,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val now = (if (highlighter) ink.highlighterStyle else ink.penStyle).color
         if (around == null) return open(anchor, width = 340f, toward = true, tool = true) { it.addView(ColorWheel(c, now, highlighter, use = apply)) }
         popover?.dismiss()
-        popover = Popover(anchor, width = 252f, tool = true) {
+        popover = Popover(shown(anchor), width = 252f, tool = true) {
             it.dpi(18f).let { pad -> it.setPadding(pad, pad, pad, pad) }
             it.addView(ColorWheel(c, now, highlighter, compact = true, use = apply))
         }.also {
@@ -1675,30 +2339,46 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             into.addView(ToolControls.menuRow(c, row.first, row.second, icon?.first, icon?.second ?: Glass.ACCENT) { popover?.dismiss(); act(row.third) })
         }
     }
-    private fun overflowMenu() = commandMenu(more, EditorMenu.NOTEBOOK)
+    /** P578: on a phone Share leaves the top bar, so the notebook menu lists the Export commands below its own. */
+    private fun overflowMenu() = commandMenu(more, EditorMenu.NOTEBOOK, also = if (compact) listOf(EditorMenu.EXPORT) else emptyList())
     /** P186: the Glass board has no Capture button; Insert lists Capture and files below its own rows. */
     private fun insertMenu() = commandMenu(insert, EditorMenu.INSERT, also = listOf(EditorMenu.CAPTURE))
     /** P186: the board has no Study button; Search lists Study below its own rows. */
     private fun searchMenu() = commandMenu(search, EditorMenu.NAVIGATE, also = listOf(EditorMenu.STUDY))
     /** P186: the board's "Page and paper": the paper settings, then the page actions. */
-    private fun pageAndPaperMenu() = commandMenu(pageSettings, EditorMenu.PAGES, header = "Page and paper",
-        lead = listOf(Triple(PAPER_SETTINGS, !repository.readOnly) { activity.pageSettingsDialog(); Unit }))
+    /** P605: the paper settings under "Paper", then the page actions under "This page", as the redesign sketch names them. */
+    private fun pageAndPaperMenu() = commandMenu(pageSettings, EditorMenu.PAGES, homeCaption = PAGE_CAPTION,
+        lead = PAPER_CAPTION to listOf(MenuTile(c, PAPER_SETTINGS, "Paper", MenuIcons.PAPER, menuTint(EditorCommand.DUPLICATE_PAGE), !repository.readOnly) {
+            popover?.dismiss(); act { activity.pageSettingsDialog() }
+        }))
+    /**
+     * P605: the editor's menus are icon grids, four tiles to a row under grey section names (see [MenuTile]); each section is
+     * one home in [EditorMenu], so every command keeps exactly one place. The notebook menu leads with "Find a command".
+     */
     private fun commandMenu(anchor: View, home: EditorMenu, also: List<EditorMenu> = emptyList(),
-                            lead: List<Triple<String, Boolean, () -> Unit>> = emptyList(), header: String = home.label) {
-        val rows = mutableListOf<Triple<String, Boolean, () -> Unit>?>()
-        val icons = mutableListOf<Pair<Glyph, Int>?>()
-        val captions = mutableMapOf<Int, String>()
-        fun gap(caption: String?) { rows += null; icons += null; caption?.let { captions[rows.size - 1] = it } }
-        fun add(menu: EditorMenu) = EditorCommand.shownIn(menu, c).forEach { command ->
-            rows += Triple(commandLabel(command), commandEnabled(command)) { runCommand(command) }; icons += menuIcon(command) to menuTint(command)
+                            lead: Pair<String, List<View>>? = null, homeCaption: String = home.label) {
+        fun tiles(menu: EditorMenu) = EditorCommand.shownIn(menu, c).map { commandTile(it) }
+        val sections = listOfNotNull(lead) + (homeCaption to tiles(home)) + also.map { it.label to tiles(it) }
+        open(anchor, alignEnd = true, width = 340f, radius = ToolControls.TILE_MENU_RADIUS) { column ->
+            column.dpi(12f).let { column.setPadding(it, it, it, it) }
+            // P184 (G9): the notebook menu leads with the command palette, drawn as a search field (P605).
+            if (home == EditorMenu.NOTEBOOK) column.addView(findPill(), ToolControls.pillParams(c))
+            sections.forEach { (caption, tiles) -> column.addView(ToolControls.tileCaption(c, caption)); column.addView(ToolControls.tileGrid(c, tiles)) }
         }
-        // P184 (G9): the notebook menu leads with the command palette, in a group of its own.
-        if (home == EditorMenu.NOTEBOOK) { rows += Triple(FIND_COMMAND, true) { more.post { commandPalette() }; Unit }; icons += Glyph.SEARCH to Glass.ACCENT; gap(null) }
-        if (lead.isNotEmpty()) { lead.forEach { rows += it; icons += Glyph.PAGE_SETTINGS to menuTint(EditorCommand.DUPLICATE_PAGE) }; gap(home.label) }
-        add(home)
-        also.forEach { gap(it.label); add(it) }
-        menu(anchor, header, rows, icons = icons, captions = captions)
     }
+    private fun commandTile(command: EditorCommand) = MenuTile(c, commandLabel(command), MenuIcons.short(command), MenuIcons.path(command),
+        menuTint(command), commandEnabled(command), on = commandOn(command), fault = menuTint(command) == Tokens.FAULT) {
+        popover?.dismiss(); act { runCommand(command) }
+    }
+    /** P605: a command that switches something on draws its tile filled while it is on. */
+    private fun commandOn(command: EditorCommand) = when (command) {
+        EditorCommand.LASER -> ink.laserEnabled
+        EditorCommand.READ_ONLY -> repository.readOnly
+        EditorCommand.TAPE -> ink.pageTapeCovered
+        EditorCommand.OPEN_ALONGSIDE -> splitOpen
+        else -> false
+    }
+    private fun findPill() = ToolControls.pill(c, FIND_PILL, MenuIcons.SEARCH) { popover?.dismiss(); more.post { commandPalette() } }
     /** P184 (G9): every editor command by name in a glass search sheet; each runs through runCommand and its own guards. */
     internal fun commandPalette() = open(more, alignEnd = true, width = 380f) { column ->
         column.setPadding(column.dpi(10f), column.dpi(10f), column.dpi(10f), column.dpi(10f))
@@ -1859,35 +2539,15 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             EditorCommand.SETTINGS -> openSettings()
         }
     }
+    /** P590: the Shapes board in the tool boards' Glass look (title, labelled sections, grey wells), as Eraser and Lasso. */
     private fun shapesMenu() {
         val add = idle && repository.currentPage != null && !repository.readOnly
-        open(shapes, alignEnd = true, width = 300f, toward = true) { column ->
-            column.setPadding(column.dpi(8f), column.dpi(8f), column.dpi(8f), column.dpi(8f))
-            column.addView(ToolControls.caption(c, "Shape pen: everything you draw becomes a shape").apply { setPadding(dpi(12f), dpi(6f), dpi(12f), dpi(4f)) })
-            column.addView(ToolControls.segmented(c, listOf("On", "Off"), if (ink.shapePen) 0 else 1) { i -> act { ink.selectShapePen(i == 0); refreshTools() } }.apply {
-                contentDescription = "Shape pen"
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dpi(12f); marginEnd = dpi(12f) }
-            })
-            column.addView(ToolControls.menuRow(c, if (ink.rulerShown) "Hide ruler" else "Show ruler", true) { ink.showRuler(!ink.rulerShown); popover?.dismiss() })
-            column.addView(ToolControls.caption(c, "Ruler scale").apply { setPadding(dpi(12f),dpi(8f),dpi(12f),dpi(4f)) })
-            column.addView(Kit.segmented(c,listOf("Screen","1:1","1:10","1:100"),RulerScale.ratios.indexOf(ink.ruler.scaleRatio)) { i ->
-                act { ink.selectRulerScale(RulerScale.ratios[i]); ink.showRuler(true) }
-            }.apply { contentDescription="Ruler scale" })
-            column.addView(ToolControls.caption(c,"Drawing distances are in cm and follow zoom.").apply { setPadding(dpi(12f),dpi(4f),dpi(12f),dpi(8f)) })
-            column.addView(ToolControls.divider(c))
-            column.addView(ToolControls.caption(c, "Insert a shape").apply { setPadding(dpi(12f), 0, dpi(12f), dpi(4f)) })
-            dev.ownednotes.core.ShapeLibrary.Choice.entries.chunked(4).forEach { choices ->
-                column.addView(LinearLayout(c).apply {
-                    orientation = LinearLayout.HORIZONTAL; setPadding(dpi(4f), 0, dpi(4f), 0)
-                    choices.forEach { choice ->
-                        addView(ShapeIcon(c, choice).apply {
-                            isEnabled = add; alpha = if (add) 1f else .38f
-                            setOnClickListener { popover?.dismiss(); act { ink.insertShape(choice); activity.refresh() } }
-                        }, LinearLayout.LayoutParams(0, dpi(60f), 1f))
-                    }
-                    repeat(4 - choices.size) { addView(View(c), LinearLayout.LayoutParams(0, dpi(60f), 1f)) }
-                })
-            }
+        open(shapes, width = 380f, toward = true, tool = true) { column ->
+            ToolControls.shapes(column, ink, add,
+                shapePen = { on -> act { ink.selectShapePen(on); refreshTools() } },
+                rulerScale = { ratio -> act { ink.selectRulerScale(ratio); ink.showRuler(true) } },
+                ruler = { ink.showRuler(!ink.rulerShown); popover?.dismiss() },
+                insert = { choice -> popover?.dismiss(); act { ink.insertShape(choice); activity.refresh() } })
         }
     }
     /** One shape drawn as a picture from the same outline the page gets; its name is read aloud and shown on hold. */
@@ -1926,7 +2586,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val note = repository.session?.notebook ?: return
         val pageId = repository.selectedPageId ?: note.pages.firstOrNull()?.id ?: return
         val chosen = if (pagePanel.choosing) pagePanel.chosenIds.toSet() else emptySet()
-        open(share, alignEnd = true, width = 580f, tool = true) { column ->
+        open(if (share.isShown) share else more, alignEnd = true, width = 580f, tool = true) { column ->
             exportSheet = ExportSheet(column, activity, note, pageId, chosen, format) { popover?.dismiss() }
         }
         popover?.grows = true
@@ -2013,7 +2673,8 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         // Real enabled flags below continue to prevent navigation or tool changes in the middle of input.
         val holdChrome = session != null && !repository.busy && !repository.fileBusy &&
             (ink.isEditing || repository.inputBusy || repository.savingLocally)
-        (pens + listOf(highlighter, eraser, paintBrush, lasso, shapes, zoomOut, fit, zoomIn, pages, insert, pageSettings, capture, study, search, share, more,
+        slimHold = holdChrome
+        (pens + highlighters + listOf(addPen, addHighlighter, eraser, paintBrush, lasso, shapes, zoomOut, fit, zoomIn, pages, insert, pageSettings, capture, study, search, share, more,
             panelToggle, library, undo, redo, previous, next)).forEach { it.holdEnabledAppearance(holdChrome) }
         (inkDots + allColours).forEach { it.holdEnabledAppearance(holdChrome) }
         val audio=(activity.application as NotesApplication).audio
@@ -2023,7 +2684,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         record.contentDescription=if(audio.active) "Study, audio recording in progress" else "Study"
         val ready = idle && session != null
         if (!idle) popover?.dismiss()
-        (pens + listOf(highlighter, eraser, paintBrush, lasso, zoomOut, fit, zoomIn, pages, insert, pageSettings, capture, study, search, share, more, panelToggle)).forEach { it.isEnabled = ready }
+        (pens + highlighters + listOf(addPen, addHighlighter, eraser, paintBrush, lasso, zoomOut, fit, zoomIn, pages, insert, pageSettings, capture, study, search, share, more, panelToggle)).forEach { it.isEnabled = ready }
         grip.isEnabled = ready
         zoomOut.isEnabled = ready && !continuousMode && !ink.zoomLocked
         zoomIn.isEnabled = ready && !continuousMode && !ink.zoomLocked
@@ -2037,13 +2698,21 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         library.isEnabled = idle && repository.canChangeNotebook
         undo.isEnabled = ready && !repository.readOnly && session?.canUndo == true
         redo.isEnabled = ready && !repository.readOnly && session?.canRedo == true
-        (pens + listOf(highlighter, eraser, paintBrush, lasso, shapes)).forEach { it.isEnabled = ready && !repository.readOnly }
+        (pens + highlighters + listOf(addPen, addHighlighter, eraser, paintBrush, lasso, shapes)).forEach { it.isEnabled = ready && !repository.readOnly }
+        addPen.isEnabled = addPen.isEnabled && presets.canAdd; addHighlighter.isEnabled = addHighlighter.isEnabled && markers.canAdd
         val list = session?.notebook?.pages.orEmpty()
         val index = list.indexOfFirst { it.id == repository.selectedPageId }
         previous.isEnabled = ready && index > 0
         next.isEnabled = ready && index >= 0 && index < list.lastIndex
         pages.text = if (index < 0) "–" else "${index + 1} / ${list.size}"
         continuous.addPageSlot = continuousMode && canAddPage
+        pagePanel.newPageShown = ready && canAddPage
+        // Set only when the count changes: setText on a wrap-content view asks for a whole layout, and refresh runs after
+        // every stroke.
+        val pageCount = list.size.toString()
+        if (pageCountChip.text.toString() != pageCount) pageCountChip.text = pageCount
+        val chipShown = if (list.isEmpty()) View.GONE else View.VISIBLE
+        if (pageCountChip.visibility != chipShown) pageCountChip.visibility = chipShown
         if (addPageCard.covering && (continuousMode || !canAddPage || !atLastDisplayedPage)) hideAddPage(instant = true)
         addPageCard.button.isEnabled = ready && canAddPage
         placeAddPage()
@@ -2073,22 +2742,29 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             button.sample = presets[index]
             button.active = drawing && !ink.highlighter && index == presets.selected; button.suspended = button.active && !ink.effectivePen
             button.override = penOverride && index == presets.selected
-            button.contentDescription = "Pen ${index + 1}" + if (index == presets.selected) ", selected" else ""
+            // P635: "selected" only for the tool in use, as the slim bar says it.
+            button.contentDescription = "Pen ${index + 1}" + if (button.active) ", selected" else ""
         }
         eraser.active = ink.eraser; eraser.override = override
-        highlighter.active = drawing && ink.highlighter
-        highlighter.highlighterSample = ink.highlighterStyle
-        highlighter.suspended = highlighter.active && !ink.effectiveHighlighter
+        markers.sync(ink.highlighterStyle)
+        highlighters.forEachIndexed { index, button ->
+            button.highlighterSample = markers[index]
+            button.active = drawing && ink.highlighter && index == markers.selected
+            button.suspended = button.active && !ink.effectiveHighlighter
+            button.contentDescription = (if (highlighters.size == 1) "Highlighter" else "Highlighter ${index + 1}") + if (button.active) ", selected" else ""
+        }
         eraser.suspended = eraser.active && !ink.effectiveEraser
         eraser.glyph = if (ink.eraserMode == InkCanvas.EraserMode.AREA) Glyph.ERASER_AREA else Glyph.ERASER_STROKE
-        eraser.contentDescription = if (ink.eraserMode == InkCanvas.EraserMode.AREA) "Area eraser" else "Whole-stroke eraser"
+        eraser.contentDescription = (if (ink.eraserMode == InkCanvas.EraserMode.AREA) "Area eraser" else "Whole-stroke eraser") + if (ink.eraser) ", selected" else ""
         paintBrush.active = ink.painter; paintBrush.suspended = paintBrush.active && !ink.effectivePainter
         paintBrush.sample = ink.penStyle
         paintBrush.contentDescription = "Paint brush" + if (ink.painter) ", selected" else ""
         lasso.active = ink.lassoEnabled; lasso.suspended = lasso.active && !ink.effectiveLasso
+        lasso.contentDescription = "Lasso" + if (ink.lassoEnabled) ", selected" else ""
         shapes.active = ink.shapePen; shapes.contentDescription = if (ink.shapePen) "Shapes, shape pen on" else "Shapes"
         lasso.glyph = if (ink.selectionOptions.shape == InkSelection.Shape.RECTANGLE) Glyph.LASSO_RECTANGLE else Glyph.LASSO_FREEFORM
         refreshDots()
+        refreshSlim()
     }
 
     /** P186: the palette's dots offer the colours the quick ring offers, for the highlighter while it is in use, else the pen. */
@@ -2195,10 +2871,12 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         copyInk.contentDescription = if (mixed) "Copy selection" else if (text) "Copy text" else if (photo) "Copy photo" else "Copy handwriting"
         listOf(cutInk, copyInk, colorInk, widthInk, straightenInk, tapeInk, lockInk, duplicateInk, deleteInk, deselect).forEach { it.isEnabled = ready && selected > 0 }
         refineInk.isEnabled = ready && selected > 0 && repository.canChangeNotebook && !repository.readOnly
-        pasteInk.contentDescription = ink.clipboardLabel
-        pasteInk.isEnabled = ready && ink.canPasteInk
-        pasteHere.contentDescription = ink.clipboardLabel
-        pasteHere.isEnabled = ready && ink.canPasteInk
+        // P587: the clipboard is read once here (each read is a call to the system), not once per button and question.
+        val (pasteLabel, pasteable) = ink.pasteState()
+        pasteInk.contentDescription = pasteLabel
+        pasteInk.isEnabled = ready && pasteable
+        pasteHere.contentDescription = pasteLabel
+        pasteHere.isEnabled = ready && pasteable
         moreInk.visibility = if (selectionExtras.any { it.visibility == View.VISIBLE }) View.VISIBLE else View.GONE
         moreInk.isEnabled = ready && selected > 0
         positionSelectionBar()

@@ -11,7 +11,6 @@ import android.graphics.RectF
 import android.view.View
 import androidx.ink.brush.Brush
 import androidx.ink.brush.InputToolType
-import androidx.ink.brush.SelfOverlap
 import androidx.ink.brush.StockBrushes
 import androidx.ink.geometry.MutableVec
 import androidx.ink.strokes.MutableStrokeInputBatch
@@ -36,6 +35,8 @@ class StrokePreview(context: Context, val highlighter: Boolean) : View(context) 
             invalidate()
         }
     private var ink: Path? = null
+    /** P618: the sample's points on the card and their times, for the fountain pen's shading and pools. */
+    private val xs = FloatArray(64); private val ys = FloatArray(64); private val ts = LongArray(64)
     private val card = RectF()
     private val paper = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xffe3e7ee.toInt(); style = Paint.Style.STROKE }
@@ -45,7 +46,7 @@ class StrokePreview(context: Context, val highlighter: Boolean) : View(context) 
     init { contentDescription = describe(style) }
 
     private fun describe(style: PenStyle) =
-        "${if (highlighter) "Highlighter" else style.kind.label + " pen"} preview, width ${"%.1f".format(style.width).removeSuffix(".0")}"
+        "${if (highlighter) "Highlighter" else style.kind.label + " pen"} preview, width ${"%.1f".format(java.util.Locale.ROOT, style.width).removeSuffix(".0")}"
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         setMeasuredDimension(getDefaultSize(suggestedMinimumWidth, widthMeasureSpec), resolveSize(context.dpi(80f), heightMeasureSpec))
@@ -69,7 +70,8 @@ class StrokePreview(context: Context, val highlighter: Boolean) : View(context) 
         if (highlighter) { fill.alpha = (255 * InkStroke.HIGHLIGHTER_OPACITY).roundToInt(); fill.blendMode = BlendMode.MULTIPLY } else fill.blendMode = null
         // The page's graphite at the card's own scale, so the tooth is the size it will be on the page at 100%.
         fill.shader = if (!highlighter && style.kind == PenKind.PENCIL) PencilGrain.scaled(fill.color, scale()) else null
-        canvas.drawPath(path, fill)
+        if (!highlighter && style.kind.nib != null) FountainInk.fill(canvas, path, style.inkColor.toInt(), style.width * scale(), xs, ys, ts, xs.size, fill)
+        else canvas.drawPath(path, fill)
     }
 
     /** Short rounded bars with word-like gaps, centred where the highlighter sample runs. */
@@ -87,13 +89,15 @@ class StrokePreview(context: Context, val highlighter: Boolean) : View(context) 
     }
 
     private fun brush(): Brush = if (highlighter)
-        Brush.createWithColorIntArgb(StockBrushes.highlighter(SelfOverlap.DISCARD, StockBrushes.HighlighterVersion.V1), style.color.toInt(), style.width, .1f)
+        Brush.createWithColorIntArgb(HighlighterBrush.family, style.color.toInt(), style.width, .1f)
     else Brush.createWithColorIntArgb(PenSmoothing.family(when (style.kind) {
         PenKind.PRESSURE -> StockBrushes.pressurePen(StockBrushes.PressurePenVersion.V1)
         PenKind.BALLPOINT -> StockBrushes.marker(StockBrushes.MarkerVersion.V1)
         PenKind.DASHED -> StockBrushes.dashedLine(StockBrushes.DashedLineVersion.V1)
         PenKind.CALLIGRAPHY -> CalligraphyBrush.family
         PenKind.PENCIL -> PencilWetRenderer.family
+        PenKind.FOUNTAIN -> FountainInk.everyday
+        PenKind.FOUNTAIN_SOFT -> FountainInk.soft
     }, style.smoothing), style.inkColor.toInt(), style.width, .1f)
 
     /**
@@ -114,6 +118,7 @@ class StrokePreview(context: Context, val highlighter: Boolean) : View(context) 
             val t = i / (count - 1f)
             val pressure = if (highlighter) .7f else .2f + .75f * sin(PI * t).toFloat()
             batch.add(InputToolType.STYLUS, t * length, -amplitude * sin(2 * PI * t).toFloat(), i * 10L, pressure = pressure)
+            xs[i] = margin + t * length * scale; ys[i] = height / 2f - amplitude * sin(2 * PI * t).toFloat() * scale; ts[i] = i * 10L
         }
         val stroke = Stroke(brush(), batch)
         val shape = stroke.shape

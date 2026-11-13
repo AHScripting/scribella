@@ -58,6 +58,12 @@ object Glass {
     const val PANE_NIGHT = 0xff2a2f3a.toInt()
     const val EDGE = 0xffffffff.toInt()
     const val EDGE_NIGHT = 0x1affffff
+    // P582: menus and tool boards float over the Library's white cards and the page. By day they are solid white with a
+    // faint ink hairline: the 96% pane let the text behind show through the menu's own text, and its white edge vanished on white.
+    const val FLOAT = 0xffffffff.toInt()
+    const val FLOAT_EDGE = 0x241d2433
+    fun float(context: Context, night: Boolean, radius: Float) =
+        if (night) pane(context, true, radius) else rounded(FLOAT, context.dp(radius), FLOAT_EDGE, 1)
     const val RULE = 0x1f1d2433
     const val RULE_NIGHT = 0x24ffffff
     const val PILL = 26f
@@ -75,9 +81,11 @@ object Glass {
     fun accent(night: Boolean) = if (night) ACCENT_NIGHT else ACCENT
     fun text(night: Boolean) = if (night) TEXT_NIGHT else TEXT
     fun secondary(night: Boolean) = if (night) SECONDARY_NIGHT else SECONDARY
-    /** A floating pane: frosted fill, a one-pixel light edge. Give the view an elevation for its shadow. */
+    /** P614 (board 8): by day a floating pane's edge is ink at 18%, 1 dp, so white controls stay visible on a white page. */
+    const val CHROME_EDGE = 0x2e1d2433
+    /** A floating pane: frosted fill and a hairline edge (light at night). Give the view an elevation for its shadow. */
     fun pane(context: Context, night: Boolean, radius: Float = PILL) =
-        rounded(if (night) PANE_NIGHT else PANE, context.dp(radius), if (night) EDGE_NIGHT else EDGE, 1)
+        if (night) rounded(PANE_NIGHT, context.dp(radius), EDGE_NIGHT, 1) else rounded(PANE, context.dp(radius), CHROME_EDGE, context.dpi(1f))
     /** A short hairline between groups inside a pane. */
     fun rule(context: Context, night: Boolean) = View(context).apply { setBackgroundColor(if (night) RULE_NIGHT else RULE) }
     /**
@@ -300,8 +308,8 @@ class ChromeButton(context: Context, label: String, glyph: Glyph? = null, text: 
         foreground = ripple(true, dp(10f))
     }
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        // P186: a palette slot is tall enough for a tool to stand in it (76 dp, shortened from the board's 112 dp at the
-        // user's review so the page gets the room); 48 dp keeps the touch target.
+        // P186: a palette slot is tall enough for a tool to stand in it (P614: 58 dp, from the board's 112 and then 76 dp,
+        // so the page gets the room); 48 dp keeps the touch target.
         if (slot) { if (sideways) setMeasuredDimension(dpi(slotLength), dpi(48f)) else setMeasuredDimension(dpi(48f), dpi(slotLength)); return }
         val label = text
         val lead = if (emphasis) dp(10f) + dp(26f) else dp(12f) + dp(30f)
@@ -415,7 +423,7 @@ class ChromeButton(context: Context, label: String, glyph: Glyph? = null, text: 
             marker != null -> ToolArt.mix(marker.color.toInt(), Tokens.INK, .1f)
             else -> sample?.color?.toInt() ?: Glass.secondary(night)
         }
-        ToolArt.draw(canvas, tool, ink, ToolArt.PALETTE_LENGTH)
+        ToolArt.draw(canvas, tool, ink, ToolArt.PALETTE_LENGTH, fine = marker != null && marker.width <= ToolArt.FINE_HIGHLIGHTER)
         canvas.restoreToCount(count)
     }
 
@@ -450,6 +458,7 @@ class ChromeButton(context: Context, label: String, glyph: Glyph? = null, text: 
         when (style.kind) {
             PenKind.BALLPOINT -> canvas.drawPath(samplePath, paint)
             PenKind.CALLIGRAPHY -> CalligraphyBrush.draw(canvas, samplePath, paint, width * 1.4f)
+            PenKind.FOUNTAIN, PenKind.FOUNTAIN_SOFT -> FountainInk.drawSample(canvas, samplePath, paint, width, requireNotNull(style.kind.nib))
             // Grain at about one pixel per grain unit, whatever the 32-unit tile is scaled to.
             PenKind.PENCIL -> {
                 paint.shader = PencilGrain.scaled(paint.color, 2f * 32f / size)
@@ -483,7 +492,8 @@ class ChromeButton(context: Context, label: String, glyph: Glyph? = null, text: 
     }
     private val sampleMeasure by lazy { PathMeasure(samplePath, false) }
     private val sampleSegment = Path()
-    companion object { private const val PRESSURE_STEPS = 16; const val SLOT = 76f }
+    /** P614 (board 8): a palette slot is 58 dp (76 before), so the docked bar is 18 dp thinner and the page gets the room. */
+    companion object { private const val PRESSURE_STEPS = 16; const val SLOT = 58f }
 }
 
 /**

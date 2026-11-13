@@ -34,7 +34,7 @@ object LibrarySync {
     private const val PROBLEM_KEY = "sync_problem"
     private const val WAITING_KEY = "sync_waiting"
     private const val WIFI_KEY = "sync_wifi_only"
-    const val WIFI_WAITING = "Waiting for Wi-Fi. Your notebooks are saved on this tablet. Connect to Wi-Fi, then choose Sync now."
+    const val WIFI_WAITING = "Waiting for Wi-Fi. Your notebooks are saved on this device. Connect to Wi-Fi, then choose Sync now."
     private const val STATE_FILE = "sync-state.txt"
     private const val PART_FOLDERS_KEY = "sync_changed_page_folders"
     /** Explicit source membership, retained for released notebooks after the current folder changes. */
@@ -237,7 +237,7 @@ object LibrarySync {
         preferences(context).getBoolean(PROBLEM_KEY, false) -> "Sync needs attention"
         preferences(context).getBoolean(WAITING_KEY, false) -> "Waiting for notebooks to close"
         lastSync(context) == 0L -> "Not synced yet"
-        else -> "Synced " + android.text.format.DateUtils.getRelativeTimeSpanString(lastSync(context), now, android.text.format.DateUtils.MINUTE_IN_MILLIS)
+        else -> "Synced " + EnglishTime.ago(lastSync(context), now)
     }
 
     /** Keeps access to [tree] across restarts and makes it the sync folder; a different folder starts afresh. */
@@ -268,7 +268,7 @@ object LibrarySync {
 
     internal fun recovery(kind: FolderSync.ProblemKind): String = when (kind) {
         FolderSync.ProblemKind.ACCESS -> "Folder access was lost. Choose the folder again. If your cloud app asks you to sign in, do that in the cloud app first."
-        FolderSync.ProblemKind.SPACE -> "Storage is full on this tablet or in the sync folder. Free some space, then choose Sync now."
+        FolderSync.ProblemKind.SPACE -> "Storage is full on this device or in the sync folder. Free some space, then choose Sync now."
         FolderSync.ProblemKind.CONTENT -> "A notebook could not be verified. Its existing local copy was kept. Check the file in your sync folder before retrying."
         FolderSync.ProblemKind.UNAVAILABLE -> "The sync folder could not be reached. Check your cloud app and connection, then choose Sync now or choose the folder again."
     }
@@ -361,7 +361,7 @@ object LibrarySync {
                     .apply { if (complete) putLong(LAST_KEY, System.currentTimeMillis()) }.apply()
                 report
             }, {
-                val report = "Sync failed. ${recoveryText(FolderSync.problemKind(it))} Your notebooks are still saved on this tablet."
+                val report = "Sync failed. ${recoveryText(FolderSync.problemKind(it))} Your notebooks are still saved on this device."
                 preferences(app).edit().putString(RESULT_KEY, report).putBoolean(PROBLEM_KEY, true).putBoolean(WAITING_KEY, false).apply()
                 report
             })

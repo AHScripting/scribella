@@ -20,7 +20,7 @@ class HandwritingInput private constructor(
     companion object {
         const val MAX_STROKES = 512
         const val MAX_POINTS = 50_000
-        private val pens = setOf(InkStroke.PEN, InkStroke.BALLPOINT, InkStroke.CALLIGRAPHY, InkStroke.PENCIL)
+        private val pens = setOf(InkStroke.PEN, InkStroke.BALLPOINT, InkStroke.CALLIGRAPHY, InkStroke.PENCIL, InkStroke.FOUNTAIN, InkStroke.FOUNTAIN_SOFT)
 
         /** Empty ids means the whole visible page. Positions use page units, independent of viewport zoom.
          * Native timestamps are relative to each stroke; omit them rather than invent cross-stroke timing.

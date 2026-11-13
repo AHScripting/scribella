@@ -58,6 +58,8 @@ open class NotesApplication : Application() {
             else penAssumed.also { saved.edit().putBoolean("penSeen", it).apply() }
         }.also { penSeenNow = it }
         set(value) { penSeenNow = value; getSharedPreferences(preferencesName, 0).edit().putBoolean("penSeen", value).apply() }
+    /** P574: the What's new note and the automatic update check belong to the real library, not to test runs. */
+    open val showsNews: Boolean get() = preferencesName == "library"
     internal val isRecoveryProcess get() = Application.getProcessName().endsWith(":recovery")
     open val automaticSafetyCopies: Boolean get() = preferencesName == "library" && personalTools
     internal val safetyCopies by lazy { SafetyCopies(this) }
@@ -646,8 +648,9 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
         val snapshot = session?.notebook ?: return
         val target = ++revision
         val recovery = runCatching { journal?.append(snapshot) }
-        if (recoveryCheckpoint != null || recovery.isFailure || recovery.getOrNull() == RecoveryJournal.Append.NEEDS_ASSET_CHECKPOINT) {
-            // New originals are made durable by the existing atomic save before further input.
+        if (recoveryCheckpoint != null || recovery.isFailure || recovery.getOrNull() == RecoveryJournal.Append.NEEDS_ASSET_CHECKPOINT ||
+            recovery.getOrNull() == RecoveryJournal.Append.NEEDS_CHECKPOINT) {
+            // New originals, and an edit too large for the recovery log (P614), are made durable by the existing atomic save before further input.
             // A journal IO failure also blocks more edits until that save succeeds.
             recoveryCheckpoint = target
             recovery.exceptionOrNull()?.let { warning = "Recovery log unavailable; saving before more edits: ${it.message}" }
@@ -825,7 +828,7 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
             val result = runCatching { NotebookHistory(File(app.storageRoot, "notebooks")).purge(confirmed) }
             app.main.post {
                 busy = false
-                libraryMessage = result.fold({ "Removed ${it.deleted} earlier versions from this tablet." +
+                libraryMessage = result.fold({ "Removed ${it.deleted} earlier versions from this device." +
                     if (it.skipped > 0) " Kept or skipped ${it.skipped} new, changed or unavailable versions. Review storage again." else "" },
                     { "Could not finish removing earlier versions. Review storage again. ${it.message}" })
                 notifyChanged(); done(result)

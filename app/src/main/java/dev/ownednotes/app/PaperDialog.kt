@@ -38,15 +38,21 @@ object PaperDialog {
         val preview = object : View(context) {
             override fun onDraw(canvas: Canvas) {
                 super.onDraw(canvas)
-                val scale = minOf(width / page.width, height / page.height)
-                canvas.save(); canvas.translate((width - page.width * scale) / 2, 0f); canvas.scale(scale, scale)
+                // P594: drawn inside the grey well, so a white page shows on a white sheet.
+                val w = (width - paddingLeft - paddingRight).toFloat(); val h = (height - paddingTop - paddingBottom).toFloat()
+                if (w <= 0f || h <= 0f) return
+                val scale = minOf(w / page.width, h / page.height)
+                canvas.save(); canvas.translate(paddingLeft + (w - page.width * scale) / 2, paddingTop + (h - page.height * scale) / 2); canvas.scale(scale, scale)
                 canvas.clipRect(0f, 0f, page.width, page.height)
                 if (runCatching { draft.validate(page.width, page.height) }.isSuccess)
-                    PaperRenderer.draw(canvas, page.copy(paper = draft), paint)
+                    PaperRenderer.draw(canvas, page.copy(paper = draft), paint, least = 1f / scale)
                 else { paint.color = draft.color.toInt(); canvas.drawRect(0f, 0f, page.width, page.height, paint) }
                 canvas.restore()
             }
-        }.apply { contentDescription = "Paper preview"; layoutParams = LinearLayout.LayoutParams(-1, context.dpi(160f)) }
+        }.apply {
+            contentDescription = "Paper preview"; layoutParams = LinearLayout.LayoutParams(-1, context.dpi(176f))
+            background = rounded(Kit.well(context.night), context.dp(24f)); context.dpi(12f).let { setPadding(it, it, it, it) }
+        }
         val issue = ToolControls.caption(context, "").apply { contentDescription = "Paper validation" }
         fun update() {
             issue.text = runCatching { draft.validate(page.width, page.height) }.exceptionOrNull()?.message.orEmpty()

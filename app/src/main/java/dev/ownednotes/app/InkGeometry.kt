@@ -85,8 +85,49 @@ object InkGeometry {
     }
     fun visible(stroke: InkStroke): Path = if(stroke.fillColor == null) outline(stroke) else parts(stroke).visible
 
+    /**
+     * P617 (board 11): Mix colours, a display setting. Off (the default), highlights lie flat: where a later highlight
+     * crosses an earlier one it takes over, so going over a highlight again never darkens it and a new colour replaces
+     * the old one. On, every highlight is its own layer and overlaps darken and blend. Saved strokes are not changed.
+     */
+    @Volatile var mixHighlights = false
+
+    private class Flat(val marks: List<InkStroke>, val paths: List<Path>, val result: Map<InkStroke, Path>)
+    private val flats = ThreadLocal<Flat?>()
+
+    /**
+     * With Mix colours off, the shapes the highlights among [strokes] (in drawing order) should fill: each one minus the
+     * later highlights it meets. Highlights nothing later crosses are left out, and so is every one when Mix colours is
+     * on; callers draw [pathOf] for those. The last answer is kept, so a redraw of the same page costs a scan.
+     */
+    fun flatHighlights(strokes: List<InkStroke>, pathOf: (InkStroke) -> Path = ::visible): Map<InkStroke, Path> {
+        if (mixHighlights) return emptyMap()
+        val marks = strokes.filter { it.isHighlighter && it.fillColor == null }
+        if (marks.size < 2) return emptyMap()
+        val paths = marks.map(pathOf)
+        flats.get()?.let { last ->
+            if (last.marks.size == marks.size && marks.indices.all { last.marks[it] === marks[it] && last.paths[it] === paths[it] }) return last.result
+        }
+        val bounds = paths.map { path -> RectF().also { path.computeBounds(it, true) } }
+        val result = java.util.IdentityHashMap<InkStroke, Path>()
+        for (i in marks.indices) {
+            var trimmed: Path? = null
+            for (j in i + 1 until marks.size) {
+                if (!RectF.intersects(bounds[i], bounds[j])) continue
+                val next = trimmed ?: Path(paths[i])
+                // A failed path operation leaves the whole highlight, as Mix colours on would draw it.
+                if (!next.op(paths[j], Path.Op.DIFFERENCE)) { trimmed = null; break }
+                trimmed = next
+            }
+            trimmed?.let { result[marks[i]] = it }
+        }
+        flats.set(Flat(marks, paths, result))
+        return result
+    }
+
     fun draw(canvas: Canvas, stroke: InkStroke, paint: Paint, opacity: Float = 1f, path: Path? = null) {
-        if(stroke.fillColor == null) canvas.drawPath(path ?: visible(stroke),paint(paint,stroke,opacity))
+        if(stroke.fillColor == null && stroke.isFountain) FountainInk.fill(canvas, path ?: visible(stroke), stroke, paint, opacity)
+        else if(stroke.fillColor == null) canvas.drawPath(path ?: visible(stroke),paint(paint,stroke,opacity))
         else {
             val geometry=parts(stroke)
             paint(paint,stroke,opacity).apply { color=requireNotNull(stroke.fillColor).toInt(); shader=null; alpha=(255*opacity*(if(stroke.isHighlighter) InkStroke.HIGHLIGHTER_OPACITY else 1f)).roundToInt() }

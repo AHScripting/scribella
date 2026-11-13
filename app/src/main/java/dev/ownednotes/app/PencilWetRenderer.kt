@@ -124,7 +124,19 @@ class PencilWetRenderer(private val fallback: CanvasStrokeRenderer = CanvasStrok
         return if (counted == 0) PencilGrain.DEFAULT else PencilGrain.level(pressure / counted, tilt / counted)
     }
 
+    private var xs = FloatArray(256); private var ys = FloatArray(256); private var ts = LongArray(256)
+
+    /** P618: live fountain ink, shaded and pooled from the inputs so far exactly as the saved stroke will be. */
+    private fun fountain(canvas: Canvas, stroke: InProgressStroke) {
+        val brush = stroke.brush ?: return
+        val n = stroke.getInputCount()
+        if (n > xs.size) { val size = maxOf(n, xs.size * 2); xs = FloatArray(size); ys = FloatArray(size); ts = LongArray(size) }
+        for (i in 0 until n) { stroke.populateInput(input, i); xs[i] = input.x; ys[i] = input.y; ts[i] = input.elapsedTimeMillis }
+        FountainInk.fill(canvas, outline(stroke), brush.colorIntArgb, brush.size, xs, ys, ts, n, paint)
+    }
+
     override fun draw(canvas: Canvas, inProgressStroke: InProgressStroke, strokeToScreenTransform: Matrix, animationProgress: Float) {
+        if (FountainInk.isFountain(inProgressStroke.brush?.family?.clientBrushFamilyId)) return fountain(canvas, inProgressStroke)
         if (!isPencil(inProgressStroke)) return fallback.draw(canvas, inProgressStroke, strokeToScreenTransform, animationProgress)
         val color = inProgressStroke.brush?.colorIntArgb ?: return
         paint.color = color
@@ -133,7 +145,8 @@ class PencilWetRenderer(private val fallback: CanvasStrokeRenderer = CanvasStrok
     }
 
     override fun draw(canvas: Canvas, inProgressStroke: InProgressStroke, strokeToScreenTransform: AffineTransform, animationProgress: Float) {
-        if (!isPencil(inProgressStroke)) return fallback.draw(canvas, inProgressStroke, strokeToScreenTransform, animationProgress)
+        if (!isPencil(inProgressStroke) && !FountainInk.isFountain(inProgressStroke.brush?.family?.clientBrushFamilyId))
+            return fallback.draw(canvas, inProgressStroke, strokeToScreenTransform, animationProgress)
         draw(canvas, inProgressStroke, identity, animationProgress)
     }
 

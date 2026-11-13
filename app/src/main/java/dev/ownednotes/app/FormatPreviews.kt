@@ -20,7 +20,7 @@ internal class PageFormatPreview(context: Context) : View(context) {
         val pad=dp(8f);val scale=minOf((width-2*pad)/page.width,(height-2*pad)/page.height)
         if(scale<=0)return
         c.save();c.translate((width-page.width*scale)/2,(height-page.height*scale)/2);c.scale(scale,scale)
-        PaperRenderer.draw(c,page,paint)
+        PaperRenderer.draw(c,page,paint,least=1f/scale)
         templateBitmap?.let { c.drawBitmap(it,null,android.graphics.RectF(0f,0f,page.width,page.height),paint.apply { style=Paint.Style.FILL;alpha=255;isFilterBitmap=true }) }
         paint.color=Tokens.GRAPHITE;paint.style=Paint.Style.STROKE;paint.strokeWidth=1f/scale
         c.drawRect(0f,0f,page.width,page.height,paint);c.restore()

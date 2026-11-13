@@ -50,7 +50,7 @@ internal class AppLockSetup(private val activity:MainActivity) {
     private var working=false
     val sheet=Kit.Sheet(activity,"Set up app lock","Enable",onAction={submit();false}).apply {
         add(Kit.text(activity,"Use 6 to 12 digits. Keep this PIN safe. Fingerprint unlocking is offered when it is set up in Android."))
-        add(Kit.text(activity,"Locks on a cold start or after three minutes away. This lock protects this tablet’s app screen; it does not encrypt your current cloud copies or change sync.",secondary=true))
+        add(Kit.text(activity,"Locks on a cold start or after three minutes away. This lock protects this device’s app screen; it does not encrypt your current cloud copies or change sync.",secondary=true))
         add(pin);add(confirmation);add(Kit.row(activity,"Show PIN",trailing=show){show.performClick()})
         dialog.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         dialog.setOnDismissListener {pin.text.clear();confirmation.text.clear()}
@@ -67,7 +67,7 @@ internal class AppLockSetup(private val activity:MainActivity) {
                 working=false
                 result.onSuccess {
                     activity.appLockGate.enabledNow()
-                    if(!activity.isDestroyed && sheet.dialog.isShowing) {sheet.dismiss();activity.message("App lock enabled on this tablet.")}
+                    if(!activity.isDestroyed && sheet.dialog.isShowing) {sheet.dismiss();activity.message("App lock enabled on this device.")}
                 }.onFailure {
                     if(!activity.isDestroyed && sheet.dialog.isShowing) {sheet.actionButton?.isEnabled=true;pin.isEnabled=true;confirmation.isEnabled=true;show.isEnabled=true;pin.error="Could not save app lock. Try again."}
                 }
@@ -82,7 +82,7 @@ internal object AppLockPanels {
         if(gate.locked)return null
         return Kit.Sheet(activity,"App lock",cancel="Done").apply {
             if(!gate.store.enabled()) {
-                add(Kit.text(activity,"Protect this tablet’s notebooks with a PIN and optional fingerprint unlocking."))
+                add(Kit.text(activity,"Protect this device’s notebooks with a PIN and optional fingerprint unlocking."))
                 add(Kit.button(activity,"Set up app lock…",Kit.Button.TINTED) {dismiss();activity.appLockSetup=AppLockSetup(activity).also {it.show()}})
             } else {
                 add(Kit.text(activity,"App lock is on. Scribella locks on a cold start or after three minutes away. Your PIN stays on this device."))

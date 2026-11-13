@@ -82,7 +82,7 @@ internal class ScanCamera(
     @Volatile var started = false; private set
 
     fun open() {
-        if (opened || id == null) { if (id == null) onError("This tablet has no camera"); return }
+        if (opened || id == null) { if (id == null) onError("This device has no camera"); return }
         opened = true
         val t = HandlerThread("scan-camera").apply { start() }; thread = t
         val h = Handler(t.looper); handler = h

@@ -31,25 +31,43 @@ internal object PersonalVocabulary {
     }
 }
 
-/** Functional settings inside the existing Study Text panel; shared Glass controls only. */
+/**
+ * Functional settings inside the existing Study Text panel; shared Glass controls only. P615 (board 9): one row,
+ * "Vocabulary" with how many words it holds; Add opens the word field and the list of words under the row.
+ */
 internal class VocabularyControls(context:Context,private val app:NotesApplication):LinearLayout(context) {
     val field=Kit.field(context,"Course term or name").apply {contentDescription="Personal vocabulary word"}
     private val list=LinearLayout(context).apply {orientation=VERTICAL}
-    val add=Kit.button(context,"Add word",Kit.Button.TINTED) {
+    val add=Kit.button(context,"Add word",Kit.Button.TINTED,small=true) {
         runCatching {PersonalVocabulary.add(app,field.text.toString())}.onSuccess {field.text.clear();field.error=null;render()}
             .onFailure {field.error=it.message}
     }
+    private val row=StudyRow(context,"Vocabulary",StudyRow.square(context,"M5 4h10a4 4 0 0 1 4 4v12H9a4 4 0 0 1-4-4zM9 9h6M9 13h4",0xff0a84ff.toInt()),"")
+    private val toggle=Kit.button(context,"",Kit.Button.TINTED,small=true) {open=!open;render()}
+    private val editor=LinearLayout(context).apply {
+        orientation=VERTICAL;context.dpi(12f).let {setPadding(it,0,it,it)}
+        addView(LinearLayout(context).apply {
+            orientation=HORIZONTAL;gravity=android.view.Gravity.CENTER_VERTICAL
+            addView(field,LayoutParams(0,LayoutParams.WRAP_CONTENT,1f))
+            addView(add,LayoutParams(LayoutParams.WRAP_CONTENT,LayoutParams.WRAP_CONTENT).apply {marginStart=context.dpi(8f)})
+        })
+        addView(list)
+    }
     init {
         orientation=VERTICAL
-        addView(Kit.section(context,"Personal vocabulary"))
-        addView(Kit.text(context,"Prefer your course terms when reading handwriting. Reviewed text stays as you saved it.",Kit.Type.CAPTION,secondary=true))
-        addView(field);addView(add);addView(list);render()
+        row.trail(toggle);addView(row);addView(editor);render()
     }
     private fun render() {
+        val words=PersonalVocabulary.snapshot.words
+        row.detail.text=when(words.size) {0->"Words to prefer when reading";1->"1 word";else->"${words.size} words"}
+        toggle.text=if(open) "Done" else "Add";toggle.contentDescription=if(open) "Close vocabulary" else "Add vocabulary words"
+        editor.visibility=if(open) VISIBLE else GONE
         list.removeAllViews()
-        PersonalVocabulary.snapshot.words.forEach {word->
+        words.forEach {word->
             val remove=Kit.button(context,"Remove",Kit.Button.PLAIN,small=true) {PersonalVocabulary.remove(app,word);render()}.apply {contentDescription="Remove $word"}
-            list.addView(Kit.row(context,word,trailing=remove))
+            list.addView(Kit.row(context,word,trailing=remove,menu=true).apply {setPadding(context.dpi(4f),0,0,0)})
         }
     }
+    /** Open across panel rebuilds (each stroke can rebuild the panel), so the field does not close under the pen. */
+    companion object { private var open=false }
 }

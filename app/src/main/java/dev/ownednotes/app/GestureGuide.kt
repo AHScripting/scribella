@@ -92,7 +92,7 @@ internal object GestureGuide {
         return listOf(Part("Writing", writing), Part("Moving around", fingers), Part("Shortcuts", shortcuts(ink, "Opens a link or attached file.")))
     }
 
-    private const val FINGER_NOTE = "A pen with a soft rubber tip counts as a finger, so it follows these gestures too. Keep your hand off the screen while you use one.\n\n" +
+    private const val FINGER_NOTE = "A pen with a soft rubber tip counts as a finger, so it follows these gestures too. You can rest your hand on the screen while you write. To move or zoom, put two fingers down together.\n\n" +
         "A pen your device recognises takes over the first time it touches the page, and fingers go back to moving the page, unless you have set the switch above yourself."
     private const val PEN_NOTE = "Any pen your device recognises works this way. Not every pen has a side button."
 

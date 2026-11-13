@@ -37,7 +37,7 @@ internal data class ExportRequest(val format: ExportFormat, val pages: Set<Int>?
 
 /**
  * P201 step 8: the Glass Export board as the Export button's popover, built into [column]. The title and page count with
- * "Made on this tablet", the format cards, the pages that will go (a segmented choice over their thumbnails), what to
+ * "Made on this device", the format cards, the pages that will go (a segmented choice over their thumbnails), what to
  * include, then Save to Files and Share. Each format runs the export it already had, behind its own guards; [close]
  * runs once an export has started. [chosenIds] are the pages chosen in the page strip, offered as "Chosen N".
  */
@@ -74,27 +74,32 @@ internal class ExportSheet(column: LinearLayout, private val activity: MainActiv
     val share: TextView = Kit.button(c, "Share", Kit.Button.PRIMARY) { run(share = true) }
 
     init {
+        // P592: the room there is for words, in text-sized units. On a phone with large text the badge sat beside the title
+        // and the two format columns broke "Export" and "Page image" mid-word; under 400 they stack instead.
+        val roomy = c.resources.configuration.let { it.screenWidthDp / it.fontScale.coerceAtLeast(1f) } >= 400f
+        // Every format is made here; Share then hands the file only to the app the user picks.
+        val badge = TextView(c).apply {
+            text = "Made on this device"; textSize = 12f; typeface = Tokens.SANS_SEMIBOLD; maxLines = 1
+            setTextColor(if (night) 0xff7ee2a0.toInt() else 0xff1e6b36.toInt())
+            background = rounded(if (night) 0x2930d158 else 0x1f34c759, c.dp(10f))
+            setPadding(c.dpi(10f), c.dpi(6f), c.dpi(10f), c.dpi(6f))
+        }
         column.addView(LinearLayout(c).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
             addView(LinearLayout(c).apply {
                 orientation = LinearLayout.VERTICAL
                 addView(Kit.text(c, "Export", Kit.Type.TITLE).apply { isAccessibilityHeading = true })
-                addView(Kit.text(c, "${note.title} · ${pagesWord(count)}", secondary = true).apply {
-                    textSize = 13f; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+                addView(Kit.text(c, "${note.title} · ${pagesWord(count)}", secondary = true, name = true).apply {
+                    textSize = 13f; if (roomy) isSingleLine = true else maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
                 }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = c.dpi(3f) })
+                if (!roomy) addView(badge, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = c.dpi(8f) })
             }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            // Every format is made here; Share then hands the file only to the app the user picks.
-            addView(TextView(c).apply {
-                text = "Made on this tablet"; textSize = 12f; typeface = Tokens.SANS_SEMIBOLD; maxLines = 1
-                setTextColor(if (night) 0xff7ee2a0.toInt() else 0xff1e6b36.toInt())
-                background = rounded(if (night) 0x2930d158 else 0x1f34c759, c.dp(10f))
-                setPadding(c.dpi(10f), c.dpi(6f), c.dpi(10f), c.dpi(6f))
-            }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = c.dpi(12f) })
+            if (roomy) addView(badge, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = c.dpi(12f) })
         })
         cards = ExportFormat.entries.map { f -> FormatCard(c, f, f == format) { choose(f) } }
         column.addView(LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
-            cards.chunked(2).forEachIndexed { row, pair ->
+            cards.chunked(if (roomy) 2 else 1).forEachIndexed { row, pair ->
                 addView(LinearLayout(c).apply {
                     orientation = LinearLayout.HORIZONTAL
                     pair.forEachIndexed { i, card -> addView(card, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { if (i > 0) marginStart = c.dpi(12f) }) }
@@ -237,17 +242,19 @@ internal class ExportSheet(column: LinearLayout, private val activity: MainActiv
     /** One format on the board: a 48 dp coloured icon square, the name and what it is for; ringed in accent when chosen. */
     internal class FormatCard(context: Context, val format: ExportFormat, chosen: Boolean, private val onChoose: () -> Unit) : LinearLayout(context) {
         private val night = context.night
+        private val icon = FrameLayout(context)
+        private val words = LinearLayout(context)
         var chosen = chosen
             set(value) { field = value; paint() }
         init {
             orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dpi(96f); setPadding(dpi(16f), dpi(12f), dpi(12f), dpi(12f))
-            addView(FrameLayout(context).apply {
+            addView(icon.apply {
                 background = rounded(format.color, dp(14f))
                 addView(View(context).apply { background = Kit.Icon(format.path, Color.WHITE, dpi(24f)) }, FrameLayout.LayoutParams(dpi(24f), dpi(24f), Gravity.CENTER))
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             }, LayoutParams(dpi(48f), dpi(48f)).apply { marginEnd = dpi(14f) })
-            addView(LinearLayout(context).apply {
+            addView(words.apply {
                 orientation = VERTICAL
                 addView(TextView(context).apply {
                     text = format.title; textSize = 15.5f; typeface = Kit.Type.TITLE.typeface; setTextColor(Glass.text(night)); maxLines = if (context.largeText) 3 else 1
@@ -268,6 +275,21 @@ internal class ExportSheet(column: LinearLayout, private val activity: MainActiv
             background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x1f1d2433),
                 if (chosen) rounded(fill, dp(22f), Glass.accent(night), dpi(2f)) else rounded(fill, dp(22f)), rounded(-1, dp(22f)))
             elevation = if (chosen) 0f else dp(1f)
+        }
+        /**
+         * P610: in the two columns on a phone a card is about 160 dp wide, which left its name some 70 dp beside the icon
+         * ("Notebook…", "Page ima…"). A card narrower than 230 dp stands the icon above the words instead.
+         */
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val w = MeasureSpec.getSize(widthMeasureSpec)
+            val stacked = MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.UNSPECIFIED && w < dpi(230f)
+            if (stacked != (orientation == VERTICAL)) {
+                orientation = if (stacked) VERTICAL else HORIZONTAL
+                gravity = if (stacked) Gravity.START or Gravity.TOP else Gravity.CENTER_VERTICAL
+                (icon.layoutParams as LayoutParams).apply { marginEnd = if (stacked) 0 else dpi(14f); bottomMargin = if (stacked) dpi(10f) else 0 }
+                words.layoutParams = if (stacked) LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT) else LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+            }
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
         }
         override fun getAccessibilityClassName(): CharSequence = android.widget.RadioButton::class.java.name
         override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {

@@ -24,16 +24,17 @@ import java.util.concurrent.Executors
  * P534: chooses among a few things by a small picture of each, for layers, saved papers and folders. Pictures are drawn off the
  * main thread and thrown away with the sheet. Choosing only reports the item's position; each caller keeps its own guards.
  */
-internal class PictureChooser(private val context: Context, title: String, internal val items: List<Item>, private val onDismiss: () -> Unit = {}, private val choose: (Int) -> Unit) {
+internal class PictureChooser(private val context: Context, title: String, internal val items: List<Item>, private val onDismiss: () -> Unit = {}, subtitle: String? = null, private val choose: (Int) -> Unit) {
     data class Item(val label: String, val detail: String? = null, val description: String = listOfNotNull(label, detail).joinToString(", "), val here: Boolean = false, val draw: ((Int) -> Bitmap?)? = null, val art: (() -> View)? = null)
     private val c get() = context
-    private val columns = minOf(items.size.coerceAtLeast(1), if (c.resources.configuration.screenWidthDp >= 700) 4 else 3)
+    // P650: two to a row on a phone with large text, so "No folder" and "0 notebooks" are not cut short.
+    private val columns = minOf(items.size.coerceAtLeast(1), c.resources.configuration.screenWidthDp.let { w -> if (w >= 700) 4 else if (w < 600 && c.largeText) 2 else 3 })
     private val edge = minOf(c.dpi(190f), PageThumbnails.MAX_EDGE)
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "picture-chooser").apply { isDaemon = true } }
     private val drawn = mutableListOf<Bitmap>()
     private var closed = false
-    internal val sheet = Kit.Sheet(c, title, maxWidth = (columns * 240f + 44f).coerceAtLeast(480f), centred = true)
+    internal val sheet = Kit.Sheet(c, title, maxWidth = (columns * 240f + 44f).coerceAtLeast(480f), centred = true, subtitle = subtitle)
     /** The tiles, in the order of [items], and their pictures. */
     internal val tiles = mutableListOf<View>()
     internal val pictures = mutableListOf<ImageView>()
@@ -52,8 +53,10 @@ internal class PictureChooser(private val context: Context, title: String, inter
                 if (item.here) setStroke(c.dpi(2f), Glass.accent(c.night))
             }
             addView(shown, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-            addView(Kit.text(c, item.label, Kit.Type.CAPTION).apply { gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
-            item.detail?.let { addView(Kit.text(c, it, Kit.Type.CAPTION, secondary = true).apply { gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END }) }
+            // P650: with large text a word may take a second line rather than lose its end.
+            val lines = if (c.largeText) 2 else 1
+            addView(Kit.text(c, item.label, Kit.Type.CAPTION).apply { gravity = Gravity.CENTER; maxLines = lines; ellipsize = TextUtils.TruncateAt.END })
+            item.detail?.let { addView(Kit.text(c, it, Kit.Type.CAPTION, secondary = true).apply { gravity = Gravity.CENTER; maxLines = lines; ellipsize = TextUtils.TruncateAt.END }) }
             contentDescription = item.description; isSelected = item.here; isClickable = true; isFocusable = true
             setOnClickListener { pick(index) }
             item.draw?.let { draw ->
@@ -71,7 +74,7 @@ internal class PictureChooser(private val context: Context, title: String, inter
                 orientation = LinearLayout.HORIZONTAL
                 for ((index, item) in chunk) {
                     val view = tile(index, item); tiles += view
-                    addView(view, LinearLayout.LayoutParams(0, c.dpi(if (item.draw == null) 128f else 206f), 1f).apply { setMargins(c.dpi(4f), c.dpi(4f), c.dpi(4f), c.dpi(4f)) })
+                    addView(view, LinearLayout.LayoutParams(0, c.dpi((if (item.draw == null) 128f else 206f) + if (c.largeText) 56f else 0f), 1f).apply { setMargins(c.dpi(4f), c.dpi(4f), c.dpi(4f), c.dpi(4f)) })
                 }
                 // A short last row keeps its tiles the width of the others.
                 repeat(columns - chunk.size) { addView(View(c), LinearLayout.LayoutParams(0, 0, 1f).apply { setMargins(c.dpi(4f), 0, c.dpi(4f), 0) }) }

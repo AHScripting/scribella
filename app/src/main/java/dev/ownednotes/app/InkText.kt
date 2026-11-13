@@ -94,7 +94,8 @@ internal object InkText {
         val whole = runCatching { HandwritingInput.capture(notebook, page.id) }.getOrNull()
         if (whole != null) return listOf(whole)
         val pens = setOf(dev.ownednotes.core.InkStroke.PEN, dev.ownednotes.core.InkStroke.BALLPOINT,
-            dev.ownednotes.core.InkStroke.CALLIGRAPHY, dev.ownednotes.core.InkStroke.PENCIL)
+            dev.ownednotes.core.InkStroke.CALLIGRAPHY, dev.ownednotes.core.InkStroke.PENCIL,
+            dev.ownednotes.core.InkStroke.FOUNTAIN, dev.ownednotes.core.InkStroke.FOUNTAIN_SOFT)
         val ink = page.drawnStrokes.filter { it.brush in pens }
         // Keep capture's safety limits. Search alone can read dense pages in bounded overlapping excerpts.
         if (ink.isEmpty() || (ink.size <= HandwritingInput.MAX_STROKES && ink.sumOf { it.samples.size.toLong() } <= HandwritingInput.MAX_POINTS)) return null

@@ -36,7 +36,7 @@ internal class NotebookStoragePanel(private val context: Context, private val re
         val page = Kit.Sheet(context, "Notebook storage", cancel = "Close")
         sheet = page
         page.add(Kit.text(context, entry.title, Kit.Type.HEADLINE))
-        page.add(Kit.row(context, if (local) "Kept on this tablet" else "Not downloaded",
+        page.add(Kit.row(context, if (local) "Kept on this device" else "Not downloaded",
             detail = if (local) "Available for offline use" else "Download from its original folder to open it"))
         val currentBytes = Kit.text(context, "Checking…", secondary = true).apply { contentDescription = "Current notebook file size" }
         val versionBytes = Kit.text(context, "Checking…", secondary = true).apply { contentDescription = "Earlier version file sizes" }
@@ -51,7 +51,7 @@ internal class NotebookStoragePanel(private val context: Context, private val re
             else -> "Checking access to the original folder…"
         }, secondary = true)
         page.add(detail)
-        val primary = Kit.button(context, if (local) "Free up space…" else if (openAfter) "Download and open" else "Keep on this tablet") {
+        val primary = Kit.button(context, if (local) "Free up space…" else if (openAfter) "Download and open" else "Keep on this device") {
             if (!alive || !valid()) return@button
             if (local) confirmRelease() else if (download()) page.dismiss()
             else detail.text = "The notebook is busy or changed. Wait for saving and try again."
@@ -63,7 +63,7 @@ internal class NotebookStoragePanel(private val context: Context, private val re
             if (!actions.historySnapshot(entry.id) { result ->
                 if (alive && sheet === page && page.dialog.isShowing && valid()) {
                     result.onSuccess { snapshot ->
-                        if (snapshot.items.isEmpty()) historyDetail.text = "No earlier versions remain on this tablet."
+                        if (snapshot.items.isEmpty()) historyDetail.text = "No earlier versions remain on this device."
                         else confirmHistory(snapshot)
                     }.onFailure { historyDetail.text = "Earlier versions could not be checked. Nothing was removed." }
                 }
@@ -107,7 +107,7 @@ internal class NotebookStoragePanel(private val context: Context, private val re
         val confirmation = Kit.Sheet(context, "Remove earlier versions?", cancel = "Cancel")
         sheet = confirmation
         confirmation.add(Kit.text(context, entry.title, Kit.Type.HEADLINE))
-        confirmation.add(Kit.text(context, "Permanently remove ${snapshot.items.size} earlier-version files (${android.text.format.Formatter.formatFileSize(context, snapshot.bytes)}) from this tablet? You will lose the ability to restore these versions here. This cannot be undone. Current notebook, Trash, backups and copies in the sync folder are kept. New or changed versions are kept.", secondary = true))
+        confirmation.add(Kit.text(context, "Permanently remove ${snapshot.items.size} earlier-version files (${android.text.format.Formatter.formatFileSize(context, snapshot.bytes)}) from this device? You will lose the ability to restore these versions here. This cannot be undone. Current notebook, Trash, backups and copies in the sync folder are kept. New or changed versions are kept.", secondary = true))
         val outcome = Kit.text(context, "", secondary = true)
         confirmation.add(outcome)
         confirmation.add(Kit.button(context, "Remove earlier versions", Kit.Button.DANGER) {
@@ -131,7 +131,7 @@ internal class NotebookStoragePanel(private val context: Context, private val re
         })
         sheet = confirmation
         confirmation.add(Kit.text(context, entry.title, Kit.Type.HEADLINE))
-        confirmation.add(Kit.text(context, "The app will verify an identical copy in the original folder before removing this tablet's current notebook file. Download it again before writing. Earlier versions and backups are kept.", secondary = true))
+        confirmation.add(Kit.text(context, "The app will verify an identical copy in the original folder before removing this device's current notebook file. Download it again before writing. Earlier versions and backups are kept.", secondary = true))
         confirmation.show()
     }
 

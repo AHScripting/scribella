@@ -170,7 +170,9 @@ private class WellOption(context: Context, label: String, art: Pictogram) : Text
     private val drawing = PictogramDrawable(art, context.dpi(33f), context.dpi(22f), context.night).apply { setBounds(0, 0, context.dpi(33f), context.dpi(22f)) }
     init {
         text = label; tooltipText = label; textSize = 12f; gravity = Gravity.CENTER; maxLines = 1; includeFontPadding = false
-        shrinkToFit(9f, 12f)
+        // P599/P602: "Highlighter" in the Lasso's six choices showed as "Highlig", then "Highlight", on a 320 dp phone; it may
+        // go smaller there until the whole word fits.
+        shrinkToFitWords(7.5f, 12f)
         setCompoundDrawables(null, drawing, null, null); compoundDrawablePadding = dpi(3f)
         // No ripple: the sliding pill is the touch feedback, and a dark ripple flashed over it.
         setPadding(dpi(3f), dpi(5f), dpi(3f), dpi(5f))

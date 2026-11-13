@@ -9,7 +9,13 @@ enum class PenKind(val label: String, val brushId: String) {
     /** P097 (F024): flat nib at a fixed angle (schema 18). */
     CALLIGRAPHY("Calligraphy", dev.ownednotes.core.InkStroke.CALLIGRAPHY),
     /** P127 (F023): pressure-sensitive line filled with graphite grain (schema 25). */
-    PENCIL("Pencil", dev.ownednotes.core.InkStroke.PENCIL);
+    PENCIL("Pencil", dev.ownednotes.core.InkStroke.PENCIL),
+    /** P618 (board 11): fountain pen, everyday firm nib (schema 37). */
+    FOUNTAIN("Fountain", dev.ownednotes.core.InkStroke.FOUNTAIN),
+    /** P618: fountain pen with a soft, flexible nib; one tile with [FOUNTAIN] in the pen menus, told apart by its Nib choice. */
+    FOUNTAIN_SOFT("Soft fountain", dev.ownednotes.core.InkStroke.FOUNTAIN_SOFT);
+    /** The fountain nib, or null for every other pen. */
+    val nib get() = when (this) { FOUNTAIN -> FountainInk.Nib.EVERYDAY; FOUNTAIN_SOFT -> FountainInk.Nib.SOFT; else -> null }
     companion object {
         /** The pen kind that drew a saved stroke; the pressure pen for anything else. */
         fun forBrush(brush: String) = entries.firstOrNull { it.brushId == brush } ?: PRESSURE

@@ -49,7 +49,7 @@ internal object WebDavPanels {
             false
         }
         sheet.actionButton?.isEnabled = false
-        sheet.add(Kit.text(context, "Use an HTTPS WebDAV folder that you control. The check creates small temporary test files. Connecting enables two-way notebook sync; existing notebooks stay saved on this tablet.", secondary = true))
+        sheet.add(Kit.text(context, "Use an HTTPS WebDAV folder that you control. The check creates small temporary test files. Connecting enables two-way notebook sync; existing notebooks stay saved on this device.", secondary = true))
         sheet.add(address); sheet.add(username); sheet.add(password)
         sheet.add(Kit.text(context, "Leave both sign-in fields empty only for a server that allows anonymous access. Use your server's app password when available.", Kit.Type.CAPTION, secondary = true))
         sheet.add(detail)
@@ -64,7 +64,7 @@ internal object WebDavPanels {
                         address.setText(account.endpoint.collection.toString()); username.setText(account.username.orEmpty())
                         address.isEnabled = false; username.isEnabled = false
                         detail.text = "Saved account. Enter its password to reconnect. Endpoint and username keep their original identity; stopping sync keeps saved account and recovery data."
-                    } else detail.text = "Sign-in is encrypted on this tablet. A failed check does not save a new account."
+                    } else detail.text = "Sign-in is encrypted on this device. A failed check does not save a new account."
                 }, { detail.text = "Saved sign-in could not be read. Account and recovery data were kept; no new account was created." })
             }
         }
@@ -117,7 +117,7 @@ internal object WebDavPanels {
     private fun explain(error: Throwable): String = when (error) {
         is WebDavAccountStore.Failure -> when (error.problem) {
             WebDavAccountStore.Problem.INVALID_INPUT -> "Check the HTTPS folder address and sign-in fields."
-            WebDavAccountStore.Problem.IDENTITY_CHANGE -> "This tablet already has a different saved WebDAV account. Its identity and recovery data were kept."
+            WebDavAccountStore.Problem.IDENTITY_CHANGE -> "This device already has a different saved WebDAV account. Its identity and recovery data were kept."
             else -> "Saved sign-in is unavailable or busy. Existing account data was kept. Try again later."
         }
         is WebDavHttpClient.Failure -> when (error.problem) {

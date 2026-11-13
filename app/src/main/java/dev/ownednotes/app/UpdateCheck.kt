@@ -10,8 +10,9 @@ import java.net.URL
 import kotlin.concurrent.thread
 
 /**
- * P566: Check for updates, in public builds only. It runs only when the user taps the row, asks GitHub for the project's
- * release list and sends nothing about the user's notebooks. It never downloads or installs anything: a new version opens
+ * P566: Check for updates, in public builds only. It runs when the user taps the row, or once a day when the user has
+ * turned on the automatic check (P574, [AutoUpdateCheck], off by default). It asks GitHub for the project's release list
+ * and sends nothing about the user's notebooks. It never downloads or installs anything: a new version opens
  * in the browser. The list is used because GitHub's "latest release" address skips pre-releases, and these are alphas.
  */
 internal object UpdateCheck {
@@ -121,6 +122,18 @@ internal object UpdateCheck {
             val result = runCatching(check).getOrDefault(Result.Failed)
             app.main.post { if (open) showResult(context, sheet, status, result) }
         }
+        return sheet
+    }
+
+    /** P574: what the automatic check shows when it found a newer version: the same sheet, with the answer already in. */
+    fun showAvailable(context: Context, current: String, result: Result.Available): Kit.Sheet {
+        val status = Kit.text(context, "", secondary = true)
+        val sheet = Kit.Sheet(context, "Update available", cancel = "Not now")
+        sheet.add(Kit.text(context, "You have version ${display(current)}."))
+        sheet.add(status)
+        showResult(context, sheet, status, result)
+        sheet.add(Kit.text(context, "Turn this off in Settings, Privacy & storage, About.", Kit.Type.CAPTION, secondary = true))
+        sheet.show()
         return sheet
     }
 

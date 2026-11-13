@@ -36,12 +36,18 @@ object PageSizeDialog {
                 super.onDraw(canvas)
                 val (w, h) = size() ?: return
                 if (runCatching { page.paper.validate(w, h) }.isFailure) return
-                val scale = minOf(width / w, height / h)
-                canvas.save(); canvas.translate((width - w * scale) / 2, (height - h * scale) / 2)
+                // P594: drawn inside the grey well, so a white page shows on a white sheet.
+                val bw = (width - paddingLeft - paddingRight).toFloat(); val bh = (height - paddingTop - paddingBottom).toFloat()
+                if (bw <= 0f || bh <= 0f) return
+                val scale = minOf(bw / w, bh / h)
+                canvas.save(); canvas.translate(paddingLeft + (bw - w * scale) / 2, paddingTop + (bh - h * scale) / 2)
                 canvas.scale(scale, scale); canvas.clipRect(0f, 0f, w, h)
-                PaperRenderer.draw(canvas, page.copy(width = w, height = h), paint); canvas.restore()
+                PaperRenderer.draw(canvas, page.copy(width = w, height = h), paint, least = 1f / scale); canvas.restore()
             }
-        }.apply { contentDescription = "Page size preview"; layoutParams = LinearLayout.LayoutParams(-1, context.dpi(140f)) }
+        }.apply {
+            contentDescription = "Page size preview"; layoutParams = LinearLayout.LayoutParams(-1, context.dpi(156f))
+            background = rounded(Kit.well(context.night), context.dp(24f)); context.dpi(12f).let { setPadding(it, it, it, it) }
+        }
         val presets = listOf("Custom", "A4", "A5", "US Letter", "US Legal", "Square")
         val dimensions = listOf(0f to 0f, 595.28f to 841.89f, 419.53f to 595.28f, 612f to 792f, 612f to 1008f, 1000f to 1000f)
         fun landscape() = size()?.let { it.first > it.second } ?: (page.width > page.height)

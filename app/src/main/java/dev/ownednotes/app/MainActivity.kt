@@ -59,7 +59,10 @@ class MainActivity : ComponentActivity() {
                 else if (frame.organizerOpen) frame.organizer!!.back()
                 else if (pdfTextReading || ink.pdfTextSelectionActive) cancelPdfTextSelection()
                 // P178 (G3): Back leaves page choosing before it leaves the notebook.
-                else if (frame.choosingPages) frame.stopChoosingPages() else showLibrary()
+                else if (frame.choosingPages) frame.stopChoosingPages()
+                // P653: Back closes flashcards, then the Study panel, before it leaves the notebook (it left with them open).
+                else if (frame.flashcardBar != null) frame.closeFlashcards()
+                else if (frame.studyPanel != null) frame.closeStudyPanel() else showLibrary()
         }
     }
     /** Keyboard cover actions share the editor's commands; forms and other panels keep native keys. */
@@ -914,7 +917,7 @@ class MainActivity : ComponentActivity() {
                 AlertDialog.Builder(this).setTitle("Remove PDF source?")
                     .setMessage("This source is used on $count notebook pages, including repeated imports of the same file. Keep annotations removes PDF backgrounds but keeps pages, handwriting and other objects. Delete pages also deletes their annotations. Undo restores either operation.")
                     .setPositiveButton("Keep annotations") { _, _ -> remove(false) }
-                    .setNeutralButton("Delete pages...") { _, _ ->
+                    .setNeutralButton("Delete pages…") { _, _ ->
                         AlertDialog.Builder(this).setTitle("Delete $count PDF pages and their annotations?")
                             .setMessage("All pages using this source will be removed together. Other pages stay. An empty notebook gets one blank page.")
                             .setPositiveButton("Delete pages") { _, _ -> remove(true) }
@@ -962,7 +965,7 @@ class MainActivity : ComponentActivity() {
                 scanCapture.launch(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.scans", file)); true
             }.getOrElse { ScanProcessing.target = null; message("Cannot open the camera: ${it.message}"); false }
         }
-        if (!ScanCamera.available(this)) { message("This tablet has no camera. Choose a photo to scan."); pickScanPhoto(); return true }
+        if (!ScanCamera.available(this)) { message("This device has no camera. Choose a photo to scan."); pickScanPhoto(); return true }
         if (checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             ScanProcessing.live = true; openScan(null); return true
         }
@@ -1176,7 +1179,7 @@ class MainActivity : ComponentActivity() {
         }
         return true
     }
-    internal var notebookSearchDialog: AlertDialog? = null
+    internal var notebookSearchDialog: android.app.Dialog? = null
     internal var notebookSearchField: android.widget.EditText? = null
     internal var notebookSearchResults: android.widget.LinearLayout? = null
     internal var notebookSearchStatus: android.widget.TextView? = null
@@ -1187,23 +1190,23 @@ class MainActivity : ComponentActivity() {
         val density = resources.displayMetrics.density
         val unread = note.pages.filter { PageText.readable(it) && PdfBookText.cached(it).isNullOrBlank() && PageText.cachedPage(it) == null }
         var done = note.pages.count { PageText.readable(it) } - unread.size; val total = done + unread.size
-        val status = ToolControls.caption(this, "")
-        val field = android.widget.EditText(this).apply {
-            hint = "Search text in this notebook"; isSingleLine = true; textSize = 16f; setTextColor(Glass.text(dark))
+        val status = ToolControls.caption(this, "").apply { accessibilityLiveRegion = android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE }
+        // P576: a Glass sheet with the kit's search field, in place of the older system dialog.
+        val field = Kit.field(this, "Search text in this notebook", glyph = Glyph.SEARCH).apply {
+            textSize = 16f; contentDescription = "Search text in this notebook"
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
         }
         val results = android.widget.LinearLayout(this).apply { orientation = android.widget.LinearLayout.VERTICAL }
-        val scroll = android.widget.ScrollView(this)
-        val content = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            val pad = (20 * density).toInt(); setPadding(pad, pad / 2, pad, 0)
-            addView(field); addView(status)
-            addView(scroll.apply { addView(results) }, android.widget.LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * .45f).toInt()))
-        }
+        val scroll = android.widget.ScrollView(this).apply { isNestedScrollingEnabled = true; isVerticalScrollBarEnabled = false }
         val open = java.util.concurrent.atomic.AtomicBoolean(true); var failed = 0
         val snippets = SearchSnippets(thumbnails, note, scroll, results)
-        val dialog = AlertDialog.Builder(this).setTitle("Search in notebook").setView(content).setNegativeButton("Close") { _, _ -> }
-            .setOnDismissListener { open.set(false); snippets.close(); app.searchIndexer.onInkRead = null; notebookSearchDialog = null; notebookSearchField = null; notebookSearchResults = null; notebookSearchStatus = null }.create()
+        val sheet = Kit.Sheet(this, "Search in notebook", cancel = "Close")
+        sheet.add(field)
+        sheet.add(status, 6f)
+        sheet.add(scroll.apply { addView(results) }, 4f).layoutParams.height = (resources.displayMetrics.heightPixels * .45f).toInt()
+        val dialog = sheet.dialog
+        dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        dialog.setOnDismissListener { open.set(false); snippets.close(); app.searchIndexer.onInkRead = null; notebookSearchDialog = null; notebookSearchField = null; notebookSearchResults = null; notebookSearchStatus = null }
         fun refresh() {
             val query = field.text.toString()
             val hits = PageText.search(note, query)
@@ -1218,9 +1221,7 @@ class MainActivity : ComponentActivity() {
                 results.addView(SearchHitRow(this, hit, note.pages[hit.pageIndex], dark).apply {
                     text = "Page ${hit.pageIndex + 1}${if (hit.typed) " · text box" else if (hit.handwriting) " · handwriting" else ""}\n${hit.excerpt}"
                     textSize = 15f; setTextColor(Glass.text(dark))
-                    isClickable = true; background = android.util.TypedValue().let { value ->
-                        theme.resolveAttribute(android.R.attr.selectableItemBackground, value, true); getDrawable(value.resourceId)
-                    }
+                    isClickable = true; isFocusable = true; foreground = ripple(dark, 12f * density)
                     setOnClickListener {
                         if (repository.session?.notebook !== note || ink.isEditing) { message("The notebook changed. Search again."); return@setOnClickListener }
                         dialog.dismiss(); repository.selectPage(hit.pageId); frame.revealPage(hit.pageId)
@@ -1238,7 +1239,7 @@ class MainActivity : ComponentActivity() {
         app.searchIndexer.onInkRead = { if (notebookSearchDialog === dialog) refresh() }
         // P567: a page of PDF text shown in the results is read once, so its picture can show the place.
         snippets.locate = { page -> app.searchIndexer.locate(note, page, { !open.get() }) { if (notebookSearchDialog === dialog) refresh() } }
-        dialog.show(); refresh()
+        sheet.show(); refresh()
         if (looking.isNotEmpty()) { field.setText(looking); field.setSelection(looking.length) }
         if (unread.isNotEmpty()) {
             done = 0
@@ -1348,7 +1349,7 @@ class MainActivity : ComponentActivity() {
                         val intent = android.content.Intent(android.content.Intent.ACTION_SEND).setType(mime).putExtra(android.content.Intent.EXTRA_STREAM, uri)
                             .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         startActivity(android.content.Intent.createChooser(intent, "Share $name"))
-                    }.onFailure { message(if (it is android.content.ActivityNotFoundException) "No app on this tablet can receive this file" else "${it.message}") }
+                    }.onFailure { message(if (it is android.content.ActivityNotFoundException) "No app on this device can receive this file" else "${it.message}") }
                 }, onFailure = { message("Could not prepare the export: ${it.message}") })
             }
         }
@@ -1521,6 +1522,12 @@ class MainActivity : ComponentActivity() {
         var id: String? = null
         repository.edit { id = it.addPage(repository.selectedPageId!!); true }
         id?.let { repository.selectPage(it) }
+    }
+    /** P612: the held page's Duplicate: the copy goes after that page, which need not be the current one. */
+    fun duplicatePage(pageId: String) {
+        if (repository.readOnly || !repository.canChangeNotebook || repository.session?.notebook?.pages?.none { it.id == pageId } != false) return
+        if (repository.selectedPageId != pageId) repository.selectPage(pageId)
+        duplicatePage()
     }
     fun duplicatePage() {
         var id: String? = null
@@ -1757,7 +1764,7 @@ class MainActivity : ComponentActivity() {
         }, applyTemplate = { ids, asset, paper, w, h, replace ->
             if (!repository.canChangeNotebook || repository.readOnly || repository.session?.notebook !== snapshot) false
             else { repository.edit { it.applyPageTemplate(ids,asset,paper,w,h,replace) }; true }
-        }) { ids, w, h, paper, replace ->
+        }, told = ::message) { ids, w, h, paper, replace ->
             repository.configureNotebook(snapshot, snapshot.title, ids, w, h, paper, replace)
         }
     }
@@ -1931,6 +1938,7 @@ class MainActivity : ComponentActivity() {
         // P568: at night the Library's bars are its own desk.
         window.statusBarColor = if (library) (if (dark) Kit.desk(true) else Tokens.INK) else desk
         window.navigationBarColor = if (library && dark) Kit.desk(true) else desk
+        Kit.fullScreen(window)
         runCatching {
             val c = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
             val n = android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
@@ -1942,6 +1950,18 @@ class MainActivity : ComponentActivity() {
     private var libraryPlace: LibraryScreen.Place? = null
     /** P457 (B51): edit revision when Library was asked for while the open book was still saving; shown when that save ends. */
     private var libraryAfterSave: Long? = null
+    /**
+     * P574: once per updated version, the What's new note; otherwise, if the person turned it on, the daily update
+     * check. Never both at once, and never over a notebook opened meanwhile.
+     */
+    private fun libraryNews(screen: LibraryScreen) {
+        val version = UpdateCheck.currentVersion(this)
+        val updated = runCatching { packageManager.getPackageInfo(packageName, 0).let { it.firstInstallTime != it.lastUpdateTime } }.getOrDefault(true)
+        val lines = WhatsNew.due(getSharedPreferences(app.preferencesName, 0), version, updated)
+        if (lines != null) { frame.root.post { if (libraryScreen === screen && !isFinishing) WhatsNew.show(this, version, lines) }; return }
+        AutoUpdateCheck.run(this, stillShowing = { libraryScreen === screen && !isFinishing && !isDestroyed })
+    }
+
     fun showLibrary(allowLoading: Boolean = false, syncOnOpen:Boolean = true) {
         cancelPdfTextSelection()
         libraryAfterSave = null
@@ -1972,6 +1992,7 @@ class MainActivity : ComponentActivity() {
         if (repository.loaded) libraryPlace?.let { screen.returnTo(it) }
         // P139 (F167): opening the library syncs it, unless sync is paused; only problems are shown.
         if (syncOnOpen && repository.canChangeNotebook && LibrarySync.hasSource(this) && !LibrarySync.paused(this)) syncLibrary(announce = false)
+        if (app.showsNews) libraryNews(screen)
         } finally { openingLibrary = false }
     }
     fun closeLibrary() {
@@ -2025,14 +2046,16 @@ class MainActivity : ComponentActivity() {
         primaryInk.refresh()
         companionInk?.refresh()
     }
-    fun message(text: String) { Toast.makeText(app, text, Toast.LENGTH_LONG).show() }
+    /** The last [message] shown, for tests; a toast cannot be read back. */
+    internal var lastMessage: String? = null
+    fun message(text: String) { lastMessage = text; Toast.makeText(app, text, Toast.LENGTH_LONG).show() }
     /** P088: the backup sheet; the first time it goes straight to the folder picker. */
     fun backupDialog(): AlertDialog? {
         if (isDestroyed) return null
         val hasBackupFolder = LibraryBackup.folderUri(this) != null
         val last = LibraryBackup.lastBackup(this)
         val when_ = if (last == 0L) "No backup has finished yet." else "Last backup: " +
-            android.text.format.DateUtils.getRelativeTimeSpanString(last, System.currentTimeMillis(), android.text.format.DateUtils.MINUTE_IN_MILLIS) +
+            EnglishTime.ago(last) +
             " (${LibraryBackup.lastCount(this)} notebooks)."
         // P124 (F220): the text and a Restore action share a custom view, since the three dialog buttons are taken.
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(24f), dpi(12f), dpi(24f), 0) }
@@ -2083,7 +2106,7 @@ class MainActivity : ComponentActivity() {
         if (isDestroyed) return null
         if (!LibrarySync.hasSource(this)) {
             return Kit.Sheet(context, "Library sync", cancel = "Done").apply {
-                add(Kit.text(context, "Choose where to sync your notebooks. Every notebook stays saved on this tablet until you explicitly free its local copy.", secondary = true))
+                add(Kit.text(context, "Choose where to sync your notebooks. Every notebook stays saved on this device until you explicitly free its local copy.", secondary = true))
                 add(Kit.button(context, "Choose sync folder…", Kit.Button.TINTED) { dismiss(); chooseSyncFolder() })
                 if (personalTools) {
                     add(Kit.button(context, "Try smaller uploads in a new folder…", Kit.Button.PLAIN) { dismiss(); chooseChangedSyncFolder() })
@@ -2126,7 +2149,7 @@ class MainActivity : ComponentActivity() {
         sheet.add(Kit.button(context, if (paused) "Resume" else "Pause", Kit.Button.TINTED) {
             LibrarySync.setPaused(this, !paused)
             sheet.dismiss()
-            message(if (paused) "Sync resumed." else "Sync paused. Your notebooks stay saved on this tablet; Sync now still works.")
+            message(if (paused) "Sync resumed." else "Sync paused. Your notebooks stay saved on this device; Sync now still works.")
         })
         sheet.add(Kit.button(context, "Change folder…", Kit.Button.PLAIN) { sheet.dismiss(); chooseSyncFolder() })
         sheet.add(Kit.button(context, "WebDAV server…", Kit.Button.PLAIN) { sheet.dismiss(); webDavSyncDialog(context) })
@@ -2213,7 +2236,7 @@ class MainActivity : ComponentActivity() {
                             else android.content.Intent(android.content.Intent.ACTION_VIEW).setDataAndType(uri, card.mimeType)
                         intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         startActivity(android.content.Intent.createChooser(intent, if (share) "Share ${card.name}" else "Open ${card.name}"))
-                    }.onFailure { message(if (it is android.content.ActivityNotFoundException) "No app on this tablet can open this file" else "${it.message}") }
+                    }.onFailure { message(if (it is android.content.ActivityNotFoundException) "No app on this device can open this file" else "${it.message}") }
                 }, onFailure = { message("Could not prepare the file: ${it.message}") })
             }
         }
@@ -2221,7 +2244,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {super.onResume();appLockGate.resumed()}
     override fun onPause() { appLockGate.paused();frame.zoomWriting?.canvas?.prepareForPause();primaryInk.prepareForPause();companionInk?.prepareForPause(); app.openDocuments.forEach { it.flushSave() }; super.onPause() }
     // P103: Paste follows what other apps copied while Scribella was in the background.
-    override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) refresh() }
+    override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) { Kit.fullScreen(window); refresh() } }
     // P088: leaving the app backs the library up when a backup folder is set (queued behind the save onPause started).
     override fun onStop() {if(!isChangingConfigurations){if(app.audio.active)app.audio.stop();app.audioPlayback.stop()};appLockGate.stopped(); if (!isChangingConfigurations && LibraryBackup.folderUri(this) != null) backUpLibrary(announce = false); super.onStop() }
     override fun onSaveInstanceState(outState: Bundle) {
@@ -2238,7 +2261,7 @@ class MainActivity : ComponentActivity() {
         }
         saveTextEditorDraft(); savePhotoCropDraft(); super.onSaveInstanceState(outState)
     }
-    override fun onDestroy() {encryptedBackupPrompt?.sheet?.dismiss();appLockGate.dispose();appLockSetup?.sheet?.dismiss(); encryptedSyncPrompt?.sheet?.dismiss(); pdfPasswordPrompt?.sheet?.dismiss(); pdfLinkSheet?.dialog?.dismiss(); closeScan(refresh = false);closeTextEditorForDestroy(); closePhotoCropForDestroy(); app.openDocuments.forEach { it.unlisten(observer) }; primaryInk.disposePageCurl();companionInk?.disposePageCurl(); thumbnails.close(); super.onDestroy() }
+    override fun onDestroy() {if (::frame.isInitialized) runCatching { frame.openPopover?.dismiss() } /* P642: a tool popover open while the activity ends would leak its window */;encryptedBackupPrompt?.sheet?.dismiss();appLockGate.dispose();appLockSetup?.sheet?.dismiss(); encryptedSyncPrompt?.sheet?.dismiss(); pdfPasswordPrompt?.sheet?.dismiss(); pdfLinkSheet?.dialog?.dismiss(); closeScan(refresh = false);closeTextEditorForDestroy(); closePhotoCropForDestroy(); app.openDocuments.forEach { it.unlisten(observer) }; primaryInk.disposePageCurl();companionInk?.disposePageCurl(); thumbnails.close(); super.onDestroy() }
 }
 
 /** A file name from a notebook title, without characters file pickers reject. */

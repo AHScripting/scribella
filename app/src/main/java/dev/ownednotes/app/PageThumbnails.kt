@@ -34,7 +34,7 @@ import kotlin.math.roundToInt
  */
 class PageThumbnails(
     private val scratch: File,
-    maxBytes: Int = defaultBudget(),
+    maxBytes: Int = previewBudget(),
     private val executor: ExecutorService = Executors.newSingleThreadExecutor { task ->
         Thread({ Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND); task.run() }, "page-thumbnails").apply { isDaemon = true }
     },
@@ -251,9 +251,10 @@ class PageThumbnails(
             PhotoRendering.drawPage(canvas, slice, photos, maxOf(w, h), decoded = decoded)
             TextRendering.drawPage(canvas, slice)
             AttachmentRendering.drawPage(canvas, slice, files)
+            val flat = InkGeometry.flatHighlights(slice.drawnStrokes)
             slice.drawnStrokes.forEachIndexed { index, stroke ->
                 if (index % 32 == 0 && cancelled()) { bitmap.recycle(); return null }
-                InkGeometry.draw(canvas, stroke, paint, slice.opacityOf(stroke))
+                InkGeometry.draw(canvas, stroke, paint, slice.opacityOf(stroke), flat[stroke])
             }
             }
             if (cancelled()) { bitmap.recycle(); return null }
@@ -289,5 +290,10 @@ class PageThumbnails(
         }
 
         fun defaultBudget(): Int = (Runtime.getRuntime().maxMemory() / 16).coerceAtMost(32L * 1024 * 1024).toInt()
+        /**
+         * P581: the preview cache must hold the three full previews a page turn needs (this page and both neighbours, about
+         * 6 MB each). A sixteenth of a phone's 192 MB limit is 12 MB, so they pushed each other out and the curl never got ready.
+         */
+        fun previewBudget(): Int = maxOf(defaultBudget().toLong(), minOf(Runtime.getRuntime().maxMemory() / 8, 24L * 1024 * 1024)).toInt()
     }
 }

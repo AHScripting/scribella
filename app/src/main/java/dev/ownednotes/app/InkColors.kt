@@ -55,8 +55,9 @@ class InkColors(private val preferences: SharedPreferences) {
             0xffef6c00L to "Orange", 0xff616161L to "Gray", 0xfff9d43aL to "Yellow",
             0xffff8fabL to "Pink", 0xff00b8d4L to "Cyan", 0xffffffffL to "White",
         )
-        val highlights = listOf(defaults[8], defaults[6], defaults[9], 0xff7ed957L to "Lime",
-            defaults[10], 0xffb39ddbL to "Lavender", defaults[2], defaults[3], defaults[4], defaults[5], defaults[1], defaults[11])
+        /** P620 (board 10): saturated highlighter colours, as on a real highlighter's cap. */
+        val highlights = listOf(0xffffe600L to "Yellow", 0xffff9f0aL to "Orange", 0xffff2d95L to "Pink", 0xffbf5af2L to "Violet",
+            0xff00c7ffL to "Cyan", 0xff2ee84aL to "Green", 0xffff453aL to "Red", 0xffa6ff00L to "Lime")
         val palettes = listOf(
             "Classic" to defaults,
             "Pastel" to listOf(

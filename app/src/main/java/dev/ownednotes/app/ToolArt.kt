@@ -34,7 +34,7 @@ import kotlin.math.sqrt
  */
 object ToolArt {
     /** P186: LASSO and RULER stand beside the pens in the Glass palette (the board's lasso wand and ruler with set square). */
-    enum class Tool { PENCIL, BALLPOINT, CALLIGRAPHY, BRUSH, TECHNICAL, HIGHLIGHTER, ERASER, LASSO, RULER, PAINT }
+    enum class Tool { PENCIL, BALLPOINT, CALLIGRAPHY, FOUNTAIN, BRUSH, TECHNICAL, HIGHLIGHTER, ERASER, LASSO, RULER, PAINT }
     const val WIDTH = 40f
     const val LENGTH = 120f
     /** P186: the Glass palette's slots show more barrel: 160 units, as on the board. */
@@ -48,6 +48,7 @@ object ToolArt {
         PenKind.DASHED -> Tool.TECHNICAL
         PenKind.CALLIGRAPHY -> Tool.CALLIGRAPHY
         PenKind.PENCIL -> Tool.PENCIL
+        PenKind.FOUNTAIN, PenKind.FOUNTAIN_SOFT -> Tool.FOUNTAIN
     }
 
     private const val SILVER = 0xffc4ccd4.toInt()
@@ -88,16 +89,26 @@ object ToolArt {
         canvas.drawRect(l + .6f, t, r - .6f, end + 8f, fill); fill.clearShadowLayer()
     }
 
-    fun draw(canvas: Canvas, tool: Tool, ink: Int, length: Float = LENGTH) {
+    /** P620: a highlighter at or below this width shows the fine (bullet) tip; wider ones the chisel. */
+    const val FINE_HIGHLIGHTER = 10f
+    /** P625: the widths a highlighter added from the + menu takes, as a fine tip or a chisel. */
+    const val FINE_MARKER = 8f
+    const val CHISEL_MARKER = 18f
+    /** The pen kinds in the Glass board's order; P618: one Fountain stands for both nibs. */
+    val PEN_KINDS = listOf(PenKind.CALLIGRAPHY, PenKind.FOUNTAIN, PenKind.BALLPOINT, PenKind.PENCIL, PenKind.PRESSURE, PenKind.DASHED)
+
+    /** [fine]: a highlighter draws its fine bullet tip instead of the chisel (P620). */
+    fun draw(canvas: Canvas, tool: Tool, ink: Int, length: Float = LENGTH, fine: Boolean = false) {
         val c = ink or 0xff000000.toInt()
         end = length
         when (tool) {
             Tool.PENCIL -> pencil(canvas, c)
             Tool.BALLPOINT -> ballpoint(canvas, c)
             Tool.CALLIGRAPHY -> calligraphy(canvas, c)
+            Tool.FOUNTAIN -> fountain(canvas, c)
             Tool.BRUSH -> brush(canvas, c)
             Tool.TECHNICAL -> technical(canvas, c)
-            Tool.HIGHLIGHTER -> highlighter(canvas, c)
+            Tool.HIGHLIGHTER -> highlighter(canvas, c, fine)
             Tool.ERASER -> eraser(canvas)
             Tool.LASSO -> lasso(canvas, c)
             Tool.RULER -> ruler(canvas)
@@ -210,6 +221,30 @@ object ToolArt {
         path.reset(); path.moveTo(16.4f, 31.5f); path.quadTo(20f, 27f, 23.6f, 31.5f); canvas.drawPath(path, line)
     }
 
+    /**
+     * P618: a fountain pen: a long pointed gold nib with its slit, breather hole and a bead of tipping, a black section,
+     * a gold band and a barrel in the ink colour.
+     */
+    private fun fountain(canvas: Canvas, c: Int) {
+        shadow(canvas, 13f, 34f, 27f)
+        rect(canvas, 12.6f, 52f, 27.4f, end, cylinder(c, 12.6f, 27.4f))
+        rect(canvas, 12.4f, 50f, 27.6f, 54.5f, metal(GOLD, 12.4f, 27.6f))
+        path.reset(); path.moveTo(14.6f, 34f); path.lineTo(25.4f, 34f); path.lineTo(26.4f, 50.5f); path.lineTo(13.6f, 50.5f); path.close()
+        shaded(canvas, path, cylinder(0xff1d2128.toInt(), 13.6f, 26.4f))
+        path.reset(); path.moveTo(20f, 3.2f)
+        path.cubicTo(21.4f, 9f, 25.8f, 17f, 25.6f, 25f); path.quadTo(25.4f, 31f, 24.6f, 35.5f); path.lineTo(15.4f, 35.5f)
+        path.quadTo(14.6f, 31f, 14.4f, 25f); path.cubicTo(14.2f, 17f, 18.6f, 9f, 20f, 3.2f); path.close()
+        shaded(canvas, path, metal(GOLD, 14.2f, 25.8f))
+        canvas.save(); canvas.clipPath(path); fill.color = c; canvas.drawRect(10f, 0f, 30f, 5.6f, fill); canvas.restore()
+        fill.color = SILVER; canvas.drawCircle(20f, 4.6f, 1.1f, fill)
+        line.color = 0xff6e5418.toInt(); line.strokeWidth = .5f; canvas.drawLine(20f, 5.6f, 20f, 19.4f, line)
+        fill.color = 0xff5a4512.toInt(); canvas.drawCircle(20f, 20.6f, 1.4f, fill)
+        // Engraving: two arcs below the breather hole.
+        line.color = shade(GOLD, .3f); line.strokeWidth = .4f
+        path.reset(); path.moveTo(16.6f, 27.5f); path.quadTo(20f, 24.2f, 23.4f, 27.5f); canvas.drawPath(path, line)
+        path.reset(); path.moveTo(16.2f, 30.6f); path.quadTo(20f, 27.3f, 23.8f, 30.6f); canvas.drawPath(path, line)
+    }
+
     /** A brush for the pressure pen: bristles loaded with ink, a crimped ferrule and a wooden handle. */
     private fun brush(canvas: Canvas, c: Int) {
         shadow(canvas, 13.5f, 32f, 26.5f)
@@ -245,17 +280,35 @@ object ToolArt {
         fill.color = c; canvas.drawCircle(20f, 3.8f, 1.05f, fill)
     }
 
-    /** A chisel-tip highlighter in its own colour. */
-    private fun highlighter(canvas: Canvas, c: Int) {
-        shadow(canvas, 10f, 30f, 30f)
-        path.reset(); path.addRoundRect(RectF(10f, 29f, 30f, end + 4f), 2.5f, 2.5f, Path.Direction.CW)
-        shaded(canvas, path, cylinder(c, 10f, 30f))
-        line.color = shade(c, .28f); line.strokeWidth = .6f; canvas.drawLine(10.4f, 40f, 29.6f, 40f, line)
-        path.reset(); path.moveTo(13.2f, 17.5f); path.lineTo(26.8f, 17.5f); path.lineTo(30f, 30f); path.lineTo(10f, 30f); path.close()
-        shaded(canvas, path, cylinder(DARK_BODY, 10f, 30f))
-        path.reset(); path.moveTo(15f, 11.2f); path.lineTo(25f, 4.6f); path.lineTo(25f, 18f); path.lineTo(15f, 18f); path.close()
-        shaded(canvas, path, cylinder(shade(c, .08f), 15f, 25f))
-        line.color = light(c, .55f); line.strokeWidth = .6f; canvas.drawLine(15.3f, 11.1f, 24.7f, 4.9f, line)
+    /**
+     * P620 (board 10): a highlighter with a short tip like a real one: a barrel in its ink, a white grip, a chrome collar
+     * and a short felt tip in the ink, a slanted chisel or, when [fine], a rounded bullet.
+     */
+    private fun highlighter(canvas: Canvas, c: Int, fine: Boolean) {
+        shadow(canvas, 11f, 42f, 29f)
+        rect(canvas, 11f, 74f, 29f, end + 4f, cylinder(c, 11f, 29f))
+        fill.color = Color.WHITE; fill.alpha = 115; canvas.drawRect(13.5f, 80f, 16f, end, fill); fill.alpha = 255
+        fill.color = Color.BLACK; fill.alpha = 31; canvas.drawRect(11f, 82f, 29f, 86f, fill); fill.alpha = 255
+        path.reset(); path.moveTo(12f, 42f); path.lineTo(28f, 42f); path.lineTo(29f, 74f); path.lineTo(11f, 74f); path.close()
+        shaded(canvas, path, cylinder(WHITE_BODY, 11f, 29f))
+        path.reset(); path.moveTo(14f, 29f); path.lineTo(26f, 29f); path.lineTo(27.6f, 42f); path.lineTo(12.4f, 42f); path.close()
+        shaded(canvas, path, metal(SILVER, 12.4f, 27.6f))
+        fill.color = c
+        if (fine) {
+            path.reset(); path.moveTo(15.4f, 29f); path.lineTo(24.6f, 29f); path.lineTo(24.6f, 16f)
+            path.cubicTo(24.6f, 10f, 22.6f, 4f, 20f, 4f); path.cubicTo(17.4f, 4f, 15.4f, 10f, 15.4f, 16f); path.close()
+            canvas.drawPath(path, fill)
+            path.reset(); path.moveTo(17f, 27f); path.lineTo(18.8f, 27f); path.lineTo(18.8f, 15f)
+            path.cubicTo(18.8f, 12f, 19.2f, 10f, 19.8f, 8f); path.cubicTo(18f, 10f, 17f, 12.5f, 17f, 15f); path.close()
+            fill.color = Color.WHITE; fill.alpha = 107; canvas.drawPath(path, fill); fill.alpha = 255
+            return
+        }
+        path.reset(); path.moveTo(14.6f, 29f); path.lineTo(25.4f, 29f); path.lineTo(27f, 14f); path.lineTo(13f, 4f); path.close()
+        canvas.drawPath(path, fill)
+        path.reset(); path.moveTo(16.3f, 27f); path.lineTo(18.3f, 27f); path.lineTo(17.3f, 11.5f); path.lineTo(15.7f, 10.3f); path.close()
+        fill.color = Color.WHITE; fill.alpha = 107; canvas.drawPath(path, fill)
+        path.reset(); path.moveTo(13f, 4f); path.lineTo(27f, 14f); path.lineTo(27f, 11.6f); path.lineTo(13f, 1.6f); path.close()
+        fill.color = Color.BLACK; fill.alpha = 41; canvas.drawPath(path, fill); fill.alpha = 255
     }
 
     /** A white rubber eraser in a paper sleeve, its working corner worn and a little smudged. */
@@ -289,6 +342,16 @@ object ToolArt {
                 canvas.drawRoundRect(13f, 36f, 27f, 56f, 2f, 2f, solid(0xff1a1c22))
                 canvas.drawRoundRect(11f, 56f, 29f, 84f, 3f, 3f, solid(0xff1b2a4e))
                 canvas.drawRect(11f, 58f, 29f, 62f, solid(0xffd9b45a))
+            }
+            Tool.FOUNTAIN -> {
+                path.reset(); path.moveTo(20f, 2f); path.cubicTo(21.6f, 10f, 26.4f, 18f, 25.6f, 34f); path.lineTo(14.4f, 34f)
+                path.cubicTo(13.6f, 18f, 18.4f, 10f, 20f, 2f); path.close(); canvas.drawPath(path, solid(0xffd9b45a))
+                canvas.drawCircle(20f, 3.6f, 1.4f, solid(0xffc4ccd4))
+                line.color = 0xff8a6a22.toInt(); line.strokeWidth = 1.1f; line.strokeCap = Paint.Cap.BUTT; canvas.drawLine(20f, 5f, 20f, 22f, line)
+                canvas.drawCircle(20f, 23f, 1.6f, solid(0xff8a6a22))
+                canvas.drawRoundRect(14f, 34f, 26f, 52f, 2f, 2f, solid(0xff1a1c22))
+                canvas.drawRoundRect(12f, 52f, 28f, 84f, 3f, 3f, solid(0xff1f4d3a))
+                canvas.drawRect(12f, 52f, 28f, 56f, solid(0xffd9b45a))
             }
             Tool.BALLPOINT -> {
                 shape(20f, 3f, 22f, 12f, 18f, 12f); canvas.drawPath(path, solid(0xff7c8696))
@@ -347,8 +410,10 @@ internal class ToolSlot(context: Context, val tool: ToolArt.Tool, label: String)
         text = label; tooltipText = label
         textSize = 11.5f; includeFontPadding = false
         gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; maxLines = 1
-        shrinkToFit(9f, 12f)
-        setPadding(dpi(2f), 0, dpi(2f), dpi(9f))
+        // P599: on a 320 dp phone "Calligraphy" did not fit at 9 dp and showed as "hy"; a single word may go smaller rather
+        // than be cut. Autosize still picks the largest size that fits, so wider screens look as before.
+        shrinkToFitWords(7.5f, 12f)
+        setPadding(0, 0, 0, dpi(9f))
         // No background and no ripple (P187 review): PenTypeChoices draws the cards and slides the highlight between them.
         isClickable = true; isFocusable = true
         typeface = Tokens.SANS_MEDIUM; setTextColor(ToolControls.optionInk(context.night))
@@ -399,8 +464,9 @@ internal class ToolSlot(context: Context, val tool: ToolArt.Tool, label: String)
  * the old pen to the new. The chosen tile then rests [ToolSlot.GROWTH] larger and its pen wobbles.
  */
 internal class PenTypeChoices(context: Context, initial: PenStyle, private val choose: (PenKind) -> Unit) : LinearLayout(context) {
-    private val order = listOf(PenKind.CALLIGRAPHY, PenKind.BALLPOINT, PenKind.PENCIL, PenKind.PRESSURE, PenKind.DASHED)
-    val slots = PenKind.entries.sortedBy { order.indexOf(it) }.map { kind -> kind to ToolSlot(context, ToolArt.of(kind), kind.label) }
+    // P618: one Fountain tile stands for both nibs; the pen menu's Nib choice picks between them.
+    private val order = ToolArt.PEN_KINDS
+    val slots = order.map { kind -> kind to ToolSlot(context, ToolArt.of(kind), kind.label) }
     var style = initial
         set(value) { field = value; refresh() }
     /** The tile the highlight is on or headed for; where it set off from; how far along it is (1 at rest). */
@@ -427,7 +493,8 @@ internal class PenTypeChoices(context: Context, initial: PenStyle, private val c
         clipChildren = false; clipToPadding = false
         dpi(ToolSlot.ROOM).let { setPadding(it, it, it, it) }
         slots.forEachIndexed { index, (kind, slot) ->
-            slot.setOnClickListener { runCatching { choose(kind) }.onSuccess { slot.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) } }
+            // Tapping the Fountain tile keeps whichever nib is in use.
+            slot.setOnClickListener { runCatching { choose(if (kind == PenKind.FOUNTAIN && style.kind.nib != null) style.kind else kind) }.onSuccess { slot.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) } }
             addView(slot, LayoutParams(0, dpi(if (context.largeText) 124f else 104f), 1f).apply { if (index > 0) marginStart = dpi(8f) })
         }
         refresh()
@@ -435,7 +502,8 @@ internal class PenTypeChoices(context: Context, initial: PenStyle, private val c
 
     /** The choice and its spoken label change at once; only the look travels. */
     private fun refresh() {
-        val chosen = slots.indexOfFirst { it.first == style.kind }
+        val kind = if (style.kind == PenKind.FOUNTAIN_SOFT) PenKind.FOUNTAIN else style.kind
+        val chosen = slots.indexOfFirst { it.first == kind }
         slots.forEachIndexed { index, (kind, slot) ->
             slot.ink = style.color.toInt(); slot.isSelected = index == chosen
             slot.contentDescription = "${kind.label} pen" + if (index == chosen) ", selected" else ""

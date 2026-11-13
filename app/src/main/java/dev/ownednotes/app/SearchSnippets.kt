@@ -34,6 +34,7 @@ internal fun snippetArea(pageWidth: Float, pageHeight: Float, boxes: List<RectF>
 }
 
 /** One result of Search in notebook: a small picture of the place on the page with the match marked, and its words below. */
+@android.annotation.SuppressLint("AppCompatCustomView") // the app uses framework widgets throughout
 internal class SearchHitRow(context: Context, val hit: PageText.Hit, private val page: Page, private val night: Boolean) : TextView(context) {
     private val density = resources.displayMetrics.density
     private val pictureHeight = 128f * density

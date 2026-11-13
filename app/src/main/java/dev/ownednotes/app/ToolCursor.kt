@@ -153,6 +153,7 @@ class ToolCursor(private val density: Float) : Drawable() {
         when (style.kind) {
             PenKind.BALLPOINT -> { paint.strokeWidth = width; canvas.drawPath(wave, paint) }
             PenKind.CALLIGRAPHY -> CalligraphyBrush.draw(canvas, wave, paint, width * 1.4f)
+            PenKind.FOUNTAIN, PenKind.FOUNTAIN_SOFT -> FountainInk.drawSample(canvas, wave, paint, width, requireNotNull(style.kind.nib))
             PenKind.PENCIL -> {
                 paint.strokeWidth = width; paint.shader = PencilGrain.shader(paint.color)
                 canvas.drawPath(wave, paint); paint.shader = null

@@ -21,6 +21,8 @@ import kotlin.math.roundToInt
 /**
  * The page strip (design build-order step 5): the current notebook's pages as a vertical list of previews with
  * page numbers, the current page marked in amber. Tapping a page selects it; long-press then drag reorders it.
+ * P607: as on the design canvas's Pages-Panel board: 140 dp previews with a ringed current page and its number in a blue
+ * pill, an orange ribbon on bookmarked pages, a dashed New page tile at the end; holding a page and letting go opens its menu.
  * It talks to the notebook only through [NotebookRepository]'s public API, and refuses selection and reordering
  * while the repository is loading, a file operation runs, or pen input is in progress. Scrolling is always allowed.
  *
@@ -33,9 +35,21 @@ class PagePanel(
 ) : View(context) {
     /** Called after a tap selected a page (also when it was already current). */
     var onPageActions: ((pageId: String) -> Unit)? = null
+    /**
+     * P612: a page was held: its actions show beside [bounds] (view-relative) at once, while the finger is still down.
+     * When unset, letting go of a held page that never moved calls [onPageActions] instead.
+     */
+    var onPageHeld: ((pageId: String, bounds: RectF) -> Unit)? = null
+    /** P612: the held page started moving (or the hold was cancelled), so its actions step aside. */
+    var onPageHeldEnd: (() -> Unit)? = null
     var onPageSelected: ((pageId: String) -> Unit)? = null
     /** Called after a drag moved a page; indices are zero-based positions before and after. */
     var onPageMoved: ((pageId: String, from: Int, to: Int) -> Unit)? = null
+    /** P607: called from the New page tile that ends the strip. */
+    var onNewPage: (() -> Unit)? = null
+    /** P607: whether the strip ends with the New page tile (the editor sets it while a page can be added). */
+    var newPageShown = false
+        set(value) { if (field != value) { field = value; setOffset(offset); invalidate() } }
     /** Called with a short user-facing reason when a tap or drag was refused. */
     var onRefused: ((reason: String) -> Unit)? = null
     /** P178 (G3): called when choosing starts or stops, or the chosen pages change. */
@@ -66,16 +80,35 @@ class PagePanel(
     private val pending = hashMapOf<String, Pending>()
     private val observer: () -> Unit = { onRepositoryChanged() }
 
-    private val sidePad get() = if (grid) dp(28f) else dp(16f)
-    private val topPad get() = if (grid) dp(18f) else dp(14f)
-    private val labelHeight get() = if (grid) dp(32f) else dp(24f)
-    private val gap get() = if (grid) dp(18f) else dp(12f)
-    private val corner get() = if (grid) dp(8f) else dp(6f)
+    // P607: the strip's metrics are the design canvas's Pages-Panel board: 140 dp previews in the 188 dp card, corners of
+    // 10, the number's 22 dp pill 8 dp below, 18 dp between pages.
+    private val sidePad get() = if (grid) dp(28f) else ((width - dp(STRIP_THUMB_DP)) / 2).coerceAtLeast(dp(12f))
+    private val topPad get() = if (grid) dp(18f) else dp(16f)
+    // P639: page numbers grow with the reader's text size (as far as a tile holds); the band under each page grows with them.
+    private val gridLabel = context.readerSize(13f, 17f)
+    private val stripLabel = context.readerSize(12f, 16f)
+    private val gridGrow = (gridLabel - dp(13f)) * 1.25f
+    private val stripGrow = (stripLabel - dp(12f)) * 1.25f
+    private val labelHeight get() = if (grid) dp(32f) + gridGrow else dp(30f) + stripGrow
+    private val gap get() = dp(18f)
+    private val corner get() = if (grid) dp(8f) else dp(10f)
     private val colGap get() = dp(26f)
-    private val cols get() = if (!grid || width == 0) 1 else ((width - 2 * sidePad + colGap) / (dp(GRID_CELL_DP) + colGap)).toInt().coerceAtLeast(1)
+    // P610: a phone (about 411 dp) just misses two 168 dp previews; it takes two of at least 136 dp, not one page as wide as the screen.
+    private val cols get() = if (!grid || width == 0) 1 else {
+        val room = width - 2 * sidePad + colGap
+        maxOf((room / (dp(GRID_CELL_DP) + colGap)).toInt(), if (room / (dp(GRID_CELL_MIN_DP) + colGap) >= 2) 2 else 1)
+    }
     private val cellWidth get() = ((width - 2 * sidePad - (cols - 1) * colGap) / cols).coerceAtLeast(1f)
     private fun colLeft(index: Int) = sidePad + (index % cols) * (cellWidth + colGap)
     private val ribbon = Path().apply { moveTo(1f, 0f); lineTo(13f, 0f); lineTo(13f, 20f); lineTo(7f, 15f); lineTo(1f, 20f); close() }
+    /** P607: the strip's bookmark, 14 by 22 with a notch, as on the board. */
+    private val stripRibbon = Path().apply { moveTo(0f, 0f); lineTo(14f, 0f); lineTo(14f, 22f); lineTo(7f, 16.5f); lineTo(0f, 22f); close() }
+    private val plus = Path()
+    private val tile = RectF()
+    private var tilePressed = false
+    private var downTile = false
+    /** Set once a lifted page has moved: letting go of a page that never moved opens its menu instead (P607). */
+    private var dragMoved = false
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Tokens.INK }
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = dp(13f); typeface = Tokens.SANS_MEDIUM; fontFeatureSettings = "tnum"; textAlign = Paint.Align.CENTER }
@@ -96,7 +129,6 @@ class PagePanel(
     private var downY = 0f
     private var lastX = 0f
     private var lastY = 0f
-    private var actionDown = -1
     private var downIndex = -1
     private var scrolling = false
     /** Set when a drag was cancelled or refused: the rest of that gesture does nothing. */
@@ -176,13 +208,10 @@ class PagePanel(
         if (index !in pages.indices || width == 0) return null
         return RectF().also { thumbRect(pages[index], index, tops(pages)[index] - offset, it) }
     }
-    /** Separate menu target below each preview; holding the preview still reorders it. */
-    fun pageActionBounds(index: Int): RectF? = pageBounds(index)?.let {
-        val right = colLeft(index) + cellWidth
-        RectF(right - dp(40f), it.bottom, right + dp(8f), it.bottom + labelHeight)
-    }
+    /** P607: view-relative bounds of the New page tile at the current scroll position, or null when it is not shown. */
+    fun newPageBounds(): RectF? = if (tileShown && width > 0) RectF().also { tileRect(it) } else null
     fun requestPageActions(pageId: String): Boolean {
-        if (choosing || refusal != null || repository.readOnly || !repository.canChangeNotebook || pageId !in pageIds) return false
+        if (!canOfferActions(pageId)) return false
         onPageActions?.invoke(pageId) ?: return false
         return true
     }
@@ -199,7 +228,8 @@ class PagePanel(
         val pages = notebook?.pages ?: return
         val index = currentIndex.takeIf { it >= 0 } ?: return
         val top = tops(pages)[index]
-        val bottom = top + rowHeight(pages, index / cols)
+        // P607: on the last page the New page tile after it comes into view too.
+        val bottom = if (tileShown && index == pages.lastIndex) contentHeight() - gap else top + rowHeight(pages, index / cols)
         if (top - topPad < offset) setOffset(top - topPad) else if (bottom > offset + height) setOffset(bottom - height + gap)
         invalidate()
     }
@@ -308,7 +338,15 @@ class PagePanel(
     private fun tops(order: List<Page>): FloatArray { val rows = rowTops(order); return FloatArray(order.size) { rows[it / cols] } }
     /** P201 step 6: room after the last row, so a bar floating over the panel's foot never hides it. */
     var footer = 0f
-    private fun contentHeight(): Float = (notebook?.pages?.let { rowTops(it).last() } ?: topPad) + gap + footer
+    private val tileShown get() = newPageShown && !grid && notebook != null
+    /** The New page tile, after the last page: 140 by 76, as on the board. */
+    private fun tileRect(out: RectF) {
+        val top = (notebook?.pages?.let { rowTops(it).last() } ?: topPad) - offset
+        val left = (width - dp(STRIP_THUMB_DP)) / 2
+        out.set(left, top, left + dp(STRIP_THUMB_DP), top + dp(76f))
+    }
+    private fun contentHeight(): Float = (notebook?.pages?.let { rowTops(it).last() } ?: topPad) + footer +
+        if (tileShown) dp(76f) + dp(20f) else gap
     private fun maxOffset() = (contentHeight() - height).coerceAtLeast(0f)
     private fun setOffset(value: Float) { offset = value.coerceIn(0f, maxOffset()) }
     private fun thumbRect(page: Page, index: Int, viewTop: Float, out: RectF) {
@@ -338,10 +376,34 @@ class PagePanel(
             if (top > height || top + rowHeight(order, index / cols) < 0) return@forEachIndexed
             if (page.id == active?.pageId) drawGhost(canvas, page, index, top) else drawCell(canvas, page, index, top, lifted = false)
         }
+        if (tileShown) drawNewPage(canvas)
         if (active != null) {
             val page = pages[active.from]
             drawCell(canvas, page, active.target, dragY - active.grabOffset, lifted = true, left = if (cols > 1) dragX - active.grabX else null)
         }
+    }
+
+    /** P607: the dashed New page tile: accent at 5% with a 45% dashed edge, a plus over "New page". */
+    private fun drawNewPage(canvas: Canvas) {
+        tileRect(tile)
+        if (tile.top > height || tile.bottom < 0) return
+        val accent = Glass.accent(night); val r = dp(12f)
+        paint.style = Paint.Style.FILL; paint.color = accent; paint.alpha = if (tilePressed) 31 else 13
+        canvas.drawRoundRect(tile, r, r, paint)
+        paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(1.5f); paint.alpha = 115
+        paint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(dp(5f), dp(3.5f)), 0f)
+        tile.inset(dp(.75f), dp(.75f)); canvas.drawRoundRect(tile, r, r, paint); tile.inset(-dp(.75f), -dp(.75f))
+        paint.pathEffect = null; paint.alpha = 255
+        // The plus (22 dp, 1.75 stroke) and the name 4 dp below it, centred together.
+        labelPaint.typeface = Tokens.SANS_MEDIUM; labelPaint.fitText("New page", tile.width() - dp(8f), gridLabel, dp(13f))
+        val text = labelPaint.textSize; val block = dp(22f) + dp(4f) + text
+        val cx = tile.centerX(); val top = tile.centerY() - block / 2
+        val arm = dp(7f * 22f / 24f); val cy = top + dp(11f)
+        paint.strokeWidth = dp(1.75f * 22f / 24f); paint.strokeCap = Paint.Cap.ROUND
+        plus.reset(); plus.moveTo(cx - arm, cy); plus.lineTo(cx + arm, cy); plus.moveTo(cx, cy - arm); plus.lineTo(cx, cy + arm)
+        canvas.drawPath(plus, paint); paint.strokeCap = Paint.Cap.BUTT
+        labelPaint.color = accent
+        canvas.drawText("New page", cx, top + dp(26f) - labelPaint.ascent(), labelPaint)
     }
 
     /** P201 step 6: where the lifted page will land, a dashed accent outline as on the organizer board. */
@@ -363,15 +425,17 @@ class PagePanel(
     private fun drawCell(canvas: Canvas, page: Page, index: Int, top: Float, lifted: Boolean, left: Float? = null) {
         thumbRect(page, index, top, rect)
         if (left != null) rect.offsetTo(left, rect.top)
-        val cellRight = if (left != null) rect.centerX() + cellWidth / 2 else colLeft(index) + cellWidth
         val accent = Glass.accent(night)
         val picked = choosing && page.id in chosen
         val current = if (choosing) picked else page.id == selectedId
         if (lifted) { canvas.save(); canvas.scale(1.04f, 1.04f, rect.centerX(), rect.centerY()) }
         // Elevation: a wide ambient layer and a tight key layer below; lighter on the light glass.
-        shadowPaint.setShadowLayer(if (lifted) dp(18f) else dp(8f), 0f, if (lifted) dp(8f) else dp(3f), if (lifted) 0x66000000 else if (night) 0x55000000 else 0x2a000000)
-        canvas.drawRoundRect(rect, corner, corner, shadowPaint)
-        shadowPaint.setShadowLayer(dp(1.5f), 0f, dp(1f), if (night) 0x40000000 else 0x24000000)
+        // P607: in the strip a resting page has only the board's small shadow (0 1 2, ink 8%).
+        if (grid || lifted) {
+            shadowPaint.setShadowLayer(if (lifted) dp(18f) else dp(8f), 0f, if (lifted) dp(8f) else dp(3f), if (lifted) 0x66000000 else if (night) 0x55000000 else 0x2a000000)
+            canvas.drawRoundRect(rect, corner, corner, shadowPaint)
+        }
+        shadowPaint.setShadowLayer(if (grid) dp(1.5f) else dp(2f), 0f, dp(1f), if (night) 0x40000000 else if (grid) 0x24000000 else 0x141d2433)
         canvas.drawRoundRect(rect, corner, corner, shadowPaint)
         clip.reset(); clip.addRoundRect(rect, corner, corner, Path.Direction.CW)
         canvas.save(); canvas.clipPath(clip)
@@ -387,7 +451,13 @@ class PagePanel(
         if (index == pressedIndex && !lifted) { paint.color = 0x1a182636; canvas.drawRect(rect, paint) }
         canvas.restore()
         paint.style = Paint.Style.STROKE
-        if (current || lifted) {
+        if ((current || lifted) && !grid) {
+            // P607: the board's ring: a 2.5 dp gap in the card's colour, then 2.5 dp of accent, over the page's 1 dp edge.
+            paint.color = if (night) Glass.PANE_NIGHT else android.graphics.Color.WHITE; paint.strokeWidth = dp(2.5f)
+            rect.inset(-dp(1.25f), -dp(1.25f)); canvas.drawRoundRect(rect, corner + dp(1.25f), corner + dp(1.25f), paint); rect.inset(dp(1.25f), dp(1.25f))
+            paint.color = accent
+            rect.inset(-dp(3.75f), -dp(3.75f)); canvas.drawRoundRect(rect, corner + dp(3.75f), corner + dp(3.75f), paint); rect.inset(dp(3.75f), dp(3.75f))
+        } else if (current || lifted) {
             paint.color = accent; paint.strokeWidth = dp(2.5f)
             rect.inset(-dp(3.5f), -dp(3.5f)); canvas.drawRoundRect(rect, corner + dp(3.5f), corner + dp(3.5f), paint); rect.inset(dp(3.5f), dp(3.5f))
         } else {
@@ -398,32 +468,39 @@ class PagePanel(
             paint.style = Paint.Style.FILL; paint.color = BOOKMARK_RED
             canvas.save(); canvas.translate(rect.right - dp(25f), rect.top - dp(2f)); canvas.scale(dp(1f), dp(1f))
             canvas.drawPath(ribbon, paint); canvas.restore()
+        } else if (page.bookmark != null) {
+            // P607: the strip's bookmark is the board's orange ribbon, 12 dp in from the right edge.
+            paint.style = Paint.Style.FILL; paint.color = BOOKMARK_ORANGE
+            canvas.save(); canvas.translate(rect.right - dp(26f), rect.top - dp(1f)); canvas.scale(dp(1f), dp(1f))
+            canvas.drawPath(stripRibbon, paint); canvas.restore()
         }
         if (choosing) drawCheck(canvas, picked, accent)
         if (lifted) canvas.restore()
-        val baseline = rect.bottom + labelHeight / 2 + dp(2f) - (labelPaint.descent() + labelPaint.ascent()) / 2
+        val open = grid && !choosing && page.id == selectedId
+        val gridText = "Page ${index + 1}" + if (open) " · open" else ""
+        if (grid) { labelPaint.typeface = Tokens.SANS_SEMIBOLD; labelPaint.fitText(gridText, rect.width(), gridLabel, dp(13f)) }
+        else labelPaint.textSize = stripLabel
+        // The strip's number sits in a 22 dp pill 8 dp below the page (P607); the grid's label is centred in its band.
+        val baseline = if (grid) rect.bottom + labelHeight / 2 + dp(2f) - (labelPaint.descent() + labelPaint.ascent()) / 2
+            else rect.bottom + dp(8f) + (dp(22f) + stripGrow) / 2 - (labelPaint.descent() + labelPaint.ascent()) / 2
         if (grid) {
             // The board's label: "Page N" in grey, the open page in the accent.
-            val open = !choosing && page.id == selectedId
             labelPaint.color = if (open) Kit.accentText(night) else Glass.secondary(night)
-            labelPaint.typeface = Tokens.SANS_SEMIBOLD
-            canvas.drawText("Page ${index + 1}" + if (open) " · open" else "", rect.centerX(), baseline, labelPaint)
+            canvas.drawText(gridText, rect.centerX(), baseline, labelPaint)
             labelPaint.typeface = Tokens.SANS_MEDIUM
         } else {
-            val label = (index + 1).toString() + if (page.bookmark != null) " ★" else ""
+            // P607: the bookmark is the ribbon now, so the number stands alone; the menu is a hold on the page (no ⋮).
+            val label = (index + 1).toString()
             if (current) {
-                val half = maxOf(labelPaint.measureText(label) / 2 + dp(8f), dp(13f))
-                pill.set(rect.centerX() - half, baseline + labelPaint.ascent() - dp(3f), rect.centerX() + half, baseline + labelPaint.descent() + dp(3f))
+                val tall = dp(22f) + stripGrow
+                val half = maxOf(labelPaint.measureText(label) / 2 + dp(7f), tall / 2)
+                pill.set(rect.centerX() - half, rect.bottom + dp(8f), rect.centerX() + half, rect.bottom + dp(8f) + tall)
                 paint.style = Paint.Style.FILL; paint.color = accent
-                canvas.drawRoundRect(pill, pill.height() / 2, pill.height() / 2, paint)
+                canvas.drawRoundRect(pill, tall / 2, tall / 2, paint)
                 labelPaint.color = android.graphics.Color.WHITE
             } else labelPaint.color = Glass.secondary(night)
             canvas.drawText(label, rect.centerX(), baseline, labelPaint)
         }
-        if (choosing) return
-        paint.style = Paint.Style.FILL; paint.color = Glass.secondary(night)
-        val menuX = cellRight - dp(12f)
-        for (dy in listOf(-4f, 0f, 4f)) canvas.drawCircle(menuX, rect.bottom + labelHeight / 2 + dp(dy), dp(1.3f), paint)
     }
 
     /** P178 (G3): a check circle in the preview's top-right corner; filled with a tick when the page is chosen. */
@@ -452,8 +529,9 @@ class PagePanel(
                 scroller.forceFinished(true)
                 downX = event.x; downY = event.y; lastX = event.x; lastY = event.y; scrolling = false; spent = false
                 downIndex = indexAt(event.x, event.y)
-                actionDown = if (choosing) -1 else downIndex.takeIf { pageActionBounds(it)?.contains(event.x, event.y) == true } ?: -1
-                if (downIndex >= 0 && actionDown < 0) {
+                downTile = downIndex < 0 && newPageBounds()?.contains(event.x, event.y) == true
+                if (downTile) { tilePressed = true; invalidate() }
+                if (downIndex >= 0) {
                     if (!choosing) postDelayed(longPress, ViewConfiguration.getLongPressTimeout().toLong())
                     pressedIndex = downIndex; invalidate()
                 }
@@ -461,9 +539,14 @@ class PagePanel(
             }
             MotionEvent.ACTION_MOVE -> {
                 if (spent) Unit
-                else if (drag != null) { dragX = event.x; dragY = event.y; updateTarget(); startAutoScroll(); invalidate() }
+                else if (drag != null) {
+                    if (!dragMoved && (abs(event.y - downY) > touchSlop || abs(event.x - downX) > touchSlop)) { dragMoved = true; endHeld() }
+                    dragX = event.x; dragY = event.y; updateTarget(); startAutoScroll(); invalidate()
+                }
                 else {
-                    if (!scrolling && (abs(event.y - downY) > touchSlop || abs(event.x - downX) > touchSlop)) { scrolling = true; removeCallbacks(longPress); pressedIndex = -1 }
+                    if (!scrolling && (abs(event.y - downY) > touchSlop || abs(event.x - downX) > touchSlop)) {
+                        scrolling = true; removeCallbacks(longPress); pressedIndex = -1; if (tilePressed) { tilePressed = false; invalidate() }
+                    }
                     if (scrolling) { setOffset(offset - (event.y - lastY)); invalidate() }
                 }
                 lastX = event.x; lastY = event.y
@@ -474,7 +557,7 @@ class PagePanel(
                     spent -> Unit
                     drag != null -> drop()
                     scrolling -> fling()
-                    actionDown >= 0 -> { if (pageActionBounds(actionDown)?.contains(event.x, event.y) == true) pageIds.getOrNull(actionDown)?.let { requestPageActions(it) } }
+                    downTile -> { if (newPageBounds()?.contains(event.x, event.y) == true) onNewPage?.invoke() }
                     downIndex >= 0 && indexAt(event.x, event.y) == downIndex -> tap(downIndex)
                 }
                 endGesture()
@@ -484,7 +567,10 @@ class PagePanel(
         return true
     }
 
-    private fun endGesture() { velocity?.recycle(); velocity = null; downIndex = -1; actionDown = -1; scrolling = false; if (pressedIndex >= 0) { pressedIndex = -1; invalidate() } }
+    private fun endGesture() {
+        velocity?.recycle(); velocity = null; downIndex = -1; scrolling = false; downTile = false
+        if (pressedIndex >= 0 || tilePressed) { pressedIndex = -1; tilePressed = false; invalidate() }
+    }
 
     private fun fling() {
         val tracker = velocity ?: return
@@ -515,11 +601,18 @@ class PagePanel(
         refusal?.let { onRefused?.invoke(it); spent = true; return }
         val top = tops(snapshot.pages)[downIndex] - offset
         thumbRect(snapshot.pages[downIndex], downIndex, top, rect)
-        drag = Drag(snapshot, snapshot.pages[downIndex].id, downIndex, lastY - top, lastX - rect.left); pressedIndex = -1
+        drag = Drag(snapshot, snapshot.pages[downIndex].id, downIndex, lastY - top, lastX - rect.left); pressedIndex = -1; dragMoved = false
         dragX = lastX; dragY = lastY
         performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
         invalidate()
+        // P612: the user found "nothing happens until you let go" confusing; the actions now show while holding.
+        val id = snapshot.pages[downIndex].id
+        if (onPageHeld != null && canOfferActions(id)) { heldShown = true; onPageHeld?.invoke(id, RectF(rect)) }
     }
+    private var heldShown = false
+    private fun canOfferActions(pageId: String) =
+        !choosing && refusal == null && !repository.readOnly && repository.canChangeNotebook && pageId in pageIds
+    private fun endHeld() { if (heldShown) { heldShown = false; onPageHeldEnd?.invoke() } }
 
     /** The dragged page goes before the first remaining page whose midpoint is below the lifted page's centre. */
     private fun updateTarget() {
@@ -552,6 +645,10 @@ class PagePanel(
         val active = drag ?: return
         drag = null; removeCallbacks(autoScroll); autoScrolling = false
         invalidate()
+        // P607: a page held and let go where it was opens its menu (duplicate, move, delete), in place of the old ⋮.
+        // P612: with [onPageHeld] set, the actions are already showing beside the page and stay to be tapped.
+        if (!dragMoved && active.target == active.from) { if (!heldShown) requestPageActions(active.pageId); heldShown = false; return }
+        endHeld()
         if (active.target == active.from) return
         refusal?.let { onRefused?.invoke(it); return }
         if (repository.session?.notebook !== active.snapshot) { onRefused?.invoke("The notebook changed; try again"); return }
@@ -563,14 +660,19 @@ class PagePanel(
 
     private fun cancelDrag() {
         if (drag == null) return
-        spent = true; drag = null; removeCallbacks(autoScroll); autoScrolling = false; invalidate()
+        spent = true; drag = null; removeCallbacks(autoScroll); autoScrolling = false; invalidate(); endHeld()
     }
 
     companion object {
-        const val PREFERRED_WIDTH_DP = 168f
+        /** P607: the floating Pages card's width, from the board; the strip's previews are [STRIP_THUMB_DP] wide inside it. */
+        const val PREFERRED_WIDTH_DP = 188f
+        const val STRIP_THUMB_DP = 140f
         /** P201 step 6: the organizer board's preview width; the grid fits as many columns of at least this as it can. */
         const val GRID_CELL_DP = 168f
+        const val GRID_CELL_MIN_DP = 136f
         const val BOOKMARK_RED = 0xffff3b30.toInt()
+        /** P607: the strip's bookmark ribbon, as on the Pages-Panel board. */
+        const val BOOKMARK_ORANGE = 0xffff9500.toInt()
         private const val FADE_MS = 180L
         /** P178 (G3): the strip's glass, opaque so previews never show the page through it. */
         const val LIGHT_PANE = 0xfff3f5f8.toInt()

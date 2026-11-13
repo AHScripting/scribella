@@ -159,7 +159,7 @@ internal object HandStyleSheet {
         val auto = Kit.Switch(context, choice.auto, "Improve my handwriting as I write") { on -> choice = choice.copy(auto = on) }
         sheet.add(Kit.row(context, "Improve my handwriting as I write", "Each word you finish on a page is rewritten in this hand. Undo puts it back as you wrote it.", trailing = auto), 4f)
         }
-        sheet.add(Kit.privacy(context, "Read and rewritten on this tablet. Your ink never leaves it."), 14f)
+        sheet.add(Kit.privacy(context, "Read and rewritten on this device. Your ink never leaves it."), 14f)
         sheet.show()
         if (selected != null) readWriting(selected)
     }

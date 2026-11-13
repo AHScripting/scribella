@@ -64,23 +64,27 @@ object SystemClipboard {
         runCatching { context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(TEXT_LABEL, text)) }
     }
 
-    /** True when another app put text on the Android clipboard after [since] (System.currentTimeMillis). Reads only the description. */
-    fun hasOutsideText(context: Context, since: Long): Boolean = runCatching {
-        val description = context.getSystemService(ClipboardManager::class.java).primaryClipDescription ?: return false
-        description.hasMimeType("text/*") && description.label?.toString() !in setOf(LABEL, TEXT_LABEL) && description.timestamp > since
-    }.getOrDefault(false)
+    /** What another app put on the Android clipboard after [since] (System.currentTimeMillis). Text wins when both are offered. */
+    enum class Outside { NONE, TEXT, IMAGE }
+    /**
+     * P587: one read of the clipboard's description answers both text and picture. Each read is a call to the system, and the
+     * toolbars ask on every refresh (a finger going down or lifting publishes one), so they ask once, not once per question.
+     */
+    fun outside(context: Context, since: Long): Outside = runCatching {
+        val description = context.getSystemService(ClipboardManager::class.java).primaryClipDescription ?: return Outside.NONE
+        when {
+            description.label?.toString() in setOf(LABEL, TEXT_LABEL) || description.timestamp <= since -> Outside.NONE
+            description.hasMimeType("text/*") -> Outside.TEXT
+            description.hasMimeType("image/*") -> Outside.IMAGE
+            else -> Outside.NONE
+        }
+    }.getOrDefault(Outside.NONE)
 
     /** The clipboard's text, made fit for a text box, or null when there is none. */
     fun outsideText(context: Context): String? = runCatching {
         val clip = context.getSystemService(ClipboardManager::class.java).primaryClip?.takeIf { it.itemCount > 0 } ?: return null
         TextBox.clean(clip.getItemAt(0).coerceToText(context)?.toString().orEmpty()).takeIf { it.isNotBlank() }
     }.getOrNull()
-
-    /** B35 (P198): true when another app put a picture on the Android clipboard after [since]. Reads only the description. */
-    fun hasOutsideImage(context: Context, since: Long): Boolean = runCatching {
-        val description = context.getSystemService(ClipboardManager::class.java).primaryClipDescription ?: return false
-        description.hasMimeType("image/*") && description.label?.toString() !in setOf(LABEL, TEXT_LABEL) && description.timestamp > since
-    }.getOrDefault(false)
 
     /** The picture another app copied, or null. Android grants this app read access to it while it is on the clipboard. */
     fun outsideImage(context: Context): Uri? = runCatching {

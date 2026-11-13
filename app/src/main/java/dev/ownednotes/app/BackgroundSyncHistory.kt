@@ -2,8 +2,6 @@ package dev.ownednotes.app
 
 import android.content.SharedPreferences
 import java.security.MessageDigest
-import java.text.DateFormat
-import java.util.Date
 import java.util.UUID
 
 /** One local execution receipt, separate from manual sync results; never part of a notebook/export. */
@@ -37,7 +35,7 @@ internal class BackgroundSyncHistory(private val prefs: SharedPreferences) {
     }
     fun summary(source: String?): String {
         val r = receipt(source) ?: return "No background check recorded yet."
-        val whenText = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(if (r.ended > 0) r.ended else r.started))
+        val whenText = EnglishTime.short(if (r.ended > 0) r.ended else r.started)
         if (!r.currentSource) return "Last background check: $whenText, for a previous sync source."
         val result = when (r.state) {
             State.RUNNING -> "running"

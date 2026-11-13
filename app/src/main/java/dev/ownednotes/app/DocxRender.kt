@@ -14,7 +14,7 @@ import kotlin.math.*
 /** Local static Word layout. Unsupported Office content is retained in the original and reported. */
 internal class DocxRender(private val archive: OfficeArchive,private val index: OfficeDocumentIndex) {
     data class Result(val file: File,val pages: Int,val warnings: List<String>)
-    private val warnings=linkedSetOf("Exact Word fonts, layout and pagination (tablet fonts and local reflow are used)")
+    private val warnings=linkedSetOf("Exact Word fonts, layout and pagination (device fonts and local reflow are used)")
     private val bitmaps=ArrayList<Bitmap>()
     private var decodedPixels=0L
     private var characters=0
@@ -384,7 +384,7 @@ internal class DocxRender(private val archive: OfficeArchive,private val index: 
         val bitmap=bitmapByPart[path] ?: run {
         val bytes=archive.readPart(path,OfficeArchive.PART_BYTES)
         val bounds=BitmapFactory.Options().apply { inJustDecodeBounds=true }; BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
-        if(bounds.outWidth<=0 || bounds.outHeight<=0) { warnings.add("Picture formats unavailable on this tablet"); return null }
+        if(bounds.outWidth<=0 || bounds.outHeight<=0) { warnings.add("Picture formats unavailable on this device"); return null }
         if(bounds.outWidth.toLong()*bounds.outHeight>100_000_000L) throw IOException("Word picture exceeds the pixel limit")
         var sample=1
         while(bounds.outWidth.toLong()*bounds.outHeight/(sample.toLong()*sample)>1_000_000) sample*=2

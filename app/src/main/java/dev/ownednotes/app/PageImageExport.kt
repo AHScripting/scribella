@@ -45,7 +45,7 @@ internal object ExportRendering {
         if (includeInk || !page.hasObjectLayers) PhotoRendering.drawPage(canvas, slice, notebook.imageAssets, longestEdge=imageEdge, paint = imagePaint, decoded = decodedPhotos)
         if (includeInk || !page.hasObjectLayers) TextRendering.drawPage(canvas, slice)
         AttachmentRendering.drawPage(canvas, slice, notebook.attachmentAssets)
-        if (includeInk) slice.drawnStrokes.forEach { stroke -> InkGeometry.draw(canvas, stroke, inkPaint, slice.opacityOf(stroke)) }
+        if (includeInk) InkGeometry.flatHighlights(slice.drawnStrokes).let { flat -> slice.drawnStrokes.forEach { stroke -> InkGeometry.draw(canvas, stroke, inkPaint, slice.opacityOf(stroke), flat[stroke]) } }
         }
     }
 

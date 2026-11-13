@@ -28,7 +28,7 @@
             <category android:name="android.intent.category.APP_GALLERY" />
         </intent>
     </queries>
-    <application android:name=".NotesApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@style/Theme.Scribella" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true">
+    <application android:name=".NotesApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@style/Theme.Scribella" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="false">
         <service android:name=".BackgroundSyncService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" />
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation">
             <intent-filter>

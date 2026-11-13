@@ -8,6 +8,7 @@ import java.util.UUID
 
 /** Process-owned foreground recording. Drafts survive failed attachment/save and process restart. */
 internal class AudioRecording(private val app: NotesApplication) {
+    companion object { /** The status before anything has been recorded; the Study panel shows a shorter line for it. */ const val READY="Record a lecture clip on this device" }
     interface Backend {
         fun start(file:File,onLimit:()->Unit)
         fun pause()
@@ -37,7 +38,7 @@ internal class AudioRecording(private val app: NotesApplication) {
     enum class State { IDLE, RECORDING, PAUSED, FINISHING, SAVING }
     var state=State.IDLE;private set
     var revision=0;private set
-    var status="Record a lecture clip on this tablet";private set
+    var status=READY;private set
     internal var testFactory:(()->Backend)?=null
     val needsPermission get()=testFactory==null
     val active get()=state==State.RECORDING || state==State.PAUSED
@@ -75,7 +76,7 @@ internal class AudioRecording(private val app: NotesApplication) {
             backend!!.start(File(folder,"clip.m4a")) {if(active)stop()}
             startedAt=clock();pausedMs=0;pausedAt=0
             app.audioPlayback.stop()
-            state=State.RECORDING;publish("Recording · stays on this tablet until notebook sync");true
+            state=State.RECORDING;publish("Recording · stays on this device until notebook sync");true
         }catch(error:Exception){backend?.release();backend=null;state=State.IDLE;publish("Could not record: ${error.message}. Any partial clip is kept locally.");false}
     }
     fun togglePause() {

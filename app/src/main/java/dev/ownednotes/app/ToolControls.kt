@@ -27,7 +27,8 @@ import kotlin.math.roundToInt
  * P187: a [tool] popover takes the Glass board's 30 dp radius and 22 dp padding. No popover is wider than the screen
  * less 8 dp on each side.
  */
-class Popover(private val anchor: View, width: Float? = 340f, private val tool: Boolean = false, build: (LinearLayout) -> Unit) {
+class Popover(private val anchor: View, width: Float? = 340f, private val tool: Boolean = false, passThrough: Boolean = false,
+    build: (LinearLayout) -> Unit) {
     private val context = anchor.context
     private val pixels = width?.let { minOf(context.dpi(it), context.resources.displayMetrics.widthPixels - context.dpi(16f)) }
     val content = LinearLayout(context).apply {
@@ -40,9 +41,12 @@ class Popover(private val anchor: View, width: Float? = 340f, private val tool: 
     private val scroll = android.widget.ScrollView(context).apply { addView(content) }
     val window = PopupWindow(scroll, pixels ?: ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true).apply {
         // P201 step 3: graphite at night, like the rest of the night chrome; its controls follow the context's night.
-        setBackgroundDrawable(Glass.pane(context, context.night, if (tool) 30f else Glass.CARD))
+        setBackgroundDrawable(Glass.float(context, context.night, if (tool) 30f else Glass.CARD))
         elevation = context.dp(16f)
         isOutsideTouchable = true
+        // P624: a pass-through board takes no focus, so a touch outside it closes it and still reaches what is under it:
+        // the pen on the page draws, a button works. A focusable popover would swallow that touch.
+        if (passThrough) isFocusable = false
         animationStyle = R.style.Scribella_PopoverMotion
     }
     /**
@@ -94,6 +98,15 @@ class Popover(private val anchor: View, width: Float? = 340f, private val tool: 
      */
     var grows = false
     init {
+        // P644: the app turns without being rebuilt; a popover placed against a button that has since moved closes
+        // when the screen's width changes (turning, split screen). A keyboard changes only the height and keeps it.
+        val turned = View.OnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft && oldRight > oldLeft && window.isShowing) window.dismiss()
+        }
+        scroll.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) { anchor.rootView.removeOnLayoutChangeListener(turned); anchor.rootView.addOnLayoutChangeListener(turned) }
+            override fun onViewDetachedFromWindow(v: View) { anchor.rootView.removeOnLayoutChangeListener(turned) }
+        })
         content.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
             if (grows && window.isShowing && bottom - top != oldBottom - oldTop) {
                 val height = fit()
@@ -124,18 +137,27 @@ class Popover(private val anchor: View, width: Float? = 340f, private val tool: 
             local[0].coerceIn(frame.left + margin, maxOf(frame.left + margin, frame.right - margin - width)), top)
     }
 
-    /** Opens on the given side of the anchor: a docked tool bar puts its popovers toward the page. */
+    /**
+     * Opens on the given side of the anchor: a docked tool bar puts its popovers toward the page.
+     * P580: kept between the status and navigation bars (the visible frame, not the whole window), and a board opening
+     * above a bottom palette stays above it and scrolls, so on a phone the pen board no longer runs under both bars.
+     */
     fun showToward(side: Int) {
         if (side == Gravity.BOTTOM) return show()
-        val root = anchor.rootView
+        val frame = android.graphics.Rect(); anchor.getWindowVisibleDisplayFrame(frame)
+        val screen = IntArray(2); val at = IntArray(2)
+        anchor.getLocationOnScreen(screen); anchor.getLocationInWindow(at)
+        frame.offset(at[0] - screen[0], at[1] - screen[1])
         val margin = context.dpi(8f); val gap = context.dpi(6f)
-        splitIfTall(root.height - 2 * margin)
+        val whole = (frame.height() - 2 * margin).coerceAtLeast(1)
+        val above = at[1] - gap - (frame.top + margin)
+        val room = if (side == Gravity.TOP && above >= context.dpi(240f)) above else whole
+        splitIfTall(room)
         val width = if (window.width > 0) window.width else {
             content.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED); content.measuredWidth
         }
         content.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.UNSPECIFIED)
-        val height = minOf(content.measuredHeight, root.height - 2 * margin)
-        val at = IntArray(2); anchor.getLocationInWindow(at)
+        val height = minOf(content.measuredHeight, room).coerceAtLeast(1)
         val (x, y) = when (side) {
             Gravity.TOP -> at[0] to at[1] - height - gap
             Gravity.END -> at[0] + anchor.width + gap to at[1]
@@ -143,7 +165,8 @@ class Popover(private val anchor: View, width: Float? = 340f, private val tool: 
         }
         window.height = height
         window.showAtLocation(anchor, Gravity.TOP or Gravity.START,
-            x.coerceIn(margin, maxOf(margin, root.width - width - margin)), y.coerceIn(margin, maxOf(margin, root.height - height - margin)))
+            x.coerceIn(frame.left + margin, maxOf(frame.left + margin, frame.right - width - margin)),
+            y.coerceIn(frame.top + margin, maxOf(frame.top + margin, frame.bottom - height - margin)))
     }
     /** B17 (P136): opens beside the anchor (a notebook in the library), on whichever side has room, top-aligned with it. */
     fun showBeside() {
@@ -282,13 +305,18 @@ object ToolControls {
         }
     }
 
-    /** P187: views laid left to right, wrapping onto as many rows as the width needs (the colour dots). */
-    private class Flow(context: Context) : ViewGroup(context) {
+    /**
+     * P187: views laid left to right, wrapping onto as many rows as the width needs (the colour dots).
+     * P613: [gapX] and [gapY] space them, as the Page & paper chips; hidden children take no room.
+     */
+    internal class Flow(context: Context, private val gapX: Int = 0, private val gapY: Int = 0) : ViewGroup(context) {
         private fun place(width: Int, at: (View, Int, Int) -> Unit): Int {
             var x = 0; var y = 0; var row = 0
             for (i in 0 until childCount) {
                 val child = getChildAt(i)
-                if (x > 0 && x + child.measuredWidth > width) { x = 0; y += row; row = 0 }
+                if (child.visibility == View.GONE) continue
+                if (x > 0) x += gapX
+                if (x > 0 && x + child.measuredWidth > width) { x = 0; y += row + gapY; row = 0 }
                 at(child, x, y); x += child.measuredWidth; row = maxOf(row, child.measuredHeight)
             }
             return y + row
@@ -297,7 +325,8 @@ object ToolControls {
             val width = if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.UNSPECIFIED) Int.MAX_VALUE else MeasureSpec.getSize(widthMeasureSpec)
             measureChildren(MeasureSpec.UNSPECIFIED, MeasureSpec.UNSPECIFIED)
             val height = place(width) { _, _, _ -> }
-            setMeasuredDimension(if (width == Int.MAX_VALUE) (0 until childCount).sumOf { getChildAt(it).measuredWidth } else width, height)
+            val shown = (0 until childCount).map { getChildAt(it) }.filter { it.visibility != View.GONE }
+            setMeasuredDimension(if (width == Int.MAX_VALUE) shown.sumOf { it.measuredWidth } + gapX * maxOf(0, shown.size - 1) else width, height)
         }
         override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
             place(r - l) { child, x, y -> child.layout(x, y, x + child.measuredWidth, y + child.measuredHeight) }
@@ -378,7 +407,7 @@ object ToolControls {
     }
 
     fun roundWidth(v: Float) = if (v < 10f) (v * 2).roundToInt() / 2f else v.roundToInt().toFloat()
-    fun formatUnits(v: Float) = if (v % 1f == 0f) "${v.toInt()}" else "%.1f".format(v)
+    fun formatUnits(v: Float) = if (v % 1f == 0f) "${v.toInt()}" else "%.1f".format(java.util.Locale.ROOT, v)
 
     // P187: the Glass board's tool popover type and colours; P201 step 3 adds their night values on the graphite pane.
     private fun labelInk(night: Boolean) = if (night) 0xff9aa3b5.toInt() else 0xff566074.toInt()
@@ -393,6 +422,8 @@ object ToolControls {
     private fun thin(night: Boolean) = if (night) 0x1affffff else Glass.THIN
     /** Space between the sections of a tool popover (the board uses 18 dp; 16 keeps it shorter in landscape). */
     private const val GAP = 16f
+    /** Nine shapes sit as five over four, so no tile is left alone on a row. */
+    private const val SHAPE_COLUMNS = 5
     /** Page units are PDF points. */
     private const val MM_PER_UNIT = 25.4f / 72f
 
@@ -415,7 +446,8 @@ object ToolControls {
     }
     /** P187: a section label in a tool popover: small, semibold and grey. */
     fun label(context: Context, text: String) = TextView(context).apply {
-        this.text = text; textSize = 13f; typeface = Tokens.SANS_SEMIBOLD; setTextColor(labelInk(context.night)); maxLines = 1
+        // P592: a long label wraps (large text on a phone cut "When you hold the highlighter still" in half).
+        this.text = text; textSize = 13f; typeface = Tokens.SANS_SEMIBOLD; setTextColor(labelInk(context.night)); maxLines = 3
     }
     /** P187: a short explanation under a tool popover control. */
     fun note(context: Context, text: String) = TextView(context).apply {
@@ -432,7 +464,7 @@ object ToolControls {
             addView(view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dpi(8f) })
         })
     }
-    fun millimetres(units: Float) = (units * MM_PER_UNIT).let { if (it < 10f) "%.1f mm".format(it) else "${it.roundToInt()} mm" }
+    fun millimetres(units: Float) = (units * MM_PER_UNIT).let { if (it < 10f) "%.1f mm".format(java.util.Locale.ROOT, it) else "${it.roundToInt()} mm" }
 
     /**
      * P187: a small segmented well of text chips for a secondary choice beside a section label (the pen palettes).
@@ -459,7 +491,12 @@ object ToolControls {
         }
         items.forEachIndexed { index, item ->
             item.setOnClickListener { runCatching { onSelect(index) }.onSuccess { paint(index, true); performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK) } }
-            addView(item)
+            // P592: with large text on a phone "Thickness" ran past its chip; there each chip gets a share of the row by its
+            // words and a set height, and its words shrink to fit. Normal text keeps the chips as they were.
+            if (context.largeText) {
+                item.shrinkToFit(9f, 12f)
+                addView(item, LinearLayout.LayoutParams(0, maxOf(dpi(30f), (item.paint.fontSpacing * 1.3f).toInt()), item.paint.measureText(item.text.toString()) + dp(20f)))
+            } else addView(item)
         }
         paint(selected, false)
     }
@@ -619,14 +656,30 @@ object ToolControls {
         var choices: PenTypeChoices? = null
         var size: SizeControl? = null
         var refreshSmoothing: () -> Unit = {}
+        var nibs: View? = null
         fun choose(style: PenStyle) {
             val previousKind = ink.penStyle.kind
             ink.selectPenStyle(style); val now = ink.penStyle
             preview.style = now; choices?.style = now; size?.tint = now.color.toInt(); name.text = "${now.kind.label} pen"
+            nibs?.visibility = if (now.kind.nib != null) View.VISIBLE else View.GONE
             if (previousKind != now.kind) refreshSmoothing()
         }
         choices = PenTypeChoices(c, ink.penStyle) { choose(ink.penStyle.copy(kind = it)) }
         section(column, choices)
+        // P618: the fountain pen's two nibs, beside their label; shown only while a fountain pen is in use.
+        nibs = LinearLayout(c).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(LinearLayout(c).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(label(c, "Nib"))
+                addView(note(c, "Soft swells on downstrokes as you press."))
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(chips(c, listOf("Everyday", "Soft"), if (ink.penStyle.kind == PenKind.FOUNTAIN_SOFT) 1 else 0) {
+                choose(ink.penStyle.copy(kind = if (it == 1) PenKind.FOUNTAIN_SOFT else PenKind.FOUNTAIN))
+            }.apply { contentDescription = "Fountain pen nib" })
+            visibility = if (ink.penStyle.kind.nib != null) View.VISIBLE else View.GONE
+        }
+        section(column, nibs, GAP - 6f)
         section(column, preview)
         val smoothing = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
         refreshSmoothing = {
@@ -691,6 +744,17 @@ object ToolControls {
         val owner = Popover.building
         group(column, "Colour", swatches(c, ink.highlighterStyle.color, { choose(ink.highlighterStyle.copy(color = it)) }, custom, highlighter = true,
             eyedropper = owner?.let { o -> { o.dismiss(); Eyedropper.arm(ink, highlighter = true) } }))
+        // P617 (board 11): in the colour card, off at first: going over a highlight adds, never darkens.
+        section(column, LinearLayout(c).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(LinearLayout(c).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(label(c, "Mix colours"))
+                addView(note(c, "Overlaps darken and blend. Off: going over a highlight never darkens it.").apply { setPadding(0, dpi(2f), 0, 0) })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(Kit.Switch(c, ink.highlighterMix, "Mix highlighter colours") { ink.selectHighlighterMix(it) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = c.dpi(12f) })
+        }, GAP - 6f)
         size = SizeControl(c, "Thickness", ink.highlighterStyle.width, .5f, 50f, listOf(6f, 10f, 14f, 20f, 28f), ::roundWidth) {
             choose(ink.highlighterStyle.copy(width = it))
         }.apply { tint = ink.highlighterStyle.color.toInt() }
@@ -844,6 +908,46 @@ object ToolControls {
         }.apply { contentDescription = "Lasso filter" })
     }
 
+    /**
+     * P590: the Shapes board. The shape pen first (the frequent choice), then the shapes to insert as tiles, then the
+     * ruler: its drawing scale and Show/Hide. Every control runs through the editor's guards via the callbacks.
+     */
+    fun shapes(column: LinearLayout, ink: InkCanvas, canInsert: Boolean, shapePen: (Boolean) -> Unit, rulerScale: (Int) -> Unit,
+               ruler: () -> Unit, insert: (dev.ownednotes.core.ShapeLibrary.Choice) -> Unit) {
+        val c = column.context; val night = c.night
+        title(column, "Shapes", if (ink.shapePen) "Shape pen on" else null)
+        group(column, "Shape pen", LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(Kit.segmented(c, listOf("On", "Off"), if (ink.shapePen) 0 else 1) { shapePen(it == 0) }.apply { contentDescription = "Shape pen" },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(note(c, "Everything you draw becomes a shape."))
+        })
+        val tiles = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
+        dev.ownednotes.core.ShapeLibrary.Choice.entries.chunked(SHAPE_COLUMNS).forEachIndexed { r, choices ->
+            tiles.addView(LinearLayout(c).apply {
+                orientation = LinearLayout.HORIZONTAL
+                (0 until SHAPE_COLUMNS).forEach { i ->
+                    val choice = choices.getOrNull(i)
+                    val tile = if (choice == null) View(c) else EditorFrame.ShapeIcon(c, choice).apply {
+                        background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(if (night) 0x33ffffff else 0x1f1d2433),
+                            rounded(Kit.group(night), dp(14f)), rounded(-1, dp(14f)))
+                        isEnabled = canInsert; alpha = if (canInsert) 1f else .38f
+                        setOnClickListener { insert(choice) }
+                    }
+                    addView(tile, LinearLayout.LayoutParams(0, dpi(58f), 1f).apply { if (i > 0) marginStart = dpi(8f) })
+                }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (r > 0) topMargin = c.dpi(8f) })
+        }
+        group(column, "Insert a shape", tiles)
+        group(column, "Ruler scale", LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(Kit.segmented(c, listOf("Screen", "1:1", "1:10", "1:100"), RulerScale.ratios.indexOf(ink.ruler.scaleRatio)) { rulerScale(RulerScale.ratios[it]) }
+                .apply { contentDescription = "Ruler scale" }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(note(c, "Drawing distances are in cm and follow zoom."))
+        })
+        section(column, Kit.button(c, if (ink.rulerShown) "Hide ruler" else "Show ruler", Kit.Button.TINTED, small = true) { ruler() }, GAP - 4f)
+    }
+
     /** A 48 dp text row for menus on a Glass pane, day or night; with [icon], a coloured icon square leads it (P177, G2). */
     fun menuRow(context: Context, label: String, enabled: Boolean, icon: Glyph? = null, tint: Int = Glass.ACCENT, action: () -> Unit) = TextView(context).apply {
         text = label; textSize = 16f; typeface = Tokens.SANS; gravity = Gravity.CENTER_VERTICAL
@@ -863,12 +967,80 @@ object ToolControls {
             topMargin = dpi(8f); bottomMargin = dpi(8f); marginStart = dpi(12f); marginEnd = dpi(12f)
         }
     }
+    /** P605: a section name in an icon-grid menu: 13 sp medium grey, no box around the group. */
+    /** P605/P606: the full-width pill that can lead a tile menu ("Find a command", "Back to the notebook"). */
+    fun pill(context: Context, text: String, path: String, action: () -> Unit) = TextView(context).apply {
+        val night = context.night
+        this.text = text; contentDescription = text; textSize = 15f; typeface = Tokens.SANS; gravity = Gravity.CENTER_VERTICAL
+        setTextColor(Glass.secondary(night)); setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.END
+        setCompoundDrawablesRelative(Kit.Icon(path, Glass.secondary(night), dpi(20f)).apply { setBounds(0, 0, dpi(20f), dpi(20f)) }, null, null, null)
+        compoundDrawablePadding = dpi(10f); setPadding(dpi(14f), 0, dpi(14f), 0)
+        background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(if (night) 0x33ffffff else 0x1f1d2433),
+            rounded(if (night) 0xff353b47.toInt() else 0xffffffff.toInt(), dp(22f), if (night) Glass.RULE_NIGHT else Glass.RULE, dpi(1f)), null)
+        setOnClickListener { action() }
+    }
+    fun pillParams(context: Context) = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, context.dpi(44f)).apply { context.dpi(2f).let { setMargins(it, it, it, context.dpi(8f)) } }
+    /** P605: tile menus have rounder corners than other popovers, as in the design canvas. */
+    const val TILE_MENU_RADIUS = 24f
+    fun tileCaption(context: Context, text: String) = TextView(context).apply {
+        this.text = text; textSize = 13f; typeface = Tokens.SANS_MEDIUM; setTextColor(Glass.secondary(context.night))
+        lineHeight = sp(context, 16f); setPadding(dpi(8f), dpi(6f), dpi(8f), dpi(4f))
+    }
+    /**
+     * P605: [tiles] four to a row, each a quarter of the menu's width; a short last row keeps its tiles at the left. With
+     * larger system text the rows hold three, then two, so no name has to break inside a word.
+     */
+    fun tileGrid(context: Context, tiles: List<View>) = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        val columns = tileColumns(context)
+        tiles.chunked(columns).forEach { chunk ->
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                chunk.forEach { addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)) }
+                repeat(columns - chunk.size) { addView(View(context), LinearLayout.LayoutParams(0, 0, 1f)) }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+    }
+    fun tileColumns(context: Context) = context.resources.configuration.fontScale.let { if (it >= 1.6f) 2 else if (it >= 1.25f) 3 else 4 }
+    internal fun sp(context: Context, value: Float) =
+        android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, value, context.resources.displayMetrics).roundToInt()
     /** A grouped card of menu rows in thin glass; groups replace divider lines in Glass menus (P177, G2). */
     fun menuGroup(context: Context, first: Boolean) = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         background = rounded(thin(context.night), dp(Glass.CHIP + 2f))
         setPadding(0, dpi(2f), 0, dpi(2f))
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (!first) topMargin = dpi(10f) }
+    }
+}
+
+/**
+ * P605: one tile of an icon-grid menu, as the redesign sketches draw it. A 44 dp well in [tint] at 12% (22% at night) holds a
+ * 24 dp drawing ([path], see [MenuIcons]) in [tint]; [short] sits under it, 12 sp medium, two lines at most. [label] is the
+ * command's full name: what a screen reader says and what holding the tile shows. Greyed at 40% when not [enabled]; a tool
+ * that is [on] fills its well and draws in white; [fault] (removes work) names the tile in red.
+ */
+class MenuTile(context: Context, val label: String, val short: String, path: String, tint: Int, enabled: Boolean,
+               on: Boolean = false, fault: Boolean = false, action: () -> Unit) : LinearLayout(context) {
+    init {
+        orientation = VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+        val night = context.night
+        minimumHeight = dpi(88f); setPadding(dpi(2f), dpi(8f), dpi(2f), dpi(8f))
+        background = ripple(night, dp(16f))
+        addView(android.widget.ImageView(context).apply {
+            background = rounded(if (on) tint else androidx.core.graphics.ColorUtils.setAlphaComponent(tint, if (night) 56 else 31), dp(14f))
+            setImageDrawable(Kit.Icon(path, if (on) Color.WHITE else tint, dpi(24f)))
+            scaleType = android.widget.ImageView.ScaleType.CENTER
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LayoutParams(dpi(44f), dpi(44f)))
+        addView(TextView(context).apply {
+            text = short; textSize = 12f; typeface = Tokens.SANS_MEDIUM; gravity = Gravity.CENTER; maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END; lineHeight = ToolControls.sp(context, 15f)
+            setTextColor(if (!fault) Glass.text(night) else if (night) Kit.dangerText(true) else Tokens.FAULT)
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dpi(6f) })
+        contentDescription = label; tooltipText = label
+        isSelected = on; isEnabled = enabled; alpha = if (enabled) 1f else .4f
+        setOnClickListener { action() }
     }
 }
 

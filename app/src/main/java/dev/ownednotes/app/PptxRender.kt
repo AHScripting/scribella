@@ -14,7 +14,7 @@ import kotlin.math.*
 internal class PptxRender(private val archive: OfficeArchive, private val index: OfficeDocumentIndex) {
     data class Result(val file: File, val warnings: List<String>)
     private data class Part(val path: String, val root: OfficeXml.Node, val links: Map<String,OfficeDocumentIndex.Companion.Link>)
-    private val warnings = linkedSetOf("Exact Office font and layout fidelity; tablet fonts may substitute for presentation fonts")
+    private val warnings = linkedSetOf("Exact Office font and layout fidelity; device fonts may substitute for presentation fonts")
     private val parts = object : LinkedHashMap<String,Part>(8,.75f,true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String,Part>?) = size > 4
     }
@@ -278,7 +278,7 @@ internal class PptxRender(private val archive: OfficeArchive, private val index:
         val name=OfficeDocumentIndex.target(owner.path,link.target)
         val bytes=archive.readPart(name,OfficeArchive.PART_BYTES)
         val bounds=BitmapFactory.Options().apply { inJustDecodeBounds=true }; BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
-        if(bounds.outWidth <= 0 || bounds.outHeight <= 0) { warnings.add("Picture formats unavailable on this tablet"); return }
+        if(bounds.outWidth <= 0 || bounds.outHeight <= 0) { warnings.add("Picture formats unavailable on this device"); return }
         if(bounds.outWidth.toLong()*bounds.outHeight > 100_000_000L) throw IOException("Presentation picture exceeds the pixel limit")
         var sample=1
         while(bounds.outWidth.toLong()*bounds.outHeight/(sample.toLong()*sample) > 1_000_000) sample *= 2

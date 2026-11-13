@@ -31,7 +31,7 @@ object NotebookPackage {
     private const val MAX_TOTAL = 32 * 1024 * 1024
     /** B24 (P140): schema 26, the compact form, for notebooks beyond what schemas 1–25 hold. */
     const val COMPACT_SCHEMA = 26
-    const val SUPPORTED_SCHEMA = 36
+    const val SUPPORTED_SCHEMA = 37
     private const val MAX_INK_ENTRY = 64 * 1024 * 1024
     private const val MAX_COMPACT_TOTAL = 768L * 1024 * 1024
     /** Pretty page JSON above about this size is slow to write each time, so such a notebook is saved compact. */
@@ -328,6 +328,7 @@ object NotebookPackage {
         require(manifest.schemaVersion >= 24 || notebook.pages.all { page -> page.reviewedInk.all { it.inputMode == ReviewedInkInput.RAW } }) { "Reviewed remaining centerlines require schema 24" }
         require(manifest.schemaVersion >= 23 || notebook.pages.all { it.reviewedInk.isEmpty() }) { "Reviewed handwriting requires schema 23" }
         require(manifest.schemaVersion >= 25 || notebook.pages.all { page -> page.strokes.none { it.isPencil } }) { "Pencil requires schema 25" }
+        require(manifest.schemaVersion >= 37 || notebook.pages.all { page -> page.strokes.none { it.isFountain } }) { "Fountain pen requires schema 37" }
         require(manifest.schemaVersion >= 36 || notebook.pages.all {p->p.strokes.none {it.audio!=null}}) { "Audio links require schema 36" }
         require(manifest.schemaVersion >= 35 || notebook.pages.none { it.hasNotebookLinks }) { "Notebook links require schema 35" }
         require(manifest.schemaVersion >= 34 || notebook.pages.all { p -> p.textBoxes.none { it.sticky != null } }) { "Sticky notes require schema 34" }
@@ -469,6 +470,7 @@ internal val Notebook.hasLocks get() = pages.any { page -> page.layers.any { it.
 
 /** The schema the notebook's features need (1–25,27–30); the package may be saved compact as [NotebookPackage.COMPACT_SCHEMA]. */
 fun Notebook.schemaVersion(): Int = when {
+    pages.any { page -> page.strokes.any { it.isFountain } } -> 37
     pages.any {p->p.strokes.any {it.audio!=null}} -> 36
     pages.any {it.hasNotebookLinks} -> 35
     pages.any { p -> p.textBoxes.any { it.sticky != null } } -> 34

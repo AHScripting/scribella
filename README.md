@@ -80,9 +80,9 @@ Either way, "Draw with finger" in the pen's menu lets you choose for yourself, a
 
 ## Updates
 
-Tap **Check for updates** at the bottom of the library's side panel. If there is a new version, it opens the download page in your browser. The app never checks by itself, and never installs anything by itself.
+Tap **Check for updates** at the bottom of the library's side panel. If there is a new version, it opens the download page in your browser. From 0.2.0 you can also turn on an automatic check (Settings → Privacy & storage → About): it asks GitHub at most once a day and sends nothing about your notebooks. It is off until you turn it on, and the app never installs anything by itself.
 
-Version numbers: `0.1.1` is a small fix, `0.2.0` has new features. Everything stays marked alpha for now.
+Version numbers: `0.1.1` is a small fix, `0.2.0` has new features. Everything stays marked alpha for now. What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 

@@ -6,8 +6,8 @@ android {
         applicationId = "dev.ownednotes.app"
         minSdk = 33
         targetSdk = 35
-        versionCode = 166
-        versionName = "0.1.0-alpha"
+        versionCode = 209
+        versionName = "0.2.0-alpha"
         testInstrumentationRunner = "dev.ownednotes.app.TestRunner"
     }
     // P563: the release key lives outside the repository. Without these variables the release APK comes out unsigned.

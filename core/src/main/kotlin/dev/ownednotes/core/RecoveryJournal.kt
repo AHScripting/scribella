@@ -24,7 +24,9 @@ class RecoveryJournal private constructor(private val file:File, initial:Noteboo
     @Serializable private data class CacheData(val version:Int=1,val notebookId:String,val sourceSha:String,val root:String,val pages:List<PageDigest>)
     @Serializable private data class CacheEnvelope(val payload:String,val sha:String)
     var usedFingerprintCache=false;private set
-    enum class Append { UNCHANGED, RECORDED, NEEDS_ASSET_CHECKPOINT }
+    /** P614: [NEEDS_CHECKPOINT] is an edit too large for one record or the journal's room (Match pen size on a long
+     * notebook rescales every stroke); like new sources it is made durable by the ordinary save before more input. */
+    enum class Append { UNCHANGED, RECORDED, NEEDS_ASSET_CHECKPOINT, NEEDS_CHECKPOINT }
     private val json=Json { encodeDefaults=true }
     private var fingerprintVersion=2
     private val binaryStroke=RecoveryStrokeFingerprint(json)
@@ -171,10 +173,16 @@ class RecoveryJournal private constructor(private val file:File, initial:Noteboo
         if(next.assets.map { it.id }.toSet()!=availablePdfs || next.imageAssets.map { it.id }.toSet()!=availableImages || next.attachmentAssets.map { it.id }.toSet()!=availableAttachments) return Append.NEEDS_ASSET_CHECKPOINT
         val before=fingerprint(latest);val after=fingerprint(next)
         if(before==after) { latest=next;return Append.UNCHANGED }
-        val change=Change(version=fingerprintVersion,notebookId=next.id,before=before,after=after,title=next.title,pages=next.pages.map { it.id },changed=changes(latest,next),
+        val changed=changes(latest,next)
+        // A lower bound of the record's size, so a whole-notebook change is never encoded into one huge string first.
+        val least=changed.sumOf { page -> page.strokes.sumOf { it.samples.size*MIN_SAMPLE_BYTES+it.outlines.sumOf { o -> o.size.toLong() }*MIN_POINT_BYTES } }
+        if(least>MAX_RECORD) return Append.NEEDS_CHECKPOINT
+        val change=Change(version=fingerprintVersion,notebookId=next.id,before=before,after=after,title=next.title,pages=next.pages.map { it.id },changed=changed,
             pdfs=next.assets.map { it.id },images=next.imageAssets.map { it.id },attachments=next.attachmentAssets.map { it.id })
-        val bytes=encode(change);ensureOwned()
-        require(file.length()+bytes.size+8<=MAX_JOURNAL) { "Recovery journal exceeds budget; save the notebook first" }
+        val bytes=json.encodeToString(Change.serializer(),change).toByteArray()
+        if(bytes.size>MAX_RECORD) return Append.NEEDS_CHECKPOINT
+        ensureOwned()
+        if(file.length()+bytes.size+8>MAX_JOURNAL) return Append.NEEDS_CHECKPOINT
         FileOutputStream(file,true).use { output -> val data=DataOutputStream(output);write(data,bytes);data.flush();output.fd.sync() }
         records.add(change);latest=next
         return Append.RECORDED
@@ -257,6 +265,9 @@ class RecoveryJournal private constructor(private val file:File, initial:Noteboo
         private val HASH=Regex("[a-f0-9]{64}")
         private const val MAX_RECORD=16*1024*1024
         private const val MAX_JOURNAL=64L*1024*1024
+        // The fewest JSON bytes a sample ({"x":0.0,"y":0.0,"timeMs":0,"pressure":0.0,"tilt":0.0,"orientation":0.0}) or point takes.
+        private const val MIN_SAMPLE_BYTES=60L
+        private const val MIN_POINT_BYTES=17L
         private const val HEX="0123456789abcdef"
         private const val MAX_CACHE_BYTES=32L*1024*1024
         private val cacheWorker=java.util.concurrent.Executors.newSingleThreadExecutor {task->Thread(task,"notes-recovery-fingerprints").apply {isDaemon=true;priority=Thread.MIN_PRIORITY}}

@@ -45,6 +45,21 @@ internal fun TextView.shrinkToFit(minDp: Float, maxSp: Float) {
     setAutoSizeTextTypeUniformWithConfiguration(least, maxOf(least + 1, android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, maxSp, resources.displayMetrics).toInt()), 1, android.util.TypedValue.COMPLEX_UNIT_PX)
 }
 
+/** P639: text drawn on a canvas: [baseDp] at normal text size, growing with the reader's text size up to [maxDp]. Never below [baseDp]. */
+internal fun Context.readerSize(baseDp: Float, maxDp: Float): Float =
+    maxOf(dp(baseDp), minOf(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, baseDp, resources.displayMetrics), dp(maxDp)))
+
+/** P639: sets [paint] to [most], or smaller (not below [least]) so [text] fits [room]; longer text is still shortened by the caller. */
+internal fun Paint.fitText(text: CharSequence, room: Float, most: Float, least: Float) {
+    textSize = most
+    val wide = measureText(text, 0, text.length)
+    if (wide > room && wide > 0f) {
+        // Width is not quite in proportion to size (letters snap to pixels), so step down until it really fits.
+        textSize = maxOf(least, most * room / wide)
+        while (textSize > least && measureText(text, 0, text.length) > room) textSize = maxOf(least, textSize - 0.5f)
+    }
+}
+
 /** F219: a screen reader says which control an option belongs to, not a bare "Off". */
 internal object OptionInGroup : View.AccessibilityDelegate() {
     override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
@@ -92,6 +107,18 @@ object Kit {
     /** A sheet's own fill: opaque, so text on it never sits on the page behind. */
     fun sheet(night: Boolean) = if (night) 0xff23272f.toInt() else 0xfffbfcfe.toInt()
     fun desk(night: Boolean) = if (night) 0xff1a1d24.toInt() else Tokens.DESK
+    /**
+     * P627: full screen. The status bar stays hidden in the app, the Library and the editor alike, and over its sheets;
+     * a swipe down from the top edge shows it for a moment. The navigation bar stays.
+     */
+    fun fullScreen(window: android.view.Window) {
+        runCatching {
+            window.insetsController?.apply {
+                systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(android.view.WindowInsets.Type.statusBars())
+            }
+        }
+    }
     /** A card straight on the desk (the Settings cards): white by day, graphite by night. */
     fun cardFill(night: Boolean) = if (night) Glass.PANE_NIGHT else Color.WHITE
 
@@ -102,11 +129,13 @@ object Kit {
     }
 
     /** A line of text in [type]; secondary text is for hints and values. */
-    fun text(context: Context, text: CharSequence, type: Type = Type.BODY, secondary: Boolean = false) = TextView(context).apply {
+    /** [name]: the text holds a name someone typed (a notebook title), which never shrinks far to keep a long word whole (P654). */
+    fun text(context: Context, text: CharSequence, type: Type = Type.BODY, secondary: Boolean = false, name: Boolean = false) = TextView(context).apply {
         this.text = text; textSize = type.size; typeface = type.typeface; includeFontPadding = false
         setTextColor(if (secondary) Glass.secondary(context.night) else Glass.text(context.night))
         if (type == Type.LARGE_TITLE || type == Type.TITLE) letterSpacing = -.01f
         setLineSpacing(0f, 1.15f)
+        keepWordsWhole(leastShare = if (name) NAME_SHARE else 0f)
     }
 
     /** A section header over a group: small grey caps, as "PRESSURE" or "STYLUS" on the Settings board. */
@@ -212,7 +241,7 @@ object Kit {
             Button.TINTED -> accentFill(night) to accentText(night)
             Button.GLASS -> (if (night) Glass.PANE_NIGHT else Glass.PANE) to Glass.text(night)
             Button.DANGER -> dangerFill(night) to dangerText(night)
-            Button.PLAIN -> Color.TRANSPARENT to Glass.accent(night)
+            Button.PLAIN -> Color.TRANSPARENT to (if (night) accentText(true) else Glass.accent(false)) // night: the lighter accent text (P641)
             Button.DARK -> (if (night) Glass.TEXT_NIGHT else Glass.TEXT) to (if (night) Glass.TEXT else Color.WHITE)
         }
         setTextColor(ink)
@@ -228,6 +257,21 @@ object Kit {
         }
         isClickable = true; isFocusable = true
         setOnClickListener { runCatching(onClick) }
+    }
+
+    /**
+     * P646: [view] catches every tap so nothing behind it receives one (a side panel, a full-screen panel), but a screen
+     * reader is not offered it as a button, since tapping it does nothing.
+     */
+    fun blockTouches(view: View) {
+        view.isClickable = true
+        view.accessibilityDelegate = TOUCH_BLOCKER
+    }
+    private val TOUCH_BLOCKER = object : View.AccessibilityDelegate() {
+        override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+            super.onInitializeAccessibilityNodeInfo(host, info)
+            info.isClickable = false; info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)
+        }
     }
 
     /** A round 48 dp glass button showing only [glyph]; [label] is what TalkBack and the tooltip say. */
@@ -324,7 +368,7 @@ object Kit {
                 TextView(context).apply {
                     text = label; textSize = 14f; maxLines = 1; gravity = Gravity.CENTER; includeFontPadding = false
                     minHeight = dpi(if (pictures != null) 64f else 36f); setPadding(dpi(10f), 0, dpi(10f), 0)
-                    shrinkToFit(11f, 14f); accessibilityDelegate = OptionInGroup
+                    shrinkToFitWords(11f, 14f); accessibilityDelegate = OptionInGroup
                     pictures?.get(index)?.let { art ->
                         val picture = PictureDrawable(art).apply { setBounds(0, 0, dpi(30f), dpi(38f)) }
                         setCompoundDrawablesRelative(picture, null, null, null); compoundDrawablePadding = dpi(10f)
@@ -351,7 +395,11 @@ object Kit {
             }
             items.forEachIndexed { index, item ->
                 item.setOnClickListener { runCatching { onSelect(index) }.onSuccess { paint(index, true); performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) } }
-                addView(item, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                // P595: with large text the words shrink to fit (as P593's chips): auto-size needs a set height, and each
+                // segment's share follows its words, so "Standard" isn't split while "A4" leaves it room.
+                if (context.largeText && pictures == null)
+                    addView(item, LinearLayout.LayoutParams(0, maxOf(dpi(36f), (item.paint.fontSpacing * 1.3f).toInt()), item.paint.measureText(item.text.toString()) + dp(20f)))
+                else addView(item, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             }
             paint(selected, false)
         }
@@ -429,7 +477,7 @@ object Kit {
         val night = key.context.night
         key.isSelected = on
         key.background = rounded(if (!on) Color.TRANSPARENT else if (night) 0x3d0a84ff else 0x1f0a66d9, key.dp(12f))
-        (key as? TextView)?.setTextColor(if (on) (if (night) Glass.ACCENT_NIGHT else 0xff0a5cc4.toInt()) else Glass.text(night))
+        (key as? TextView)?.setTextColor(if (on) accentText(night) else Glass.text(night))
     }
 
     /** A − value + stepper for small counts (line spacing, copies). [format] shows the value between the buttons. */
@@ -554,6 +602,7 @@ object Kit {
             addView(TextView(context).apply {
                 text = title; textSize = 15f; typeface = Tokens.SANS; includeFontPadding = false
                 setTextColor(if (danger) dangerText(night) else Glass.text(night)); maxLines = if (context.largeText) Int.MAX_VALUE else 2
+                keepWordsWhole()
             })
             if (detail != null) addView(TextView(context).apply {
                 text = detail; textSize = 12.5f; typeface = Tokens.SANS; setTextColor(Glass.secondary(night)); maxLines = if (context.largeText) Int.MAX_VALUE else 2
@@ -577,6 +626,16 @@ object Kit {
             // The whole row flips its switch, so the target is the row, not the 52 dp switch.
             setOnClickListener { trailing.performClick() }
         }
+        if (trailing is Switch) {
+            // P646: one stop for a screen reader, which says the title and the switch's state; the switch itself is skipped.
+            trailing.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.className = android.widget.Switch::class.java.name; info.isCheckable = true; info.isChecked = trailing.isChecked
+                }
+            }
+        }
     }
 
     /** A coloured 30 dp icon square leading a row. */
@@ -590,7 +649,7 @@ object Kit {
         dpi(6f).let { setPadding(it, it, it, it) }
     }
 
-    /** The green privacy note with a shield: "Your ink never leaves this tablet…". */
+    /** The green privacy note with a shield: "Your ink never leaves this device…". */
     fun privacy(context: Context, text: String) = LinearLayout(context).apply {
         val night = context.night
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -608,17 +667,19 @@ object Kit {
     /**
      * A visual choice: [art] (a paper, a cover, a format) over a [label], with an accent ring and a check badge when
      * chosen, as the paper and export tiles. Read by TalkBack as a radio-like button named [label].
+     * P613: [compact] is the Page & paper board's small tile: the art alone in a 60×80 frame (the art draws its own page),
+     * a 12 dp name under it, and a ring with no badge when chosen. Its width comes from the grid cell.
      */
-    class Tile(context: Context, art: View, label: String, chosen: Boolean, private val onChoose: () -> Unit) : LinearLayout(context) {
+    class Tile(context: Context, art: View, label: String, chosen: Boolean, private val compact: Boolean = false, private val onChoose: () -> Unit) : LinearLayout(context) {
         private val night = context.night
         private val frame = FrameLayout(context)
         private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = context.dp(2.5f); color = Glass.accent(night) }
         private val badge = Icon(Paths.CHECK, Color.WHITE, context.dpi(12f))
         private val disc = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Glass.accent(night) }
         private val name = TextView(context).apply {
-            text = label; textSize = 13f; gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+            text = label; textSize = if (compact) 12f else 13f; gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
             // A tile's width is fixed, so at large text its name shrinks only as far as it must to stay whole.
-            if (context.largeText) shrinkToFit(11f, 13f)
+            if (context.largeText) shrinkToFit(11f, if (compact) 12f else 13f)
         }
         var chosen = chosen
             set(value) { field = value; paint() }
@@ -627,6 +688,12 @@ object Kit {
 
         init {
             orientation = VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setWillNotDraw(false)
+            if (compact) {
+                frame.addView(art, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                addView(frame, LayoutParams(dpi(60f), dpi(80f)))
+                addView(name, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dpi(5f) })
+                setPadding(0, dpi(4f), 0, dpi(2f))
+            } else {
             frame.background = rounded(if (night) 0x14ffffff else 0xffffffff.toInt(), dp(14f), if (night) Glass.RULE_NIGHT else Glass.RULE, 1)
             frame.clipToOutline = true
             dpi(6f).let { frame.setPadding(it, it, it, it) }
@@ -634,6 +701,7 @@ object Kit {
             addView(frame, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(name, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, if (context.largeText) dpi(32f) else ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dpi(6f) })
             dpi(4f).let { setPadding(it, it, it, it) }
+            }
             contentDescription = label; isClickable = true; isFocusable = true
             setOnClickListener {
                 if (siblings.isNotEmpty() && this.chosen) return@setOnClickListener
@@ -652,6 +720,10 @@ object Kit {
         override fun dispatchDraw(canvas: Canvas) {
             super.dispatchDraw(canvas)
             if (!chosen) return
+            if (compact) {
+                val r = RectF(frame.left - dp(3f), frame.top - dp(3f), frame.right + dp(3f), frame.bottom + dp(3f))
+                ring.strokeWidth = dp(2f); canvas.drawRoundRect(r, dp(11f), dp(11f), ring); return
+            }
             val r = RectF(frame.left - dp(2f), frame.top - dp(2f), frame.right + dp(2f), frame.bottom + dp(2f))
             canvas.drawRoundRect(r, dp(16f), dp(16f), ring)
             val cx = r.right - dp(10f); val cy = r.top + dp(10f)
@@ -691,25 +763,27 @@ object Kit {
      * A row of 36 dp colour dots, one chosen with an accent ring, as the paper board's "Paper colour". [lines] draws
      * each colour as three lines on white, for line colours. [onSelect] gets the index; if it throws, nothing moves.
      * [mark] shows a colour as chosen without calling the handler (none, when it is not one of the dots).
+     * P613: [compact] dots are 26 dp on a 34 dp pitch, as the Page & paper board's Colour and Lines rows.
      */
     class Swatches(context: Context, private val colors: List<Pair<Int, String>>, selected: Int?, private val lines: Boolean = false,
-        private val onSelect: (Int) -> Unit) : LinearLayout(context) {
+        private val compact: Boolean = false, private val onSelect: (Int) -> Unit) : LinearLayout(context) {
         private val night = context.night
         private val dots: List<View> = colors.mapIndexed { index, (color, name) ->
             object : View(context) {
                 private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-                override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(dpi(46f), dpi(46f))
+                override fun onMeasure(w: Int, h: Int) = if (compact) setMeasuredDimension(dpi(34f), dpi(34f)) else setMeasuredDimension(dpi(46f), dpi(46f))
                 override fun onDraw(canvas: Canvas) {
-                    val cx = width / 2f; val cy = height / 2f; val r = dp(18f)
+                    val cx = width / 2f; val cy = height / 2f; val r = dp(if (compact) 13f else 18f)
                     if (isSelected) {
-                        paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2.5f); paint.color = Glass.accent(night)
-                        canvas.drawCircle(cx, cy, r + dp(4f), paint)
+                        paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(if (compact) 2f else 2.5f); paint.color = Glass.accent(night)
+                        canvas.drawCircle(cx, cy, r + dp(if (compact) 3f else 4f), paint)
                     }
                     paint.style = Paint.Style.FILL; paint.color = if (lines) Color.WHITE else color
                     canvas.drawCircle(cx, cy, r, paint)
                     if (lines) {
-                        paint.color = color; paint.strokeWidth = dp(2f)
-                        for (i in -1..1) canvas.drawLine(cx - dp(10f), cy + i * dp(5f), cx + dp(10f), cy + i * dp(5f), paint)
+                        paint.color = color; paint.strokeWidth = dp(if (compact) 1.6f else 2f)
+                        val half = r * .56f; val step = r * .28f
+                        for (i in -1..1) canvas.drawLine(cx - half, cy + i * step, cx + half, cy + i * step, paint)
                     }
                     paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(1f); paint.color = if (night) 0x4dffffff else 0x241d2433
                     canvas.drawCircle(cx, cy, r, paint)
@@ -738,8 +812,53 @@ object Kit {
      * over a scrolling [body]. By default it rises from the bottom edge, at most [maxWidth] dp wide; [centred] shows it
      * as a floating card instead. [onAction] returns true to close the sheet, false to keep it open (a guard refused).
      */
+    /**
+     * P595: a sheet's header. The title is centred between Cancel and the action when it fits there; when it doesn't (a
+     * phone with large text: "Cancel" ran into "New notebook" and Create covered its end), it takes its own line under
+     * them, with the whole width. Either way it never runs under a button.
+     */
+    internal class SheetHeader(context: Context) : ViewGroup(context) {
+        var start: View? = null; var title: TextView? = null; var end: View? = null
+        var stacked = false; private set
+        override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+            val width = MeasureSpec.getSize(widthSpec)
+            val inner = (width - paddingLeft - paddingRight).coerceAtLeast(0)
+            val free = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED)
+            listOfNotNull(start, end).forEach { it.measure(MeasureSpec.makeMeasureSpec(inner, MeasureSpec.AT_MOST), free) }
+            val side = maxOf(start?.measuredWidth ?: 0, end?.measuredWidth ?: 0)
+            val room = inner - 2 * (side + context.dpi(8f))
+            val t = title
+            val buttons = maxOf(start?.measuredHeight ?: 0, end?.measuredHeight ?: 0)
+            var content = buttons
+            val row = maxOf(buttons, minimumHeight - paddingTop - paddingBottom)
+            if (t != null) {
+                val natural = t.paint.measureText(t.text.toString()) + t.compoundPaddingLeft + t.compoundPaddingRight
+                stacked = natural > room
+                t.measure(MeasureSpec.makeMeasureSpec(if (stacked) inner else room.coerceAtLeast(0), MeasureSpec.AT_MOST), free)
+                content = if (stacked) row + t.measuredHeight else maxOf(buttons, t.measuredHeight)
+            }
+            setMeasuredDimension(width, maxOf(minimumHeight, content + paddingTop + paddingBottom))
+        }
+        override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+            val w = r - l; val rtl = layoutDirection == LAYOUT_DIRECTION_RTL
+            val buttons = maxOf(start?.measuredHeight ?: 0, end?.measuredHeight ?: 0)
+            val row = if (stacked) maxOf(buttons, minimumHeight - paddingTop - paddingBottom) else b - t - paddingTop - paddingBottom
+            fun place(v: View?, atStart: Boolean) = v?.let {
+                val left = if (atStart != rtl) paddingLeft else w - paddingRight - it.measuredWidth
+                val y = paddingTop + (row - it.measuredHeight) / 2
+                it.layout(left, y, left + it.measuredWidth, y + it.measuredHeight)
+            }
+            place(start, true); place(end, false)
+            title?.let {
+                val x = (w - it.measuredWidth) / 2
+                val y = if (stacked) paddingTop + row else paddingTop + (row - it.measuredHeight) / 2
+                it.layout(x, y, x + it.measuredWidth, y + it.measuredHeight)
+            }
+        }
+    }
+
     class Sheet(val context: Context, title: String, private val action: String? = null, cancel: String = "Cancel",
-        private val maxWidth: Float = 760f, private val centred: Boolean = false, private val onAction: () -> Boolean = { true }) {
+        private val maxWidth: Float = 760f, private val centred: Boolean = false, subtitle: String? = null, private val onAction: () -> Boolean = { true }) {
         private val night = context.night
         val dialog = Dialog(context)
         /** Add the sheet's content here. */
@@ -763,16 +882,20 @@ object Kit {
             }
             if (!centred) root.addView(View(context).apply { background = rounded(if (night) 0x40ffffff else 0x261d2433, dp(2.5f)) },
                 LinearLayout.LayoutParams(context.dpi(40f), context.dpi(5f)).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = context.dpi(8f) })
-            val header = FrameLayout(context).apply { minimumHeight = dpi(56f); setPadding(dpi(12f), dpi(4f), dpi(12f), dpi(4f)) }
-            header.addView(button(context, cancel, Button.PLAIN) { dialog.dismiss() }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.START or Gravity.CENTER_VERTICAL))
-            titleView = text(context, title, Type.HEADLINE).apply { gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END; isAccessibilityHeading = true }
-            header.addView(titleView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+            val header = SheetHeader(context).apply { minimumHeight = dpi(56f); setPadding(dpi(12f), dpi(4f), dpi(12f), dpi(4f)) }
+            header.start = button(context, cancel, Button.PLAIN) { dialog.dismiss() }.also { header.addView(it) }
+            titleView = text(context, title, Type.HEADLINE).apply { gravity = Gravity.CENTER; maxLines = 2; ellipsize = TextUtils.TruncateAt.END; isAccessibilityHeading = true }
+            header.title = titleView.also { header.addView(it) }
             actionButton = action?.let { label ->
-                button(context, label, Button.PRIMARY, small = true) { if (onAction()) dialog.dismiss() }.also {
-                    header.addView(it, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL))
-                }
+                button(context, label, Button.PRIMARY, small = true) { if (onAction()) dialog.dismiss() }.also { header.end = it; header.addView(it) }
             }
             root.addView(header)
+            // P582: what the sheet acts on (a notebook's long name) goes on its own line under the title, with the sheet's whole
+            // width, so the title stays short and nothing is cut between the Cancel and action buttons on a phone.
+            subtitle?.let { line -> root.addView(text(context, line, Type.BODY).apply {
+                setTextColor(Glass.secondary(night)); gravity = Gravity.CENTER; maxLines = 3; ellipsize = TextUtils.TruncateAt.END
+                setPadding(dpi(22f), 0, dpi(22f), dpi(6f))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)) }
             root.addView(ScrollView(context).apply { isFillViewport = true; addView(body) },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
@@ -791,6 +914,13 @@ object Kit {
 
         fun show(): Sheet {
             dialog.show()
+            tieToActivity()
+            dialog.window?.let { fullScreen(it) }
+            fit()
+            return this
+        }
+        /** Sizes the sheet to the screen as it is now; again after the tablet turns (P644). */
+        private fun fit() {
             val metrics = context.resources.displayMetrics
             dialog.window?.apply {
                 setGravity(if (centred) Gravity.CENTER else Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
@@ -799,9 +929,45 @@ object Kit {
                 decorView.setPadding(0, 0, 0, 0)
                 decorView.post { if (decorView.height > tall) setLayout(attributes.width, tall) }
             }
-            return this
         }
         fun dismiss() = dialog.dismiss()
+
+        private val turnedListeners = mutableListOf<() -> Unit>()
+        /**
+         * P650: runs [arrange] each time the screen's width changes while the sheet is open (after the sheet is sized
+         * again), so a layout picked for the width at opening (columns side by side or stacked) is picked again after
+         * the tablet turns instead of squeezing two columns onto a phone held upright.
+         */
+        fun onTurned(arrange: () -> Unit) { turnedListeners += arrange }
+
+        private var tied = false
+        /**
+         * P642: when the activity ends (the tablet turns, or the app closes) with this sheet open, its window goes with it
+         * instead of leaking. Its listeners are cleared first, as the system's own clean-up does, so nothing runs on the
+         * ending activity. Watches only while the sheet is on screen.
+         */
+        private fun tieToActivity() {
+            if (tied) return
+            val owner = generateSequence(context) { (it as? android.content.ContextWrapper)?.baseContext }
+                .filterIsInstance<androidx.lifecycle.LifecycleOwner>().firstOrNull() ?: return
+            tied = true
+            val ending = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_DESTROY && dialog.isShowing) {
+                    dialog.setOnDismissListener(null); dialog.setOnCancelListener(null); runCatching { dialog.dismiss() }
+                }
+            }
+            owner.lifecycle.addObserver(ending)
+            // P644: the app turns without being rebuilt, so a sheet open while the tablet turns is sized again for the new screen.
+            val screen = (owner as? android.app.Activity)?.window?.decorView
+            val turned = View.OnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+                if (right - left != oldRight - oldLeft && dialog.isShowing) { fit(); turnedListeners.forEach { it() } }
+            }
+            screen?.addOnLayoutChangeListener(turned)
+            dialog.window?.decorView?.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) { owner.lifecycle.addObserver(ending); screen?.removeOnLayoutChangeListener(turned); screen?.addOnLayoutChangeListener(turned) }
+                override fun onViewDetachedFromWindow(v: View) { owner.lifecycle.removeObserver(ending); screen?.removeOnLayoutChangeListener(turned) }
+            })
+        }
     }
 
     /**

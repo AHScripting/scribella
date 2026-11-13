@@ -33,7 +33,8 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
     private val c = context
     private val night = c.night
     var tab = Tab.TEXT; private set
-    private val subtitle = Kit.text(c, "", Kit.Type.CAPTION, secondary = true).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+    // P654: one real line; with maxLines 1 alone a long title stood two lines tall in a one-line space.
+    private val subtitle = Kit.text(c, "", Kit.Type.CAPTION, secondary = true, name = true).apply { isSingleLine = true; ellipsize = TextUtils.TruncateAt.END }
     private val body = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
     private val tools = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
     /** What the panel last showed; it is rebuilt only when this changes, so a refresh per stroke stays cheap. */
@@ -67,11 +68,11 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
                     setOnClickListener { close() }
                 }, LinearLayout.LayoutParams(dpi(40f), dpi(40f)))
             })
-            addView(segments, gap(18f))
-            addView(body, gap(18f))
-            addView(Kit.section(c, "More study tools").apply { setPadding(dpi(4f), 0, dpi(4f), dpi(8f)) }, gap(18f))
+            addView(segments, gap(14f))
+            addView(body, gap(14f))
+            addView(Kit.section(c, "More study tools").apply { setPadding(dpi(4f), 0, dpi(4f), dpi(8f)) }, gap(14f))
             addView(tools, gap(0f))
-            addView(Kit.privacy(c, "Study tools run on this tablet. Notebook sync uses your chosen folder."), gap(18f))
+            addView(Kit.privacy(c, "Study tools run on this device."), gap(12f))
         }
         addView(ScrollView(c).apply { isVerticalScrollBarEnabled = false; addView(column) }, LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         refresh()
@@ -82,6 +83,10 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
     /** The board's white cards on the glass panel (graphite by night). */
     private fun card() = LinearLayout(c).apply {
         orientation = LinearLayout.VERTICAL; background = rounded(if (night) Kit.group(true) else Color.WHITE, dp(18f)); elevation = dp(1f)
+    }
+    /** P615 (board 9): one white card of study rows, hairlines between them inset to the row's text. */
+    private fun rows(vararg views: View) = Kit.Group(c, if (night) Kit.group(true) else Color.WHITE, 18f).apply {
+        elevation = dp(1f); views.forEach { it.setTag(R.id.kit_inset, dpi(54f)); addView(it) }
     }
 
     internal fun showCard(note:dev.ownednotes.core.Notebook,card:StudyCards.Card,answer:Boolean) {
@@ -103,16 +108,39 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
         subtitle.text = if (note == null || index < 0) "" else "Page ${index + 1} · ${note.title}"
         body.removeAllViews()
         when (tab) {
-            Tab.TEXT -> { handwriting(page); body.addView(VocabularyControls(c, activity.application as NotesApplication), gap(18f)); body.addView(StudyCardControls(activity,ink,frame),gap(18f)); body.addView(caption("Study tape"), gap(18f)); body.addView(tapeCard(page, open = true)) }
-            Tab.TAPE -> tapeTab(page)
-            Tab.MARKS -> marks(page)
+            // P615 (board 9): vocabulary, flashcards, tape and audio are one card of rows, each with its own status and buttons.
+            Tab.TEXT -> { handwriting(page); body.addView(rows(VocabularyControls(c, activity.application as NotesApplication), StudyCardControls(activity, ink, frame),
+                tapeRow(page, open = true), AudioRecordingControls(activity, frame)), gap(14f)) }
+            Tab.TAPE -> { tapeTab(page); body.addView(rows(AudioRecordingControls(activity, frame)), gap(14f)) }
+            Tab.MARKS -> { marks(page); body.addView(rows(AudioRecordingControls(activity, frame)), gap(14f)) }
         }
-        body.addView(AudioRecordingControls(activity, frame), gap(18f))
         tools.removeAllViews()
-        tools.addView(Kit.Group(c, if (night) Kit.group(true) else Color.WHITE, 18f).apply {
-            elevation = dp(1f); dpi(4f).let { setPadding(it, it, it, it) }
-            TOOLS.filter { EditorCommand.offered(it.first, context) }.forEach { (command, color, path) -> addView(command(command, color, path)) }
+        tools.addView(LinearLayout(c).apply {
+            orientation = LinearLayout.HORIZONTAL
+            TOOLS.filter { EditorCommand.offered(it.command, context) }.forEach { addView(tile(it), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)) }
         })
+    }
+
+    /** P615 (board 9): a More study tools icon with its short name; TalkBack reads the full command name. */
+    private fun tile(tool: Tool) = LinearLayout(c).apply {
+        val on = frame.commandEnabled(tool.command)
+        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+        setPadding(0, dpi(6f), 0, dpi(6f))
+        addView(View(c).apply { background = Kit.Icon(tool.path, tool.color, dpi(40f), square = true); importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO },
+            LinearLayout.LayoutParams(dpi(40f), dpi(40f)))
+        addView(TextView(c).apply {
+            text = tool.short; textSize = 11.5f; typeface = Tokens.SANS; gravity = Gravity.CENTER; maxLines = if (c.largeText) 3 else 2; keepWordsWhole()
+            setTextColor(if (tool.command == EditorCommand.CLEAR_TRANSCRIPT) Kit.dangerText(night) else Glass.text(night))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dpi(6f) })
+        val label = frame.commandLabel(tool.command).removeSuffix("…")
+        contentDescription = if (on) label else "$label, unavailable"; tooltipText = label
+        isEnabled = on; alpha = if (on) 1f else .4f
+        if (on) {
+            isClickable = true; isFocusable = true
+            background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x1f1d2433), null, rounded(-1, dp(12f)))
+            setOnClickListener { frame.runCommand(tool.command) }
+        }
     }
 
     private fun command(command: EditorCommand, color: Int, path: String) = frame.commandEnabled(command).let { on ->
@@ -124,15 +152,14 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
 
     /** "Your handwriting, read": each reviewed line in reading order; taped lines are marked so they are not spoiled. */
     private fun handwriting(page: Page?) {
-        body.addView(caption("Your handwriting, read"))
         val records = page?.activeReviewedInk.orEmpty().sortedWith(compareBy({ it.bounds.top }, { it.bounds.left }))
         val covered = tapes.filter { it.id !in ink.revealedTapeIds }.map { tape ->
             RectF(tape.samples.minOf { it.x }, tape.samples.minOf { it.y }, tape.samples.maxOf { it.x }, tape.samples.maxOf { it.y })
         }
         body.addView(card().apply {
             dpi(6f).let { setPadding(0, it, 0, it) }
-            if (records.isEmpty()) addView(Kit.text(c, "Nothing read on this page yet. Read your handwriting to copy, search and export it as text.", secondary = true).apply {
-                textSize = 13.5f; setPadding(dpi(14f), dpi(8f), dpi(14f), dpi(8f))
+            if (records.isEmpty()) addView(Kit.text(c, "Nothing read on this page yet.", secondary = true).apply {
+                textSize = 13.5f; setPadding(dpi(14f), dpi(6f), dpi(14f), dpi(6f))
             })
             records.forEachIndexed { i, record ->
                 val box = RectF(record.bounds.left, record.bounds.top, record.bounds.right, record.bounds.bottom)
@@ -154,46 +181,42 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
             }
         })
         val read = frame.commandEnabled(EditorCommand.HANDWRITING)
+        // P595: with large text the two buttons stack, each the panel's width, so neither label splits a word.
+        val stacked = c.largeText
         body.addView(LinearLayout(c).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             addView(button("Copy text", Kit.Button.PRIMARY, records.isNotEmpty()) {
                 val text = records.joinToString("\n") { it.text }
                 c.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Handwriting", text))
                 activity.message("Copied ${records.size} line${if (records.size == 1) "" else "s"} of handwriting")
-            }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            }, if (stacked) LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT) else LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
             addView(button(if (records.isEmpty()) "Read handwriting" else "Fix a word", Kit.Button.TINTED, read) { frame.runCommand(EditorCommand.HANDWRITING) },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dpi(8f) })
+                if (stacked) LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dpi(8f) }
+                else LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dpi(8f) })
         }, gap(10f))
     }
 
-    /** The board's study tape card: a strip of tape, how many are hidden and shown, and how to peek. */
-    private fun tapeCard(page: Page?, open: Boolean) = card().apply {
-        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-        dpi(14f).let { setPadding(it, it, it, it) }
+    /** The board's study tape row: a strip of tape, how many are hidden and shown, and how to peek; [open] goes to the Tape tab. */
+    private fun tapeRow(page: Page?, open: Boolean): View {
         val all = tapes; val hidden = all.count { it.id !in ink.revealedTapeIds }
-        addView(TapeSwatch(c), LinearLayout.LayoutParams(dpi(54f), dpi(22f)).apply { marginEnd = dpi(14f) })
         val title = if (all.isEmpty()) "No study tape here" else "$hidden hidden · ${all.size - hidden} shown"
         val detail = when {
             page == null -> ""
             all.isEmpty() -> "Select ink with the lasso, then Tape"
             else -> "Tap a strip with the pen to peek"
         }
-        addView(LinearLayout(c).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(Kit.text(c, title).apply { typeface = Kit.Type.HEADLINE.typeface })
-            addView(Kit.text(c, detail, Kit.Type.CAPTION, secondary = true), LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = dpi(3f) })
-        }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        contentDescription = "Study tape: $title. $detail"
-        if (open) {
-            isClickable = true; isFocusable = true
-            foreground = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x1f1d2433), null, rounded(-1, dp(18f)))
-            setOnClickListener { segments.getChildAt(Tab.TAPE.ordinal).performClick() }
+        return StudyRow(c, title, TapeSwatch(c), detail, iconWidth = 48f, iconHeight = 24f).apply {
+            contentDescription = "Study tape: $title. $detail"
+            if (open) {
+                isClickable = true; isFocusable = true
+                background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x1f1d2433), null, android.graphics.drawable.ColorDrawable(Color.WHITE))
+                setOnClickListener { segments.getChildAt(Tab.TAPE.ordinal).performClick() }
+            }
         }
     }
 
     private fun tapeTab(page: Page?) {
-        body.addView(caption("Study tape"))
-        body.addView(tapeCard(page, open = false))
+        body.addView(rows(tapeRow(page, open = false)))
         val any = tapes.isNotEmpty()
         body.addView(LinearLayout(c).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -203,21 +226,21 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
             addView(button("Recall check", Kit.Button.PRIMARY, any && frame.commandEnabled(EditorCommand.TAPE)) { frame.startRecall() },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dpi(8f) })
         }, gap(10f))
-        body.addView(Kit.text(c, "Recall check covers every strip, then uncovers them one at a time. Say whether you remembered each before you look.",
+        body.addView(Kit.text(c, "Covers every strip, then shows them one at a time.",
             Kit.Type.CAPTION, secondary = true).apply { setPadding(dpi(4f), 0, dpi(4f), 0) }, gap(10f))
     }
 
     private fun marks(page: Page?) {
         body.addView(caption("Printed text"))
         if (page?.hasBackground != true) body.addView(card().apply {
-            addView(Kit.text(c, "This page has no PDF or picture. Printed-text tools work on imported pages.", secondary = true).apply {
+            addView(Kit.text(c, "This page has no PDF or picture.", secondary = true).apply {
                 textSize = 13.5f; setPadding(dpi(14f), dpi(12f), dpi(14f), dpi(12f))
             })
         }) else body.addView(Kit.Group(c, if (night) Kit.group(true) else Color.WHITE, 18f).apply {
             elevation = dp(1f); dpi(4f).let { setPadding(it, it, it, it) }
             TOOLS.take(2).forEach { (command, color, path) -> addView(command(command, color, path)) }
         })
-        body.addView(Kit.text(c, "Highlights and underlines are ink on the page: the lasso moves them and Undo removes them.",
+        body.addView(Kit.text(c, "Highlights are ink: the lasso moves them, Undo removes them.",
             Kit.Type.CAPTION, secondary = true).apply { setPadding(dpi(4f), 0, dpi(4f), 0) }, gap(10f))
     }
 
@@ -247,14 +270,63 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
         }
     }
 
+    /** A More study tools entry: its command, colour, icon and the short name under its icon (board 9). */
+    data class Tool(val command: EditorCommand, val color: Int, val path: String, val short: String)
+
     companion object {
         /** The board's "More study tools", with its colours and icons. */
         val TOOLS = listOf(
-            Triple(EditorCommand.PAGE_TEXT, 0xff0a84ff.toInt(), "M8 8h11v11H8zM5 16V5h11"),
-            Triple(EditorCommand.TEXT_MARK, 0xffffb800.toInt(), "M4 20h16M7 16l9-9 3 3-9 9H7z"),
-            Triple(EditorCommand.PREPARE_STUDY, 0xff5e5ce6.toInt(), "M3 5h18v11H3zM8 20h8M12 16v4"),
-            Triple(EditorCommand.INK_EXPORT, 0xff34c759.toInt(), "M12 3v12M8 11l4 4 4-4M5 21h14"),
-            Triple(EditorCommand.CLEAR_TRANSCRIPT, 0xffff3b30.toInt(), "M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"))
+            Tool(EditorCommand.PAGE_TEXT, 0xff0a84ff.toInt(), "M8 8h11v11H8zM5 16V5h11", "Page text"),
+            Tool(EditorCommand.TEXT_MARK, 0xffffb800.toInt(), "M4 20h16M7 16l9-9 3 3-9 9H7z", "Highlight"),
+            Tool(EditorCommand.PREPARE_STUDY, 0xff5e5ce6.toInt(), "M3 5h18v11H3zM8 20h8M12 16v4", "Study copy"),
+            Tool(EditorCommand.INK_EXPORT, 0xff34c759.toInt(), "M12 3v12M8 11l4 4 4-4M5 21h14", "Export ink"),
+            Tool(EditorCommand.CLEAR_TRANSCRIPT, 0xffff3b30.toInt(), "M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13", "Remove text"))
+    }
+}
+
+/**
+ * P615 (board 9): a Study panel row: a leading icon (a 30 dp coloured square, or the tape swatch), a title and its status
+ * line, then the row's own buttons ([trail]). The rows sit in one white card; their content goes under them.
+ */
+internal class StudyRow(context: Context, title: String, icon: View, detail: String, iconWidth: Float = 30f, iconHeight: Float = 30f) : LinearLayout(context) {
+    val detail: TextView
+    /** The icon and text; the buttons join it, or go on their own line under it with large text so no word splits. */
+    private val head = LinearLayout(context).apply { orientation = HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private val foot = LinearLayout(context).apply { orientation = HORIZONTAL; gravity = Gravity.END or Gravity.CENTER_VERTICAL; visibility = GONE }
+    init {
+        val night = context.night
+        orientation = VERTICAL; gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = context.dpi(60f); setPadding(context.dpi(12f), context.dpi(6f), context.dpi(12f), context.dpi(6f))
+        icon.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        // The tape swatch is wider than a square; it keeps the text where the squares put it.
+        val wide = iconWidth > 30f
+        head.addView(icon, LayoutParams(context.dpi(iconWidth), context.dpi(iconHeight)).apply { marginEnd = context.dpi(if (wide) 6f else 12f); if (wide) marginStart = -context.dpi(6f) })
+        this.detail = TextView(context).apply {
+            text = detail; textSize = 12.5f; typeface = Tokens.SANS; setTextColor(Glass.secondary(night)); maxLines = if (context.largeText) Int.MAX_VALUE else 3
+            setPadding(0, context.dpi(3f), 0, 0); setLineSpacing(0f, 1.1f); keepWordsWhole()
+        }
+        head.addView(LinearLayout(context).apply {
+            orientation = VERTICAL
+            addView(TextView(context).apply {
+                text = title; textSize = 15f; typeface = Tokens.SANS; includeFontPadding = false; setTextColor(Glass.text(night))
+                maxLines = if (context.largeText) Int.MAX_VALUE else 2; keepWordsWhole()
+            })
+            addView(this@StudyRow.detail)
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        addView(head, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = 0 })
+        addView(foot, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = context.dpi(6f) })
+        // Centre the head in the 60 dp row.
+        head.minimumHeight = context.dpi(48f)
+    }
+    /** Adds a button at the row's end (on the line under it with large text). */
+    fun trail(view: View) {
+        if (context.largeText) { foot.visibility = VISIBLE; foot.addView(view, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply { marginStart = context.dpi(8f) }) }
+        else head.addView(view, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply { marginStart = context.dpi(8f) })
+    }
+
+    companion object {
+        /** The board's 30 dp coloured square with a white icon. */
+        fun square(context: Context, path: String, color: Int) = View(context).apply { background = Kit.square(context, path, color) }
     }
 }
 

@@ -33,7 +33,7 @@ object PdfSupport {
                 Page(width = page.width.toFloat(), height = page.height.toFloat(), pdfBackground = PdfBackground(prepared.asset.id, index))
             } }
             Notebook(title = title.trim().take(500).ifBlank { "Imported PDF" }, pages = pages, assets = listOf(prepared.asset)).also { it.validate() }
-        }
+        }.let { PdfHighlights.apply(cache, it, prepared.asset).notebook }
     }
     private fun <T> withRenderer(cache: File, asset: PdfAsset, operation: (PdfRenderer) -> T): T {
         return PdfAccess.withFile(cache, asset) { file ->
@@ -50,16 +50,26 @@ object PdfSupport {
             catch (locked: PdfAccess.PasswordRequired) { Result.failure(locked) }
         }.getOrThrow()
 
-    fun import(cache: File, input: InputStream, title: String,ownedDirectory: File? = null): Notebook = read(cache, input, title, firstPagesOnly = false,ownedDirectory).first
+    fun import(cache: File, input: InputStream, title: String,ownedDirectory: File? = null): Notebook = read(cache, input, title, firstPagesOnly = false,ownedDirectory).first.notebook
 
     /** P122 (F195): Import PDF keeps the first [NotebookLimits.PDF_PAGES] pages of a longer PDF and reports the rest instead of refusing it (16 before B24, P140). */
     fun importWithReport(cache: File, input: InputStream, title: String,ownedDirectory: File? = null): Pair<Notebook, ImportReport> {
-        val (notebook, total) = read(cache, input, title, firstPagesOnly = true,ownedDirectory)
-        val skipped = if (total > notebook.pages.size) listOf(ImportReport.count(total - notebook.pages.size, "page after page ${NotebookLimits.PDF_PAGES}", "pages after page ${NotebookLimits.PDF_PAGES}")) else emptyList()
-        return notebook to ImportReport("PDF", ImportReport.contents(notebook), skipped)
+        val (highlighted, total) = read(cache, input, title, firstPagesOnly = true,ownedDirectory)
+        val notebook = highlighted.notebook
+        val skipped = buildList {
+            if (total > notebook.pages.size) add(ImportReport.count(total - notebook.pages.size, "page after page ${NotebookLimits.PDF_PAGES}", "pages after page ${NotebookLimits.PDF_PAGES}"))
+            if (highlighted.unreadable > 0) add(ImportReport.count(highlighted.unreadable, "PDF marking that could not be read", "PDF markings that could not be read"))
+            // P572: sticky notes, typed comments and the like are named so nobody thinks they came across.
+            PdfHighlights.Kind.entries.forEach { kind -> highlighted.notCarried[kind]?.takeIf { it > 0 }?.let { add(ImportReport.count(it, kind.one, kind.many)) } }
+        }
+        // P570/P572: the PDF's own markings arrive as ink, so count them as highlights and pen markings, not as ink strokes.
+        val brought = ImportReport.contents(notebook).filterNot { highlighted.added > 0 && it.endsWith(" ink stroke") || highlighted.added > 0 && it.endsWith(" ink strokes") } +
+            listOfNotNull(highlighted.highlights.takeIf { it > 0 }?.let { ImportReport.count(it, "highlight", "highlights") },
+                highlighted.penMarks.takeIf { it > 0 }?.let { ImportReport.count(it, "pen marking", "pen markings") })
+        return notebook to ImportReport("PDF", brought, skipped)
     }
 
-    private fun read(cache: File, input: InputStream, title: String, firstPagesOnly: Boolean,ownedDirectory: File?): Pair<Notebook, Int> = withAsset(cache,input,ownedDirectory) { asset ->
+    private fun read(cache: File, input: InputStream, title: String, firstPagesOnly: Boolean,ownedDirectory: File?): Pair<PdfHighlights.Result, Int> = withAsset(cache,input,ownedDirectory) { asset ->
         withRenderer(cache, asset) { renderer ->
             require(renderer.pageCount >= 1 && (firstPagesOnly || renderer.pageCount <= NotebookLimits.PDF_PAGES)) { "PDFs with up to ${NotebookLimits.PDF_PAGES} pages can be inserted" }
             val pages = (0 until minOf(NotebookLimits.PDF_PAGES, renderer.pageCount)).map { index ->
@@ -73,7 +83,7 @@ object PdfSupport {
                 }
             }
             Notebook(title = title.trim().take(500).ifBlank { "Imported PDF" }, pages = pages, assets = listOf(asset)).also { it.validate() } to renderer.pageCount
-        }
+        }.let { (plain, total) -> PdfHighlights.apply(cache, plain, asset) to total }
     }
 
     /** Bounded import preview, independent of full-page rendering and visible-page caches. */

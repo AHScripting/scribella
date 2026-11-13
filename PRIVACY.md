@@ -23,7 +23,7 @@ Google uses this for diagnostics and to measure and improve ML Kit, as described
 
 ## Checking for updates
 
-Settings → Privacy & storage → Check for updates asks GitHub for this project's list of released versions, only when you tap it. Nothing about you or your notebooks is sent with it. GitHub sees the request and your network address, as any website would, under its [privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement). A new version opens in your browser; the app never downloads or installs anything by itself.
+Settings → Privacy & storage → Check for updates asks GitHub for this project's list of released versions when you tap it. If you turn on the automatic check (off until you do, in the same place or in the What's new note), the app makes the same request by itself, at most once a day, when you open the Library. Nothing about you or your notebooks is sent with it. GitHub sees the request and your network address, as any website would, under its [privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement). A new version opens in your browser; the app never downloads or installs anything by itself.
 
 ## Permissions
 
@@ -32,7 +32,7 @@ Settings → Privacy & storage → Check for updates asks GitHub for this projec
 | Microphone | Recording audio into a notebook, when you start a recording |
 | Camera | Scanning paper, when you start a scan |
 | Biometrics | The optional app lock |
-| Internet and network state | Sync you set up, language downloads you ask for, update checks you ask for, and ML Kit as described above |
+| Internet and network state | Sync you set up, language downloads you ask for, update checks you ask for or turn on, and ML Kit as described above |
 | Run after restart | Keeping sync you set up going after the device restarts |
 | Keep awake and foreground service | Android's background-work library asks for these so that sync can finish |
 

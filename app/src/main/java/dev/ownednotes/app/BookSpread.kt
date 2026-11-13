@@ -72,6 +72,8 @@ class BookFlipView(
     private var warmed: List<PageThumbnails.Key> = emptyList()
     private var warming = 0
     private var current: Flip? = null
+    /** P585: called when the turning sheet appears or goes, so the editor can hide what lies over the slots. */
+    var onShownChanged: () -> Unit = {}
     /** 0 = the sheet lies on the right slot, PI = on the left. */
     private var angle = 0f
     private var animator: ValueAnimator? = null
@@ -138,7 +140,7 @@ class BookFlipView(
         if (f == null) {
             if (abs(dx) < 1f) return
             f = begin(if (dx < 0) TurnDirection.NEXT else TurnDirection.PREVIOUS, left, right) ?: return
-            current = f; angle = if (f.direction == TurnDirection.NEXT) 0f else PI.toFloat(); visibility = VISIBLE
+            current = f; angle = if (f.direction == TurnDirection.NEXT) 0f else PI.toFloat(); visibility = VISIBLE; onShownChanged()
         }
         val cos = if (f.direction == TurnDirection.NEXT) 1 + dx / f.right.width() else -1 + dx / f.left.width()
         angle = acos(cos.coerceIn(-1f, 1f))
@@ -215,7 +217,9 @@ class BookFlipView(
     }
     fun cancel() {
         animator?.let { it.removeAllListeners(); it.cancel() }; animator = null; landing = null
+        val shown = current != null
         removeCallbacks(reveal); current = null; revealed = false; visibility = INVISIBLE; invalidate()
+        if (shown) onShownChanged()
     }
     fun dispose() { cancel(); stopRequests(); warmed = emptyList() }
     override fun onDetachedFromWindow() { cancel(); stopRequests(); warmed = emptyList(); super.onDetachedFromWindow() }

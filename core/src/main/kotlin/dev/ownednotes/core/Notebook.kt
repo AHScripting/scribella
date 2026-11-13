@@ -52,6 +52,8 @@ import kotlin.math.hypot
     val isCalligraphy get() = brush == CALLIGRAPHY
     /** P127 (schema 25): pencil; its outlines are the authoritative shape, and the graphite grain is only how this app fills them. */
     val isPencil get() = brush == PENCIL
+    /** P618 (schema 37): fountain pen, Everyday or Soft nib; its outlines are the shape, and shading and pools are only how this app fills them. */
+    val isFountain get() = brush == FOUNTAIN || brush == FOUNTAIN_SOFT
     /** P089 (schema 15): pen-type strokes may be see-through; the alpha byte of [color] is the whole stroke's opacity. */
     val isTranslucent get() = (color ushr 24) != 255L
     companion object {
@@ -62,6 +64,8 @@ import kotlin.math.hypot
         const val DASHED = "androidx-dashed-line-v1"
         const val CALLIGRAPHY = "calligraphy-v1"
         const val PENCIL = "pencil-v1"
+        const val FOUNTAIN = "fountain-v1"
+        const val FOUNTAIN_SOFT = "fountain-soft-v1"
         /** Chisel-tip highlighter (schema 5). Colour stays opaque; renderers draw the whole stroke at [HIGHLIGHTER_OPACITY]. */
         const val HIGHLIGHTER = "androidx-highlighter-v1"
         const val HIGHLIGHTER_OPACITY = .38f
@@ -216,8 +220,8 @@ internal fun Notebook.validate(checked: (InkStroke) -> Boolean, checkedPage: (Pa
             require(stroke.fillColor == null || (stroke.canFill && stroke.fillColor in 0xff000000L..0xffffffffL)) { "Invalid shape fill" }
             require(stroke.group == null || validId(stroke.group)) { "Invalid stroke group" }
             require(validId(stroke.id) && stroke.color in 0..0xffffffffL && stroke.width.isFinite() && stroke.width in 0.01f..1000f) { "Invalid stroke style" }
-            require((stroke.brush == InkStroke.PEN || stroke.isHighlighter || stroke.isExtendedPen || stroke.isTape || stroke.isCalligraphy || stroke.isPencil) &&
-                ((stroke.color ushr 24) == 255L || ((stroke.brush == InkStroke.PEN || stroke.isExtendedPen || stroke.isCalligraphy || stroke.isPencil) && (stroke.color ushr 24) >= InkStroke.MIN_ALPHA))) { "Unsupported brush or transparency" }
+            require((stroke.brush == InkStroke.PEN || stroke.isHighlighter || stroke.isExtendedPen || stroke.isTape || stroke.isCalligraphy || stroke.isPencil || stroke.isFountain) &&
+                ((stroke.color ushr 24) == 255L || ((stroke.brush == InkStroke.PEN || stroke.isExtendedPen || stroke.isCalligraphy || stroke.isPencil || stroke.isFountain) && (stroke.color ushr 24) >= InkStroke.MIN_ALPHA))) { "Unsupported brush or transparency" }
             require(stroke.samples.isNotEmpty() && stroke.outlines.isNotEmpty()) { "Empty stroke" }
             var time = -1L
             stroke.samples.forEach { sample ->
@@ -561,7 +565,7 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
             if (it.id != pageId) it else it.copy(strokes = it.strokes.flatMap { stroke -> firstOf[stroke.id] ?: if (stroke.id in gone) emptyList() else listOf(stroke) })
         }))
     }
-    private val PEN_BRUSHES = setOf(InkStroke.PEN, InkStroke.BALLPOINT, InkStroke.DASHED, InkStroke.CALLIGRAPHY, InkStroke.PENCIL)
+    private val PEN_BRUSHES = setOf(InkStroke.PEN, InkStroke.BALLPOINT, InkStroke.DASHED, InkStroke.CALLIGRAPHY, InkStroke.PENCIL, InkStroke.FOUNTAIN, InkStroke.FOUNTAIN_SOFT)
     fun moveStrokes(ids: Set<String>, pageId: String, dx: Float, dy: Float, imageIds: Set<String> = emptySet(), textIds: Set<String> = emptySet()): Boolean {
         require(dx.isFinite() && dy.isFinite()) { "Invalid movement" }
         val page = notebook.pages.firstOrNull { it.id == pageId } ?: error("Page not found")

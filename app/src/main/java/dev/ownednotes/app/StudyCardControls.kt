@@ -17,23 +17,39 @@ internal class StudyCardControls(private val activity:MainActivity,private val i
     private val cards=app.studyCards
     init {orientation=VERTICAL;render()}
     private fun attempt(action:()->Unit) {runCatching {check(repo.canChangeNotebook && !ink.isEditing) {"Wait for the page to finish saving"};action()}.onFailure {activity.message(it.message ?: "Could not update card")}}
+    /**
+     * P615 (board 9): one row, "Flashcards" with its due and total counts, and its two buttons side by side under it
+     * (stacked with large text). Lasso a question, Mark question, then lasso its answer and save the card.
+     */
     private fun render() {
-        removeAllViews();addView(Kit.section(context,"Flashcards"))
-        val note=repo.session?.notebook ?: return
-        addView(Kit.text(context,"Lasso a question, mark it, then lasso its answer. Cards and review dates stay on this device; ink stays in the notebook.",Kit.Type.CAPTION,secondary=true))
+        removeAllViews()
+        val note=repo.session?.notebook
+        val all=note?.let {cards.list(it.id)}.orEmpty();val due=note?.let {cards.due(it)}.orEmpty()
+        addView(StudyRow(context,"Flashcards",StudyRow.square(context,"M4 8h12v12H4zM8 4h12v12",0xff5e5ce6.toInt()),
+            if(note==null) "Open a notebook" else "${due.size} due · ${all.size} cards"))
+        note ?: return
         val pending=cards.pending?.takeIf {it.first==note.id}
-        addView(Kit.button(context,if(pending==null)"Question from selection" else "Replace question",Kit.Button.TINTED) {attempt {
-            cards.question(repo.session!!.notebook,repo.selectedPageId!!,ink.selectedObjectIds);render()
-        }}.apply {contentDescription="Mark selection as flashcard question"})
-        if(pending!=null) {
-            addView(CardPreview(context,note,pending.second))
-            addView(Kit.button(context,"Answer and save card",Kit.Button.TINTED) {attempt {
-                cards.answer(repo.session!!.notebook,repo.selectedPageId!!,ink.selectedObjectIds);activity.message("Flashcard saved");render()
-            }})
+        val stacked=context.largeText
+        fun small(label:String,description:String,onClick:()->Unit)=Kit.button(context,label,Kit.Button.TINTED,small=true,onClick=onClick).apply {
+            contentDescription=description;textSize=13.5f;context.dpi(10f).let {setPadding(it,0,it,0)}
         }
-        val all=cards.list(note.id);val due=cards.due(note)
-        addView(Kit.text(context,"${due.size} due · ${all.size} cards",Kit.Type.CAPTION,secondary=true))
-        addView(Kit.button(context,"Review due cards",Kit.Button.TINTED) {frame.startFlashcards()}.apply {isEnabled=due.isNotEmpty()})
+        addView(LinearLayout(context).apply {
+            orientation=if(stacked) VERTICAL else HORIZONTAL
+            context.dpi(12f).let {setPadding(it,0,it,it)}
+            addView(small(if(pending==null)"Mark question" else "Redo question","Mark selection as flashcard question") {attempt {
+                cards.question(repo.session!!.notebook,repo.selectedPageId!!,ink.selectedObjectIds);render()
+            }},if(stacked) LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.WRAP_CONTENT) else LayoutParams(0,LayoutParams.WRAP_CONTENT,1f))
+            addView(small("Review due","Review due cards") {frame.startFlashcards()}.apply {isEnabled=due.isNotEmpty()},
+                if(stacked) LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.WRAP_CONTENT).apply {topMargin=context.dpi(8f)}
+                else LayoutParams(0,LayoutParams.WRAP_CONTENT,1f).apply {marginStart=context.dpi(8f)})
+        })
+        if(pending!=null) addView(LinearLayout(context).apply {
+            orientation=VERTICAL;context.dpi(12f).let {setPadding(it,0,it,it)}
+            addView(CardPreview(context,note,pending.second))
+            addView(Kit.button(context,"Answer and save card",Kit.Button.PRIMARY,small=true) {attempt {
+                cards.answer(repo.session!!.notebook,repo.selectedPageId!!,ink.selectedObjectIds);activity.message("Flashcard saved");render()
+            }},LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.WRAP_CONTENT).apply {topMargin=context.dpi(8f)})
+        })
     }
 }
 

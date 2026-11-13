@@ -25,7 +25,6 @@ import androidx.ink.authoring.InProgressStrokesFinishedListener
 import androidx.ink.authoring.InProgressStrokesView
 import androidx.ink.brush.Brush
 import androidx.ink.brush.InputToolType
-import androidx.ink.brush.SelfOverlap
 import androidx.ink.brush.StockBrushes
 import androidx.ink.geometry.MutableVec
 import androidx.ink.strokes.Stroke
@@ -200,15 +199,24 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     /** Highlighter tool (P029): its own colour and width; a translucent chisel tip that tints rather than covers. */
     var highlighter = false
         private set
-    var highlighterStyle = runCatching { PenStyle(toolPreferences.getLong("highlighterColor", 0xfff9d43a), toolPreferences.getFloat("highlighterWidth", 18f)) }.getOrDefault(PenStyle(0xfff9d43a, 18f))
+    // P620: a new install starts with board 10's vivid yellow; a saved colour stays.
+    var highlighterStyle = runCatching { PenStyle(toolPreferences.getLong("highlighterColor", 0xffffe600), toolPreferences.getFloat("highlighterWidth", 18f)) }.getOrDefault(PenStyle(0xffffe600, 18f))
         private set
     /** Wet preview colour carries the opacity; persisted strokes keep the opaque colour and the brush id. */
-    private fun makeHighlighter(style: PenStyle, width: Float = style.width) = Brush.createWithColorIntArgb(StockBrushes.highlighter(SelfOverlap.DISCARD, StockBrushes.HighlighterVersion.V1),
+    private fun makeHighlighter(style: PenStyle, width: Float = style.width) = Brush.createWithColorIntArgb(HighlighterBrush.family,
         (style.color.toInt() and 0xffffff) or ((255 * InkStroke.HIGHLIGHTER_OPACITY).roundToInt() shl 24), width, .1f)
     private var highlighterBrush = makeHighlighter(highlighterStyle)
     /** Raster PDF line assistance; each stroke keeps the preference it started with. */
     var highlighterFollowsText = toolPreferences.getBoolean("highlighterFollowsText", true)
         private set
+    /** P617 (board 11): Mix colours. Off (the default), going over a highlight never darkens it; on, overlaps darken and blend. Display only. */
+    var highlighterMix = toolPreferences.getBoolean("highlighterMix", false).also { InkGeometry.mixHighlights = it }
+        private set
+    fun selectHighlighterMix(enabled: Boolean) {
+        highlighterMix = enabled; InkGeometry.mixHighlights = enabled
+        toolPreferences.edit().putBoolean("highlighterMix", enabled).apply()
+        dry.invalidate(); invalidate(); publishChange()
+    }
     fun selectHighlighterFollowsText(enabled: Boolean) {
         highlighterFollowsText = enabled
         toolPreferences.edit().putBoolean("highlighterFollowsText", enabled).apply()
@@ -403,7 +411,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     private var pasteSpot: PasteSpot? = null
     private var pasteTap: FloatArray? = null
     private var pasteTapTime = 0L
-    private val hasPasteable get() = (copiedHere || clipboardHasOutsideText || clipboardHasOutsideImage) && !repository.fileBusy
+    private val hasPasteable get() = (copiedHere || outsideClip() != SystemClipboard.Outside.NONE) && !repository.fileBusy
     /** The spot's page point while it still applies, or null. */
     val pasteSpotPoint: Point? get() {
         val spot = pasteSpot ?: return null
@@ -581,13 +589,24 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     val canRefine get() = !isEditing && !repository.readOnly && repository.canChangeNotebook
     val clipboardIsPhoto get() = app.photoClipboard.content != null
     private val copiedHere get() = app.mixedClipboard.content != null || app.inkClipboard.hasInk || app.photoClipboard.content != null || app.textClipboard.content != null
-    /** P103 (F099): text another app copied after anything copied here pastes as a new text box. */
-    val clipboardHasOutsideText get() = SystemClipboard.hasOutsideText(app, if (copiedHere) app.copiedAt else -1L)
-    /** B35 (P198): a picture another app copied after anything copied here pastes as a new photo. Text wins when both are offered. */
-    val clipboardHasOutsideImage get() = !clipboardHasOutsideText && SystemClipboard.hasOutsideImage(app, if (copiedHere) app.copiedAt else -1L)
-    val clipboardLabel get() = if (!clipboardHasOutsideText && !clipboardHasOutsideImage && app.mixedClipboard.content != null) "Paste selection" else if (clipboardHasOutsideText || app.textClipboard.content != null) "Paste text"
-        else if (clipboardHasOutsideImage || clipboardIsPhoto) "Paste photo" else "Paste handwriting"
-    val canPasteInk get() = (copiedHere || clipboardHasOutsideText || clipboardHasOutsideImage) && repository.currentPage != null && !repository.readOnly && !isEditing && !repository.busy && !repository.fileBusy
+    /**
+     * P103 (F099): text another app copied after anything copied here pastes as a new text box. B35 (P198): a picture pastes as
+     * a new photo; text wins when both are offered. P587: one read of the system clipboard answers both.
+     */
+    private fun outsideClip() = SystemClipboard.outside(app, if (copiedHere) app.copiedAt else -1L)
+    val clipboardHasOutsideText get() = outsideClip() == SystemClipboard.Outside.TEXT
+    val clipboardHasOutsideImage get() = outsideClip() == SystemClipboard.Outside.IMAGE
+    private fun pasteLabel(outside: SystemClipboard.Outside) = when {
+        outside == SystemClipboard.Outside.NONE && app.mixedClipboard.content != null -> "Paste selection"
+        outside == SystemClipboard.Outside.TEXT || app.textClipboard.content != null -> "Paste text"
+        outside == SystemClipboard.Outside.IMAGE || clipboardIsPhoto -> "Paste photo"
+        else -> "Paste handwriting"
+    }
+    private val pasteAllowed get() = repository.currentPage != null && !repository.readOnly && !isEditing && !repository.busy && !repository.fileBusy
+    val clipboardLabel get() = pasteLabel(outsideClip())
+    val canPasteInk get() = (copiedHere || outsideClip() != SystemClipboard.Outside.NONE) && pasteAllowed
+    /** P587: the Paste label and whether Paste can act now, from one clipboard read. */
+    fun pasteState(): Pair<String, Boolean> = outsideClip().let { pasteLabel(it) to ((copiedHere || it != SystemClipboard.Outside.NONE) && pasteAllowed) }
     fun copySelectedInk(cut: Boolean = false): Boolean {
         check(!isEditing && !repository.busy && !repository.fileBusy)
         if (repository.readOnly) return false
@@ -616,8 +635,9 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         check(!isEditing && !repository.busy && !repository.fileBusy)
         if (repository.readOnly) return false
         pasteSpot = null
-        if (clipboardHasOutsideImage) return pasteOutsideImage(at)
-        val outside = if (clipboardHasOutsideText) SystemClipboard.outsideText(app) else null
+        val clip = outsideClip()
+        if (clip == SystemClipboard.Outside.IMAGE) return pasteOutsideImage(at)
+        val outside = if (clip == SystemClipboard.Outside.TEXT) SystemClipboard.outsideText(app) else null
         val pasted = if (outside != null) textSelection.pasteText(outside, at) else if (app.mixedClipboard.content != null) selection.pasteMixed(app.mixedClipboard, at) else if (app.textClipboard.content != null) textSelection.paste(app.textClipboard, at)
             else if (app.photoClipboard.content != null) photoSelection.paste(app.photoClipboard, at) else selection.paste(app.inkClipboard, at)
         if (pasted) {
@@ -688,6 +708,10 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     private var pdfTextSelection: PdfTextSelection? = null
     private var pdfTextBlockedContact=false
     internal var onPdfTextSelectionChanged: (() -> Unit)? = null
+    /** P629: a finger or pen came down on the page (EditorFrame ends the page's glide at once). */
+    internal var onTouchDown: (() -> Unit)? = null
+    /** P630: a pen or highlighter stroke was just added to the page (EditorFrame may fold the toolbar into the slim bar). */
+    internal var onInkWritten: (() -> Unit)? = null
     internal val pdfTextSelectionActive get() = pdfTextSelection != null
     internal val selectedPdfText get() = pdfTextSelection?.takeIf { it.matches(repository.currentPage) }?.text.orEmpty()
     internal val pdfTextBoundsInView: RectF? get() = pdfTextSelection?.let { selected ->
@@ -1021,7 +1045,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             showHint(if (turn == Straighten.Level) "Already level" else "Select a line of writing to straighten"); return false
         }
         selection.transform(visiblePaths(repository.currentPage?.strokes.orEmpty()), 1f, turn.degrees)
-        showHint("Straightened by ${"%.1f".format(kotlin.math.abs(turn.degrees))}°")
+        showHint("Straightened by ${"%.1f".format(java.util.Locale.ROOT, kotlin.math.abs(turn.degrees))}°")
         publishChange(); return true
     }
     /** P085 (F158): tapes peeled back in this editor. Never saved, so a reopened notebook starts with every tape covered. */
@@ -1220,6 +1244,10 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             if (strip == null) canvas.drawColor(deskColor)
             val page = repository.currentPage ?: return
             if (strip != null && !fitted) return
+            // P585: in continuous mode the page that becomes current while scrolling only starts loading its PDF, picture,
+            // photos and text then; drawn before they are ready it covered the strip's finished picture of it with bare
+            // paper, a flicker as each page passed. Until it is ready the strip's picture shows instead (input waits too).
+            if (strip != null && !pdfBackgroundReady) { stripWaitingDraws++; return }
             if (strip == null) {
                 // Soft two-layer page shadow in screen pixels, so it keeps its size at every zoom. A spread shares one.
                 shadowBounds.set(0f, 0f, page.width, page.height); spread?.let { shadowBounds.union(it.partner) }; viewport.mapRect(shadowBounds)
@@ -1262,6 +1290,9 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             // B31 (P193): strokes the paint brush touched show their new look until the pen lifts.
             val painting = active.values.filter { it.paint && it.pageId == page.id && it.painted.isNotEmpty() }.map { it.painted }
             val reshaping = selection.shapePreview
+            // P617: with Mix colours off a later highlight covers earlier ones; a moving selection keeps its own shape.
+            val moving = selected.isNotEmpty() && (delta.x != 0f || delta.y != 0f || !selection.previewMatrix.isIdentity)
+            val flat = InkGeometry.flatHighlights(slice.drawnStrokes.filter { !(moving && it.id in selected) && painting.none { p -> it.id in p } }) { visible.getValue(it.id) }
             slice.drawnStrokes.forEach { stroke ->
                 if (AudioPlayback.visibleInReplay(stroke,replay) && erasing.none { it.mode == EraserMode.STROKE && stroke.id in it.erased }) {
                     val repainted = painting.firstNotNullOfOrNull { it[stroke.id] }
@@ -1276,7 +1307,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                         tapeOutline.color = stroke.color.toInt(); tapeOutline.alpha = 210; tapeOutline.strokeWidth = 1.5f * handleUnit
                         canvas.drawPath(path, tapeOutline)
                     } else if (reshaping?.first == stroke.id) canvas.drawPath(reshaping.second, InkGeometry.paint(shapePointPaint,stroke,page.opacityOf(stroke)).apply { style=Paint.Style.STROKE;strokeWidth=stroke.width })
-                    else InkGeometry.draw(canvas, repainted?.first ?: stroke, inkPaint, page.opacityOf(stroke) * (if (fade != null && stroke.id in fade.new) faded else 1f), path)
+                    else InkGeometry.draw(canvas, repainted?.first ?: stroke, inkPaint, page.opacityOf(stroke) * (if (fade != null && stroke.id in fade.new) faded else 1f), flat[stroke] ?: path)
                     canvas.restore()
                 }
             }
@@ -1318,7 +1349,8 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                 canvas.translate(s.partner.left, s.partner.top); canvas.scale(k, k)
                 PaperRenderer.draw(canvas, partner, paint)
                 val paths = partnerPaths(partner.strokes)
-                partner.drawnStrokes.forEach { InkGeometry.draw(canvas, it, inkPaint, partner.opacityOf(it), paths.getValue(it.id)) }
+                val flat = InkGeometry.flatHighlights(partner.drawnStrokes) { paths.getValue(it.id) }
+                partner.drawnStrokes.forEach { InkGeometry.draw(canvas, it, inkPaint, partner.opacityOf(it), flat[it] ?: paths.getValue(it.id)) }
             }
             canvas.restore()
             gutter.draw(canvas, s.partner, spineOnRight = !s.currentOnLeft)
@@ -1352,18 +1384,73 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         addView(dry, LayoutParams(-1, -1)); addView(wet, LayoutParams(-1, -1)); addView(laser, LayoutParams(-1,-1))
         wet.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
+                var wrote = false
                 strokes.forEach { (id, stroke) ->
                     val pending = finishing.remove(id) ?: return@forEach
-                    commit(pending, stroke)
+                    commit(pending, stroke); wrote = true
                 }
                 dry.invalidate()
                 wet.removeFinishedStrokes(strokes.keys)
                 publishChange()
                 if(fixedWritingRegion!=null)onWritingFinished()
+                if (wrote) onInkWritten?.invoke()
             }
         })
         // Navigation sees each event first, so a pen arriving cancels a finger gesture before its stroke starts.
-        wet.setOnTouchListener { _, event -> route(event); true }
+        wet.setOnTouchListener { _, event -> palmRoute(event); true }
+    }
+
+    // ---- P573: palm rest. With finger writing on (rubber-tip pens report as fingers), a resting hand is left out
+    // before navigation or ink see it; see PalmFilter for the rules. ----
+    private val palmFilter by lazy {
+        PalmFilter(palmSize = 18f * resources.displayMetrics.xdpi / 25.4f, slop = ViewConfiguration.get(context).scaledTouchSlop.toFloat())
+    }
+    private var palmDownTime = 0L
+    private fun palmRoute(event: MotionEvent) {
+        val act = when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> PalmFilter.Act.DOWN
+            MotionEvent.ACTION_MOVE -> PalmFilter.Act.MOVE
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> PalmFilter.Act.UP
+            MotionEvent.ACTION_CANCEL -> PalmFilter.Act.CANCEL
+            else -> null
+        }
+        if (act == null) { route(event); return }
+        val contacts = (0 until event.pointerCount).map { i ->
+            PalmFilter.Contact(event.getPointerId(i), event.getToolType(i) == MotionEvent.TOOL_TYPE_FINGER, event.getX(i), event.getY(i), event.getTouchMajor(i))
+        }
+        val enabled = drawWithFinger && !repository.readOnly && inputEnabled
+        val emits = palmFilter.filter(act, event.getPointerId(event.actionIndex), contacts, event.eventTime, enabled,
+            firstOfGesture = event.actionMasked == MotionEvent.ACTION_DOWN)
+        val all = contacts.map { it.id }
+        val unchanged = emits == null || emits.size == 1 && emits[0].keep == all && emits[0].act == act &&
+            (act == PalmFilter.Act.MOVE || act == PalmFilter.Act.CANCEL || emits[0].actionId == event.getPointerId(event.actionIndex))
+        if (unchanged) { if (event.actionMasked == MotionEvent.ACTION_DOWN) palmDownTime = event.downTime; route(event); return }
+        emits!!.forEach { emit -> palmEvent(event, emit)?.let { part -> try { route(part) } finally { part.recycle() } } }
+    }
+    /** [event] carrying only [emit]'s pointers, with their history, as [emit]'s action. */
+    private fun palmEvent(event: MotionEvent, emit: PalmFilter.Emit): MotionEvent? {
+        val indices = emit.keep.map { event.findPointerIndex(it) }
+        if (indices.isEmpty() || indices.any { it < 0 }) return null
+        val at = emit.keep.indexOf(emit.actionId)
+        val action = when (emit.act) {
+            PalmFilter.Act.DOWN -> if (indices.size == 1) MotionEvent.ACTION_DOWN else MotionEvent.ACTION_POINTER_DOWN or (at.coerceAtLeast(0) shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+            PalmFilter.Act.UP -> if (indices.size == 1) MotionEvent.ACTION_UP else MotionEvent.ACTION_POINTER_UP or (at.coerceAtLeast(0) shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+            PalmFilter.Act.MOVE -> MotionEvent.ACTION_MOVE
+            PalmFilter.Act.CANCEL -> MotionEvent.ACTION_CANCEL
+        }
+        if (action == MotionEvent.ACTION_DOWN) palmDownTime = event.eventTime
+        val properties = Array(indices.size) { MotionEvent.PointerProperties().also { p -> event.getPointerProperties(indices[it], p) } }
+        fun coords(pos: Int) = Array(indices.size) { MotionEvent.PointerCoords().also { c ->
+            if (pos < 0) event.getPointerCoords(indices[it], c) else event.getHistoricalPointerCoords(indices[it], pos, c) } }
+        val history = if (emit.act == PalmFilter.Act.MOVE) event.historySize else 0
+        val first = if (history > 0) event.getHistoricalEventTime(0) else event.eventTime
+        val part = MotionEvent.obtain(palmDownTime, first, action, indices.size, properties, coords(if (history > 0) 0 else -1), event.metaState,
+            event.buttonState, event.xPrecision, event.yPrecision, event.deviceId, event.edgeFlags, event.source, event.flags)
+        if (history > 0) {
+            for (pos in 1 until history) part.addBatch(event.getHistoricalEventTime(pos), coords(pos), event.metaState)
+            part.addBatch(event.eventTime, coords(-1), event.metaState)
+        }
+        return part
     }
 
     // ---- B33 (P196): androidx.ink's finished-stroke layer asks for a frame on every display refresh while it is attached,
@@ -1779,6 +1866,8 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     var pageCurlEnabled = toolPreferences.getBoolean("pageCurl", true); private set
     private var pageCurl: PageCurlView? = null
     internal val pageCurlForTest get() = pageCurl!!
+    /** For tests: why a page turn is or isn't ready. */
+    internal val pageCurlState get() = "enabled=$pageCurlEnabled strip=${strip != null} zoomed=$zoomedIn input=$inputEnabled editing=$isEditing spread=${spread != null} previews=${pageCurl?.previewsReady} active=$pageCurlActive ${pageCurl?.warmState}"
     private var curlEligible = false
     private var curlOriginX = 0f; private var curlOriginY = 0f
     private var curlDx = 0f; private var curlDy = 0f
@@ -1789,12 +1878,19 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         check(pageCurl == null)
         pageCurl = PageCurlView(context, repository, thumbnails, { direction ->
             inputEnabled && !isEditing && !repository.busy && !repository.fileBusy && onPageTurn(direction)
-        }, { pdfBackgroundReady }).also { it.endCard = endCard; it.fitArea = { fitArea }; addView(it, LayoutParams(-1, -1)) }
+        }, { pdfBackgroundReady }).also {
+            it.endCard = endCard; it.fitArea = { fitArea }; addView(it, LayoutParams(-1, -1))
+            // P587: during a turn the page doesn't change, so the graphics chip keeps it as one picture rather than redrawing
+            // every stroke under the turning page each frame (about 12 ms a frame on the tablet with a written page).
+            it.onTurning = { on -> dry.setLayerType(if (on) LAYER_TYPE_HARDWARE else LAYER_TYPE_NONE, null) }
+        }
         thumbnailService = thumbnails
         bookFlip = BookFlipView(context, repository, thumbnails, { offset ->
             inputEnabled && !isEditing && !repository.busy && !repository.fileBusy && onPageJump(offset)
-        }, { pdfBackgroundReady }).also { it.seeThrough = seeThroughEnabled; addView(it, LayoutParams(-1, -1)) }
+        }, { pdfBackgroundReady }).also { it.seeThrough = seeThroughEnabled; it.onShownChanged = { onBookFlipChanged() }; addView(it, LayoutParams(-1, -1)) }
     }
+    /** P585: frames the page left to the strip's picture while its background loaded (tests). */
+    internal var stripWaitingDraws = 0L
     fun selectPageCurl(enabled: Boolean) {
         check(!isEditing) { "Wait for input completion" }
         cancelCurl(); pageCurlEnabled = enabled
@@ -1852,6 +1948,18 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     /** The partner page's rectangle in this view, or null without one. */
     val partnerRect: RectF? get() = spread?.takeIf { it.partnerId != null }?.let { RectF(it.partner).also { r -> viewport.mapRect(r) } }
     val bookFlipActive get() = bookFlip?.active == true
+    /** P585: the spread's two slots in this view, the right one even when no page fills it; false without a spread. */
+    fun spreadSlots(left: RectF, right: RectF): Boolean {
+        val s = spread ?: return false
+        val own = pageRect ?: return false
+        val other = RectF(s.partner).also { viewport.mapRect(it) }
+        if (s.currentOnLeft) { left.set(own); right.set(other) } else { left.set(other); right.set(own) }
+        return true
+    }
+    /** P585: the final spread of a notebook with an odd page count, whose right slot is empty. */
+    val spreadEndsEmpty get() = spread?.partnerId == null && spread != null
+    /** P585: a spread's turning sheet appeared or went. */
+    var onBookFlipChanged: () -> Unit = {}
     val bookFlipProgress get() = bookFlip?.progress ?: 0f
     val bookFlipReady get() = bookFlip?.previewsReady == true
     private fun spreadFor(page: Page): Spread? {
@@ -1965,7 +2073,8 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         if (action == MotionEvent.ACTION_DOWN) {
             // P568: a read-only page takes no ink, so one finger keeps moving it.
             touch.fingerWriting = drawWithFinger && !repository.readOnly
-            settleCurl(); cancelCurl()
+            // P586: a landed page still waiting for its PDF stays up; the next turn can start from it.
+            settleCurl(); if (pageCurl?.holding == true) { bookFlip?.cancel(); curlEligible = false; curlDx = 0f; curlDy = 0f } else cancelCurl()
             curlEligible = pageCurlEnabled && strip == null && !zoomedIn && !isEditing &&
                 fingerSettings.mode == FingerMode.ONE && fingerSettings.axis == TurnAxis.HORIZONTAL &&
                 fingers.size == 1 && pens.isEmpty() && (spread?.let { spreadBounds(it) } ?: pageRect)?.contains(event.getX(index), event.getY(index)) == true
@@ -2169,6 +2278,9 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             }
             is TouchIntent.PageTurn -> if (strip == null && !isEditing && !zoomedIn) {
                 if (bookFlipActive) bookFlip?.release(intent.direction)
+                // P586: while a landed page is held, a swipe that couldn't start a turn yet waits its turn: an instant turn
+                // here showed the next page bare while its PDF drew.
+                else if (pageCurl?.holding == true) pageCurl?.queue(intent.direction)
                 else if (pageCurlActive) pageCurl?.release(intent.direction)
                 else if (if (spread != null) spreadTurn(intent.direction) else onPageTurn(intent.direction)) turned = true
             }
@@ -2677,6 +2789,8 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             PenKind.DASHED -> StockBrushes.dashedLine(StockBrushes.DashedLineVersion.V1)
             PenKind.CALLIGRAPHY -> CalligraphyBrush.family
             PenKind.PENCIL -> PencilWetRenderer.family
+            PenKind.FOUNTAIN -> FountainInk.everyday
+            PenKind.FOUNTAIN_SOFT -> FountainInk.soft
         }, style.smoothing), style.inkColor.toInt(), style.width, .1f)
         internal fun outlinesOf(stroke: Stroke): List<List<Point>> {
             val shape = stroke.shape
@@ -2716,6 +2830,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         return true
     }
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) onTouchDown?.invoke()
         if(laserEnabled) {
             val allowed = inputEnabled && !repository.busy && !repository.fileBusy && repository.currentPage != null && pdfBackgroundReady
             laser.fingerDraws = drawWithFinger
@@ -2952,7 +3067,8 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         // B33 (P196): a move that only lengthens wet ink changes nothing the page or the toolbar draws, so it skips their redraw.
         var inkOnly = true; var appended = false; var eraserMovesOnly = true
         val fingerInk = !effectiveLasso && fingerMayWrite(event)
-        router.route(packet, allowFinger = fingerInk).forEach { routed ->
+        val routedInputs = router.route(packet, allowFinger = fingerInk)
+        routedInputs.forEach { routed ->
             val pointerId = routed.pointerId
             when (routed.action) {
                 InkAction.START -> {
@@ -2984,6 +3100,10 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             }
         }
         if (inkOnly && appended && action == PointerAction.MOVE) { scheduleHoldCheck(); return }
+        // P587: a move that reaches no ink (a finger turning or moving the page) changes nothing the page or the screen around
+        // it shows. Republishing for each one refreshed the whole editor and redrew the page under every frame of a page
+        // turn (about 8 ms of the frame on the tablet); the touch's down and lift still publish.
+        if (routedInputs.isEmpty() && action == PointerAction.MOVE) return
         // Erasing changes the page preview, but the toolbar and input owner stay unchanged until lift.
         if (eraserMovesOnly && appended && action == PointerAction.MOVE) { scheduleHoldCheck(); dry.invalidate(); return }
         publishChange()
@@ -2993,6 +3113,28 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     /** P416: each drawn path's bounds, measured once rather than for every stroke at every eraser sample. */
     private val pathBounds = java.util.WeakHashMap<Path, RectF>()
     private fun boundsOf(path: Path) = pathBounds.getOrPut(path) { RectF().also { path.computeBounds(it, true) } }
+    /** B56 (P635): the erased page's strokes, found once per notebook state rather than at every eraser sample. */
+    private var sweepNotebook = java.lang.ref.WeakReference<Notebook>(null)
+    private var sweepPageId: String? = null
+    private var sweepPageStrokes: List<InkStroke> = emptyList()
+    private fun sweepStrokes(pageId: String): List<InkStroke> {
+        val notebook = repository.session?.notebook
+        if (notebook == null || notebook !== sweepNotebook.get() || pageId != sweepPageId) {
+            sweepPageStrokes = notebook?.pages?.firstOrNull { it.id == pageId }?.strokes.orEmpty(); sweepNotebook = java.lang.ref.WeakReference(notebook); sweepPageId = pageId
+        }
+        return sweepPageStrokes
+    }
+    /** B56 (P635): each stroke's drawn bounds as left, top, right, bottom, built once per stroke list. */
+    private var boundsFor: List<InkStroke>? = null
+    private var strokeBounds = FloatArray(0)
+    private fun sweepBounds(strokes: List<InkStroke>, visible: Map<String, Path>): FloatArray {
+        if (boundsFor !== strokes) {
+            val b = FloatArray(strokes.size * 4)
+            strokes.forEachIndexed { i, s -> val r = boundsOf(visible.getValue(s.id)); b[i * 4] = r.left; b[i * 4 + 1] = r.top; b[i * 4 + 2] = r.right; b[i * 4 + 3] = r.bottom }
+            strokeBounds = b; boundsFor = strokes
+        }
+        return strokeBounds
+    }
     private fun capture(event: MotionEvent, id: Int, pending: Pending, includeHistory: Boolean = true) {
         val index = event.findPointerIndex(id)
         if (index < 0) return
@@ -3010,14 +3152,21 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             if (pending.erase || pending.paint) {
                 val previous = pending.samples.getOrNull(pending.samples.lastIndex - 1)
                 val points = listOfNotNull(previous?.let { Point(it.x, it.y) }, Point(value.x, value.y))
-                val strokes = repository.session?.notebook?.pages?.firstOrNull { it.id == pending.pageId }?.strokes.orEmpty()
+                val strokes = sweepStrokes(pending.pageId)
                 val visible = visiblePaths(strokes)
                 val layer = onActiveLayer(pending.pageId)
                 // B03 (P131): only strokes whose bounds reach this segment get the exact test, and the sweep is built only for them.
+                // B56 (P635): the bounds test comes first, on plain floats kept for the gesture, before any lookup by id.
                 val r = pending.radius
                 segment.set(points.minOf { it.x } - r, points.minOf { it.y } - r, points.maxOf { it.x } + r, points.maxOf { it.y } + r)
-                val near = strokes.filter { pending.target.accepts(it) && layer(it) && it.id !in pending.erased && !(pending.paint && it.isTape) &&
-                    RectF.intersects(segment, boundsOf(visible.getValue(it.id))) }
+                val b = sweepBounds(strokes, visible)
+                val near = ArrayList<InkStroke>()
+                for (i in strokes.indices) {
+                    val o = i * 4
+                    if (!(segment.left < b[o + 2] && b[o] < segment.right && segment.top < b[o + 3] && b[o + 1] < segment.bottom)) continue
+                    val it = strokes[i]
+                    if (pending.target.accepts(it) && layer(it) && it.id !in pending.erased && !(pending.paint && it.isTape)) near += it
+                }
                 if (near.isNotEmpty()) {
                     val area = InkGeometry.previewSweep(EraserSweep(points, pending.radius))
                     near.forEach { if (InkGeometry.intersects(visible.getValue(it.id), area)) { pending.erased.add(it.id); if (pending.paint) paint(pending, it) } }

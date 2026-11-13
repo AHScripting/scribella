@@ -19,6 +19,9 @@ import android.text.TextWatcher
 import android.text.format.DateUtils
 import android.widget.EditText
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
@@ -44,6 +47,7 @@ import dev.ownednotes.core.PaperStyle
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 
@@ -223,13 +227,16 @@ class LibraryScreen(
     private val selectionBar = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
         setPadding(dpi(8f), dpi(4f), dpi(8f), dpi(4f)); visibility = GONE
-        isClickable = true // touches on the bar never reach the covers under it
     }
-    /** Preserve each action's natural touch target when a window cannot fit the whole row. */
-    private val selectionViewport = HorizontalScrollView(context).apply {
+    /**
+     * Preserve each action's natural touch target when a window cannot fit the whole row. A scroll view with a child takes
+     * every touch in its bounds, so taps between the actions never reach the covers under the bar. P637: neither the bar
+     * nor this is marked clickable any more, which made a screen reader stop on them as buttons with no name.
+     */
+    internal val selectionViewport = HorizontalScrollView(context).apply {
         background = Glass.pane(context, night, Glass.PILL); elevation = dp(16f)
         isHorizontalScrollBarEnabled = false; overScrollMode = OVER_SCROLL_NEVER
-        visibility = GONE; isClickable = true
+        visibility = GONE
         addView(selectionBar, LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
     private val selectionHost = FrameLayout(context).apply {
@@ -245,10 +252,12 @@ class LibraryScreen(
     /** The query whose handwriting and typed text search is still running, or null (for tests). */
     var searchingText: String? = null; private set
     private val search = EditText(context).apply {
-        hint = if (context.largeText) "Search" else "Search, including handwriting"; setHintTextColor(Glass.secondary(night)); setTextColor(Glass.text(night))
+        setHintTextColor(Glass.secondary(night)); setTextColor(Glass.text(night))
         textSize = 14f; typeface = Tokens.SANS; background = null; setSingleLine()
         imeOptions = EditorInfo.IME_ACTION_SEARCH or EditorInfo.IME_FLAG_NO_EXTRACT_UI
         setPadding(dpi(36f), 0, dpi(36f), 0); contentDescription = "Search notebooks"
+        // P600: the hint was clipped to "Search, including handw" (tablet) or "handv" (narrow phone); large text keeps "Search".
+        if (context.largeText) hint = "Search" else fitHint("Search, including handwriting", "Search all writing", "Search")
     }
     private val clearSearch = SearchGlyph(context, clear = true).apply { contentDescription = "Clear search"; visibility = GONE }
     private val nameSort = sortChip("Name")
@@ -286,7 +295,19 @@ class LibraryScreen(
     }
     private val title = TextView(context).apply {
         text = "All notebooks"; setTextColor(Glass.text(night)); textSize = 30f; typeface = Tokens.SANS_SEMIBOLD
-        maxLines = if (context.largeText) 2 else 1; ellipsize = TextUtils.TruncateAt.END
+        // P654: one real line, so a long folder or tag name ends in "…" (with maxLines 1 alone, a long word after a space vanished).
+        // At large text two lines, but a word too wide for the line (a 60-letter folder name) puts it back on one line:
+        // over two lines Android split that word and cut it with no "…".
+        isSingleLine = true; ellipsize = TextUtils.TruncateAt.END; keepWordsWhole(leastShare = NAME_SHARE)
+        if (context.largeText) {
+            var single: Boolean? = null
+            addOnLayoutChangeListener { v, left, _, right, _, _, _, _, _ ->
+                val room = right - left - totalPaddingLeft - totalPaddingRight
+                if (room <= 0) return@addOnLayoutChangeListener
+                val wide = text.split(Regex("\\s+")).any { paint.measureText(it) > room }
+                if (wide != single) { single = wide; v.post { isSingleLine = wide; if (!wide) maxLines = 2; ellipsize = TextUtils.TruncateAt.END } }
+            }
+        }
     }
     private val hint = TextView(context).apply {
         setTextColor(Glass.secondary(night)); textSize = 13f; typeface = Tokens.SANS
@@ -302,7 +323,7 @@ class LibraryScreen(
         gravity = Gravity.CENTER; setPadding(dpi(24f), dpi(48f), dpi(24f), dpi(48f)); visibility = GONE
         accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
-    /** P179 (G4): how many notebooks there are, and that they are kept on this tablet; P188: the header's subtitle. */
+    /** P179 (G4): how many notebooks there are, and that they are kept on this device; P188: the header's subtitle. */
     private val storageLine = TextView(context).apply {
         setTextColor(Glass.secondary(night)); textSize = 14f; typeface = Tokens.SANS; maxLines = if (context.largeText) Int.MAX_VALUE else 2; ellipsize = TextUtils.TruncateAt.END
         setPadding(0, dpi(4f), 0, 0)
@@ -313,11 +334,28 @@ class LibraryScreen(
     private val recentCards = linkedMapOf<String, RecentCard>()
     private var recentKey: List<String>? = null
     private val notebooksLabel = sectionLabel("Notebooks")
+    private val notebooksRow = LinearLayout(context)
+    private val notebooksControls = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
     private val side = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL; background = Glass.pane(context, night, SIDE_RADIUS); elevation = dp(8f)
-        setPadding(dpi(16f), dpi(26f), dpi(16f), dpi(18f)); isClickable = true
+        setPadding(dpi(16f), dpi(26f), dpi(16f), dpi(18f)); Kit.blockTouches(this)
     }
     private val mainColumn = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+    /** P577: the header: the heading row (panel button, title, count) and the pill buttons, side by side or stacked. */
+    private val header = LinearLayout(context)
+    private val headingRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private val pills = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    /** P577: on a narrow screen (a phone, or a narrow split) the side panel slides in over the Library from this button. */
+    private val drawerButton = Kit.iconButton(context, "Folders, trash and settings", Glyph.MENU) { openDrawer() }.apply { visibility = GONE }
+    private val scrim = View(context).apply {
+        setBackgroundColor(if (night) 0x99000000.toInt() else 0x5c1d2433); visibility = GONE; isClickable = true
+        contentDescription = "Close the side panel"; setOnClickListener { closeDrawer() }
+    }
+    /** True while the side panel is a slide-out panel (narrow screens); see [onMeasure]. */
+    var compact = false; private set
+    /** True while the slide-out side panel is open. */
+    val drawerOpen get() = compact && side.visibility == VISIBLE
+    private val drawerBack = object : androidx.activity.OnBackPressedCallback(false) { override fun handleOnBackPressed() = closeDrawer() }
     /** The storage line under the search field, or null when hidden (for tests). */
     val storageText: String? get() = if (storageLine.visibility == VISIBLE) storageLine.text.toString() else null
     private var shownFolderPaths = emptyList<String>()
@@ -355,6 +393,16 @@ class LibraryScreen(
     internal val showingLibraryLoading get() = !repository.loaded && empty.visibility == VISIBLE
     /** The tile for a notebook id, for tests and accessibility checks. */
     fun tileFor(id: String): View? = tiles[id]
+    /** Scrolls the grid to a notebook so its tile is drawn (tests: a scope may hold more notebooks than fit). */
+    internal fun reveal(id: String): Boolean {
+        val index = shownIds.indexOf(id); if (index < 0) return false
+        scroll.scrollToPosition(1 + shownFolders.size + index); return true
+    }
+    /** As [reveal], for a folder's tile. */
+    internal fun revealFolder(name: String): Boolean {
+        val index = shownFolders.indexOf(name); if (index < 0) return false
+        scroll.scrollToPosition(1 + index); return true
+    }
     /** Ids of the shown covers, in grid order. */
     val shownIds: List<String> get() = shownEntries.orEmpty().map { it.id }
     /** P188: ids of the "Continue writing" cards, most recently edited first; empty while the section is hidden. */
@@ -390,6 +438,8 @@ class LibraryScreen(
     fun folderChip(name: String?): TextView? = folderChips[name]
     /** B18 (P136): the grid tile of a folder inside the open one (or at the top level), or null when not shown. */
     fun folderTile(path: String): View? = folderTiles[path]
+    /** P608: a top-level folder's row in the side list, or null. */
+    internal fun folderRowFor(path: String): View? = folderRows[path]
     /** Paths of the folder tiles shown, in grid order (they lead the grid). */
     val shownFolders: List<String> get() = shownFolderPaths
     /** A folder's colour (a cover design key), or null for the default. */
@@ -400,11 +450,14 @@ class LibraryScreen(
     /** The open library menu, notebook options or folder options. */
     private val openMenu: Popover? get() = listOf(libraryMenu, actionsMenu, folderMenu, dateMenu).firstOrNull { it?.isShowing == true }
     /** The labels of the open menu's rows, in order (for tests); empty when none is open. */
-    val menuLabels: List<String> get() = openMenu?.let { menu -> rowsOf(menu.content).map { it.text.toString() } } ?: emptyList()
+    val menuLabels: List<String> get() = openMenu?.let { menu -> rowsOf(menu.content).map { labelOf(it) } } ?: emptyList()
     /** Taps the open menu's row with this label; false when there is none or it is disabled. */
-    fun chooseMenu(label: String): Boolean = openMenu?.let { menu -> rowsOf(menu.content).firstOrNull { it.text.toString() == label } }
+    fun chooseMenu(label: String): Boolean = openMenu?.let { menu -> rowsOf(menu.content).firstOrNull { labelOf(it) == label } }
         ?.takeIf { it.isEnabled }?.performClick() == true
-    private fun rowsOf(view: View): List<TextView> = when {
+    /** P606: a tile reads as its full label, a row or pill as its text. */
+    private fun labelOf(view: View) = (view as? MenuTile)?.label ?: (view as TextView).text.toString()
+    private fun rowsOf(view: View): List<View> = when {
+        view is MenuTile -> listOf(view)
         view is TextView && view.isClickable -> listOf(view)
         view is ViewGroup -> (0 until view.childCount).flatMap { rowsOf(view.getChildAt(it)) }
         else -> emptyList()
@@ -423,7 +476,7 @@ class LibraryScreen(
     val emptyText: String? get() = if (empty.visibility == VISIBLE) empty.text.toString() else null
     init {
         setBackgroundColor(deskOf(night))
-        isClickable = true // nothing behind the library receives touches
+        Kit.blockTouches(this) // nothing behind the library receives touches
         listOf(selectAllButton, folderSelectedButton, tagSelectedButton, selectionTrashButton, doneButton).forEach { it.glass = true; it.night = night }
         // B16 (P136): no Back button. The menu holds the library-wide actions (the system Back still returns to the
         // notebook). P188: it is the side panel's last row; New notebook and Import lead the header, and the header shows
@@ -436,20 +489,14 @@ class LibraryScreen(
         onBackup?.let { backup -> backupButton.setOnClickListener { backup() } }
         // P188: the header: the place shown and its count on the left, the primary buttons on the right.
         // At large text the title takes the whole width and the buttons go under it.
-        val stacked = context.largeText
-        val header = LinearLayout(context).apply {
-            orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL; if (!stacked) gravity = Gravity.CENTER_VERTICAL
-            setPadding(dpi(MAIN_PAD), dpi(30f), dpi(MAIN_PAD), dpi(6f))
-        }
+        // P577: on a phone the buttons go under the title too, and a panel button before the title opens the side panel.
+        header.setPadding(dpi(MAIN_PAD), dpi(30f), dpi(MAIN_PAD), dpi(6f))
         val heading = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         heading.addView(title); heading.addView(storageLine)
-        header.addView(heading, if (stacked) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            else LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dpi(12f) })
-        val pills = if (stacked) LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL } else header
-        listOf(trashButton, emptyTrashButton, importButton, newButton).forEach { pill ->
-            pills.addView(pill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpi(46f)).apply { if (stacked) marginEnd = dpi(10f) else marginStart = dpi(10f) })
-        }
-        if (stacked) header.addView(pills, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dpi(10f) })
+        headingRow.addView(drawerButton, LinearLayout.LayoutParams(dpi(48f), dpi(48f)).apply { marginEnd = dpi(12f) })
+        headingRow.addView(heading, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(headingRow); listOf(trashButton, emptyTrashButton, importButton, newButton).forEach { pills.addView(it) }
+        header.addView(pills); arrangeHeader(context.largeText)
         mainColumn.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         mainColumn.addView(folderStrip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         mainColumn.addView(message)
@@ -461,7 +508,11 @@ class LibraryScreen(
             // B53 (P412): a span change requested during this layout pass was dropped, leaving one huge column after a
             // narrow first pass (Back from a notebook). Apply it after the pass, which lays the grid out again.
             scroll.post {
-                val columns = max(1, (scroll.width - scroll.paddingLeft - scroll.paddingRight) / dpi(150f))
+                // P595: with large text a tile is wider, so a name like "Notebook 1" fits beside its ⋮ without splitting.
+                // P609: a narrow phone still gets two columns while a tile can be 136 dp wide, not one tile the width of the screen.
+                val inner = scroll.width - scroll.paddingLeft - scroll.paddingRight
+                val fewest = if (!context.largeText && inner >= dpi(272f)) 2 else 1
+                val columns = max(fewest, inner / dpi(if (context.largeText) 220f else 150f))
                 if (scroll.width > 0 && catalogueLayout.spanCount != columns) {
                     catalogueLayout.spanCount = columns; scroll.invalidateItemDecorations(); scroll.requestLayout()
                 }
@@ -479,6 +530,7 @@ class LibraryScreen(
         // The catalogue recycles its visible cells; the side panel floats over the desk.
         addView(mainColumn, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         buildSide()
+        addView(scrim, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         addView(side, LayoutParams(dpi(SIDE_WIDTH), ViewGroup.LayoutParams.MATCH_PARENT).apply { setMargins(dpi(16f), dpi(16f), 0, dpi(16f)) })
         selectAllButton.setOnClickListener { selectAllShown() }
         folderSelectedButton.setOnClickListener { showMoveSelectedToFolder() }
@@ -499,7 +551,7 @@ class LibraryScreen(
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) { applyQuery(s?.toString().orEmpty()) }
         })
-        search.setOnEditorActionListener { _, action, _ -> if (action == EditorInfo.IME_ACTION_SEARCH) { hideKeyboard(); true } else false }
+        search.setOnEditorActionListener { _, action, _ -> if (action == EditorInfo.IME_ACTION_SEARCH) { hideKeyboard(); closeDrawer(); true } else false }
         clearSearch.setOnClickListener { setQuery(""); hideKeyboard() }
         nameSort.setOnClickListener { setSortByRecent(false) }
         recentSort.setOnClickListener { setSortByRecent(true) }
@@ -525,7 +577,7 @@ class LibraryScreen(
             chip.setOnClickListener { showFolder(name) }
             if (name != null) chip.setOnLongClickListener { showFolderActions(name, chip) }
             folderChips[name] = chip
-            folderRow.addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpi(36f)).apply { marginEnd = dpi(8f) })
+            folderRow.addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dpi(8f) })
         }
         // Tags follow the way back after a thin rule.
         tagChips.clear()
@@ -540,14 +592,15 @@ class LibraryScreen(
                 setOnLongClickListener { showTagActions(tag) }
             }
             tagChips[tag] = chip
-            folderRow.addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpi(36f)).apply { marginEnd = dpi(8f) })
+            folderRow.addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dpi(8f) })
         }
         showFolders()
     }
 
+    /** P654: at least 36 dp tall, and taller when large text needs it (a fixed 36 dp cut the text at 200%). */
     private fun rowChip() = TextView(context).apply {
-        textSize = 14f; typeface = Tokens.SANS_MEDIUM; gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
-        maxWidth = dpi(240f); setPadding(dpi(16f), 0, dpi(16f), 0); minWidth = dpi(64f); isClickable = true; isFocusable = true
+        textSize = 14f; typeface = Tokens.SANS_MEDIUM; gravity = Gravity.CENTER; isSingleLine = true; ellipsize = TextUtils.TruncateAt.END
+        maxWidth = dpi(240f); setPadding(dpi(16f), dpi(4f), dpi(16f), dpi(4f)); minWidth = dpi(64f); minHeight = dpi(36f); isClickable = true; isFocusable = true
         foreground = ripple(night, dp(18f))
     }
 
@@ -596,7 +649,7 @@ class LibraryScreen(
             FrameLayout.LayoutParams(dpi(36f), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START))
         field.addView(clearSearch, FrameLayout.LayoutParams(dpi(40f), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END))
         side.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(40f)).apply { bottomMargin = dpi(18f) })
-        allRow.setOnClickListener { showTrash(false); showTag(null); showFolder(null) }
+        allRow.setOnClickListener { closeDrawer(); showTrash(false); showTag(null); showFolder(null) }
         side.addView(allRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(42f)))
         val foldersHead = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dpi(10f), dpi(18f), 0, dpi(4f))
@@ -615,13 +668,13 @@ class LibraryScreen(
         side.addView(Glass.rule(context, night), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(1f)).apply {
             topMargin = dpi(8f); bottomMargin = dpi(8f); marginStart = dpi(8f); marginEnd = dpi(8f)
         })
-        archiveRow.setOnClickListener { showArchived(true) }
+        archiveRow.setOnClickListener { closeDrawer(); showArchived(true) }
         side.addView(archiveRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(42f)))
-        trashRow.setOnClickListener { showTrash(true) }
+        trashRow.setOnClickListener { closeDrawer(); showTrash(true) }
         side.addView(trashRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(42f)))
-        gesturesRow.setOnClickListener { (context as? MainActivity)?.let { GestureGuide.show(it) } }
+        gesturesRow.setOnClickListener { closeDrawer(); (context as? MainActivity)?.let { GestureGuide.show(it) } }
         side.addView(gesturesRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(42f)))
-        settingsRow.setOnClickListener { (context as? MainActivity)?.frame?.openSettings() }
+        settingsRow.setOnClickListener { closeDrawer(); (context as? MainActivity)?.frame?.openSettings() }
         side.addView(settingsRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(42f)))
         side.addView(menuButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(42f)))
         // P567: the rows above must stay reachable, so a very short screen leaves the card to the More menu.
@@ -655,7 +708,7 @@ class LibraryScreen(
             top.forEach { path ->
                 val row = NavRow(context, NavIcon.FOLDER, leafOf(path)).apply {
                     iconColor = COVER_DESIGNS[folderColors[path] ?: DEFAULT_FOLDER]!!.color
-                    setOnClickListener { showTrash(false); showFolder(path) }
+                    setOnClickListener { closeDrawer(); showTrash(false); showFolder(path) }
                     setOnLongClickListener { !selecting && !showingTrash && showFolderActions(path, this) }
                 }
                 folderRows[path] = row
@@ -687,12 +740,8 @@ class LibraryScreen(
     /** "Notebooks" with the Name / Recent switch at its right, over the grid. */
     private fun notebooksHeader(): View {
         val stacked = context.largeText
-        val row = LinearLayout(context).apply {
-            orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL; if (!stacked) gravity = Gravity.CENTER_VERTICAL
-            setPadding(dpi(MAIN_PAD), 0, dpi(MAIN_PAD), 0)
-        }
-        row.addView(notebooksLabel, if (stacked) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            else LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dpi(12f) })
+        val row = notebooksRow.apply { setPadding(dpi(MAIN_PAD), 0, dpi(MAIN_PAD), 0) }
+        row.addView(notebooksLabel)
         val sort = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; background = rounded(thinOf(night), dp(20f))
             setPadding(dpi(3f), dpi(3f), dpi(3f), dpi(3f)); contentDescription = "Sort notebooks"
@@ -701,10 +750,10 @@ class LibraryScreen(
         sort.addView(nameSort, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
         sort.addView(recentSort, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
         val tall = if (stacked) ViewGroup.LayoutParams.WRAP_CONTENT else dpi(38f)
-        val controls = if (stacked) LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL } else row
+        val controls = notebooksControls
         controls.addView(sort, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, tall))
         controls.addView(dateChip,LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,tall).apply { marginStart=dpi(8f) })
-        if (stacked) row.addView(controls, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dpi(8f) })
+        row.addView(controls); arrangeNotebooksHeader(stacked)
         return row
     }
 
@@ -745,18 +794,79 @@ class LibraryScreen(
     }
 
     /** Room the side panel takes at the left, with the gap after it. */
-    private fun sideSpace() = (side.layoutParams?.width ?: dpi(SIDE_WIDTH)) + dpi(24f)
+    private fun sideSpace() = if (compact) 0 else (side.layoutParams?.width ?: dpi(SIDE_WIDTH)) + dpi(24f)
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val width = MeasureSpec.getSize(widthMeasureSpec)
+        // P577: below 600 dp the side panel would squeeze the notebooks, so it becomes a slide-out panel.
+        val narrow = width in 1 until dpi(COMPACT_WIDTH)
+        if (narrow != compact) setCompact(narrow)
         // A wider side panel on a wide screen; the main column and the selection bar start after it.
-        val sideWidth = dpi(if (MeasureSpec.getSize(widthMeasureSpec) >= dpi(1000f)) SIDE_WIDTH_WIDE else SIDE_WIDTH)
+        val sideWidth = if (compact) min(dpi(SIDE_WIDTH_WIDE), width - dpi(72f))
+            else dpi(if (width >= dpi(1000f)) SIDE_WIDTH_WIDE else SIDE_WIDTH)
         (side.layoutParams as LayoutParams).width = sideWidth
-        (mainColumn.layoutParams as LayoutParams).leftMargin = sideWidth + dpi(24f)
+        (mainColumn.layoutParams as LayoutParams).leftMargin = if (compact) 0 else sideWidth + dpi(24f)
         // Keep the usual main-column alignment, but reserve a usable scroll viewport in narrow windows.
         (selectionHost.layoutParams as LayoutParams).leftMargin =
-            min(sideWidth + dpi(24f), max(dpi(12f), MeasureSpec.getSize(widthMeasureSpec) - dpi(360f)))
+            if (compact) dpi(12f) else min(sideWidth + dpi(24f), max(dpi(12f), width - dpi(360f)))
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
+
+    /** P577: the sort switch beside "Notebooks", or under it (large text, narrow screens, where it would cut the word short). */
+    private fun arrangeNotebooksHeader(stacked: Boolean) {
+        notebooksRow.orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        notebooksRow.gravity = if (stacked) Gravity.NO_GRAVITY else Gravity.CENTER_VERTICAL
+        notebooksLabel.layoutParams = if (stacked) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            else LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dpi(12f) }
+        notebooksControls.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            .apply { if (stacked) topMargin = dpi(8f) }
+    }
+
+    /** P577: the header's buttons beside the title, or under it (large text, narrow screens). */
+    private fun arrangeHeader(stacked: Boolean) {
+        header.orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        header.gravity = if (stacked) Gravity.NO_GRAVITY else Gravity.CENTER_VERTICAL
+        headingRow.layoutParams = if (stacked) LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            else LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dpi(12f) }
+        pills.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (stacked) topMargin = dpi(10f) }
+        for (i in 0 until pills.childCount) pills.getChildAt(i).layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpi(46f))
+            .apply { if (stacked) marginEnd = dpi(10f) else marginStart = dpi(10f) }
+    }
+
+    private fun setCompact(narrow: Boolean) {
+        compact = narrow
+        drawerButton.visibility = if (narrow) VISIBLE else GONE
+        arrangeHeader(narrow || context.largeText); arrangeNotebooksHeader(narrow || context.largeText)
+        // Over the notebooks the panel must be solid, or their titles show through its rows.
+        side.background = if (narrow) rounded(Kit.sheet(night), dp(SIDE_RADIUS)) else Glass.pane(context, night, SIDE_RADIUS)
+        side.animate().cancel(); scrim.animate().cancel()
+        side.translationX = 0f; scrim.visibility = GONE; drawerBack.isEnabled = false
+        side.visibility = if (narrow) GONE else VISIBLE
+    }
+
+    /** P577: slides the side panel in over the Library (narrow screens only). */
+    fun openDrawer() {
+        if (!compact || drawerOpen) return
+        dismissMenus(); hideKeyboard()
+        side.visibility = VISIBLE; scrim.visibility = VISIBLE
+        val from = -(side.layoutParams.width + dpi(16f)).toFloat()
+        val quick = !Motion.enabled
+        side.translationX = if (quick) 0f else from; scrim.alpha = if (quick) 1f else 0f
+        if (!quick) { side.animate().translationX(0f).setDuration(Motion.MEDIUM).setInterpolator(Motion.easeOut).start(); scrim.animate().alpha(1f).setDuration(Motion.MEDIUM).start() }
+        drawerBack.isEnabled = true
+        side.post { allRow.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_FOCUSED) }
+    }
+
+    /** P577: puts the slide-out side panel away; nothing happens on a wide screen, where it always shows. */
+    fun closeDrawer() {
+        if (!drawerOpen) return
+        drawerBack.isEnabled = false
+        val done = { if (compact) { side.visibility = GONE; scrim.visibility = GONE }; side.translationX = 0f }
+        if (!Motion.enabled) { done(); return }
+        side.animate().translationX(-(side.width + dpi(16f)).toFloat()).setDuration(Motion.SHORT).withEndAction(done).start()
+        scrim.animate().alpha(0f).setDuration(Motion.SHORT).start()
+    }
+
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -790,34 +900,41 @@ class LibraryScreen(
         }
     }
 
-    /** B16 (P136): the hamburger menu: back to the open notebook, new folder, select, import, backup and the trash. */
+    /**
+     * B16 (P136): the hamburger menu: back to the open notebook, new folder, select, import, backup and the trash.
+     * P606: drawn as the design canvas's tile grid, grouped Notebooks / Keep safe / App; the way back to an open notebook
+     * is a pill at the top. In the trash it holds Empty Trash and the way back.
+     */
     fun showLibraryMenu(): Boolean {
         if (openMenu != null || !noDialogOpen()) return false
-        lateinit var menu: Popover
-        fun row(column: LinearLayout, label: String, enabled: Boolean, action: () -> Unit) =
-            column.addView(ToolControls.menuRow(context, label, enabled) { menu.dismiss(); main.post { action() } })
-        menu = Popover(menuButton, 280f) { column ->
-            val busy = selecting || batchTotal > 0
-            onClose?.takeIf { !showingTrash }?.let { close -> row(column, "Back to the notebook", !busy) { close() } }
-            if (!showingTrash) {
-                row(column, "New folder…", !busy && !showingArchived && folderNames.size < MAX_FOLDERS) { showNewFolder() }
-                row(column, "Select notebooks", !busy && selectButton.isEnabled) { startSelecting() }
-                row(column, "Import notebook…", !busy && !showingArchived && importButton.isEnabled) { requestImport() }
-                onExportAll?.let { export -> row(column, "Export all notebooks…", !busy && repository.canChangeNotebook && entriesSource().isNotEmpty()) { export() } }
-                onBackup?.let { backup -> row(column, "Back up library…", !busy) { backup() } }
-                onSync?.let { sync -> row(column, "Sync library… (${syncStatus()})", !busy) { sync() } }
-                (context as? MainActivity)?.let { activity -> row(column,"App lock…",!busy) {activity.appLockSettings()} }
-                (context as? MainActivity)?.let { activity -> row(column,"Encrypted backups…",!busy && repository.canChangeNotebook) {activity.encryptedBackups()} }
-                (context as? MainActivity)?.let { activity -> row(column, "Gestures", !busy) { GestureGuide.show(activity) } }
-                (context as? MainActivity)?.let { activity -> row(column, "Settings", !busy) { activity.frame.openSettings() } }
-                if (!context.personalTools) row(column, "Check for updates…", true) { UpdateCheck.show(context) }
-                column.addView(ToolControls.divider(context))
-            }
-            if(showingTrash) row(column,"Empty Trash…",!busy && repository.canChangeNotebook && trashSource().isNotEmpty()) { confirmEmptyTrash() }
-            row(column, if (showingTrash) "Back to the library" else "Trash", !busy && trashButton.isEnabled) { showTrash(!showingTrash) }
-        }
-        menu.window.setOnDismissListener { if (libraryMenu === menu) libraryMenu = null }
-        libraryMenu = menu; menu.show()
+        val busy = selecting || batchTotal > 0
+        val activity = context as? MainActivity
+        val ink = MenuIcons.INSERT; val safe = MenuIcons.EXPORT; val app = MenuIcons.NOTEBOOK
+        val sections = if (showingTrash) listOf("Trash" to listOf(
+            MenuChoice("Empty Trash…", "Empty Trash", MenuIcons.TRASH, Tokens.FAULT, !busy && repository.canChangeNotebook && trashSource().isNotEmpty(), fault = true) { confirmEmptyTrash() },
+            MenuChoice("Back to the library", "Library", MenuIcons.BOOK, app, !busy && trashButton.isEnabled) { showTrash(false) },
+        )) else listOf(
+            "Notebooks" to listOfNotNull(
+                MenuChoice("New folder…", "New folder", MenuIcons.NEW_FOLDER, ink, !busy && !showingArchived && folderNames.size < MAX_FOLDERS) { showNewFolder() },
+                MenuChoice("Select notebooks", "Select", MenuIcons.SELECT, ink, !busy && selectButton.isEnabled) { startSelecting() },
+                MenuChoice("Import notebook…", "Import", MenuIcons.IMPORT, ink, !busy && !showingArchived && importButton.isEnabled) { requestImport() },
+                onExportAll?.let { export -> MenuChoice("Export all notebooks…", "Export all", MenuIcons.SHARE_OUT, ink, !busy && repository.canChangeNotebook && entriesSource().isNotEmpty()) { export() } },
+            ),
+            "Keep safe" to listOfNotNull(
+                onBackup?.let { backup -> MenuChoice("Back up library…", "Back up", MenuIcons.BACKUP, safe, !busy) { backup() } },
+                onSync?.let { sync -> MenuChoice("Sync library… (${syncStatus()})", "Sync", MenuIcons.SYNC, safe, !busy) { sync() } },
+                activity?.let { MenuChoice("App lock…", "App lock", MenuIcons.LOCK, safe, !busy) { it.appLockSettings() } },
+                activity?.let { MenuChoice("Encrypted backups…", "Encrypted backups", MenuIcons.SHIELD, safe, !busy && repository.canChangeNotebook) { it.encryptedBackups() } },
+            ),
+            "App" to listOfNotNull(
+                activity?.let { MenuChoice("Gestures", "Gestures", MenuIcons.HAND, app, !busy) { GestureGuide.show(it) } },
+                activity?.let { MenuChoice("Settings", "Settings", MenuIcons.SLIDERS, app, !busy) { it.frame.openSettings() } },
+                if (!context.personalTools) MenuChoice("Check for updates…", "Updates", MenuIcons.OFFLINE, app, true) { UpdateCheck.show(context) } else null,
+                MenuChoice("Trash", "Trash", MenuIcons.TRASH, app, !busy && trashButton.isEnabled) { showTrash(true) },
+            ),
+        )
+        val back = if (busy || showingTrash) null else onClose?.let { close -> Triple("Back to the notebook", MenuIcons.BOOK, close) }
+        libraryMenu = tileMenu(menuButton, sections.filter { it.second.isNotEmpty() }, beside = false, pill = back) { if (libraryMenu === it) libraryMenu = null }
         return true
     }
 
@@ -887,6 +1004,8 @@ class LibraryScreen(
     }
     override fun onAttachedToWindow() {
         super.onAttachedToWindow(); attached = true; requestFocus()
+        // P577: Back closes the slide-out side panel first.
+        (context as? androidx.activity.ComponentActivity)?.onBackPressedDispatcher?.addCallback(drawerBack)
         loader = Executors.newSingleThreadExecutor { task ->
             Thread({ Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND); task.run() }, "library-covers").apply { isDaemon = true }
         }
@@ -896,9 +1015,11 @@ class LibraryScreen(
         repository.listen(observer)
     }
     override fun onDetachedFromWindow() {
+        lift?.let { settle(it, null, animate = false) }
         storagePanel?.dispose(); storagePanel = null; storageRequest = null; storageBatch = null
         selectedStorageSheet?.dismiss(); selectedStorageSheet = null
         emptyTrashSheet?.dismiss();emptyTrashSheet=null
+        drawerBack.remove()
         repository.unlisten(observer); attached = false; pending = null; openAfterSave = null
         context.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(search.windowToken, 0)
         trashDialog?.dismiss(); trashDialog = null; repository.dismissLibraryMessage()
@@ -970,15 +1091,22 @@ class LibraryScreen(
         refresh()
     }
 
-    /** Back: ends selecting, or returns from the trash; false when neither applies (so Back can close the library). */
+    /**
+     * Back: ends selecting, returns from the trash or Archived, clears a search, leaves a tag, or goes up one folder;
+     * false when none applies (so Back can close the library).
+     */
     fun leaveTrash(): Boolean {
         if (storageBatch != null) { stopSelectedStorage(); return true }
         if (storagePanel?.isShowing == true) { storagePanel?.dismiss(); return true }
         if(emptyTrashSheet?.dialog?.isShowing==true) { emptyTrashSheet?.dismiss();return true }
         if (endSelecting()) return true
         if (showingArchived) { showArchived(false); return true }
-        if (!showingTrash) return false
-        showTrash(false); return true
+        if (showingTrash) { showTrash(false); return true }
+        // P653: Back in a folder left the app; it now steps out of a search, then a tag, then up one folder at a time.
+        if (query.isNotEmpty()) { setQuery(""); return true }
+        if (openTag != null && showTag(null)) return true
+        openFolder?.let { if (showFolder(parentOf(it))) return true }
+        return false
     }
 
     /** Starts ticking notebooks, with [first] ticked when given; false in Trash, while busy or for an unreadable notebook. */
@@ -1065,7 +1193,7 @@ class LibraryScreen(
         val known = tagged.values.flatten().distinctBy { it.lowercase() }.sortedWith(String.CASE_INSENSITIVE_ORDER)
         val everywhere = BooleanArray(known.size) { i -> ids.all { carries(it, known[i]) } }
         val checked = everywhere.copyOf()
-        val input = EditText(context).apply { setSingleLine(); hint = if (known.isEmpty()) "Tags, separated by commas" else "New tags, separated by commas" }
+        val input = EditText(context).apply { setSingleLine(); if (known.isEmpty()) fitHint("Tags, separated by commas", "Tags, comma-separated", "Tags") else fitHint("New tags, separated by commas", "New tags, comma-separated", "New tags") }
         val frame = FrameLayout(context).apply { setPadding(dpi(24f), dpi(8f), dpi(24f), 0); addView(input) }
         fun typed() = input.text.split(',').filter { it.isNotBlank() }
         val dialog = AlertDialog.Builder(context).setTitle("Tag ${notebooks(ids.size)}")
@@ -1080,6 +1208,7 @@ class LibraryScreen(
             .setOnDismissListener { if (tagsDialog === it) tagsDialog = null }
             .show()
         tagsDialog = dialog
+        stopTagList(dialog)
         val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -1092,7 +1221,7 @@ class LibraryScreen(
     /** Chooser for the ticked notebooks' folder: No folder, each folder and New folder…. */
     fun showMoveSelectedToFolder(): Boolean {
         if (!selecting || selection.isEmpty() || batchTotal > 0 || !noDialogOpen()) return false
-        showFolderChooser("Move ${notebooks(selection.size)} to", null, false, { moveSelectedToFolder(it) }) { showNewFolder(moveSelected = true) }
+        showFolderChooser("Move to folder", null, false, { moveSelectedToFolder(it) }, notebooks(selection.size)) { showNewFolder(moveSelected = true) }
         return true
     }
 
@@ -1182,7 +1311,7 @@ class LibraryScreen(
             sheet.show()
         }
         val sheet = Kit.Sheet(context, "Selected storage", cancel = "Close")
-        sheet.add(Kit.row(context, "${notebooks(local.size)} kept on this tablet",
+        sheet.add(Kit.row(context, "${notebooks(local.size)} kept on this device",
             detail = "${chosen.size - local.size} not downloaded"))
         val detail = Kit.text(context, "Download to prepare for offline use. Free local storage verifies an identical saved folder copy first. Earlier versions and backups are kept.", secondary = true)
         sheet.add(detail)
@@ -1197,7 +1326,7 @@ class LibraryScreen(
             }
             sheet.dismiss()
             lateinit var confirmation: Kit.Sheet
-            val explanation = Kit.text(context, "Verify identical copies in the saved folder before removing ${notebooks(local.size)} from this tablet. Already not-downloaded notebooks are skipped. Download again before writing. Earlier versions and backups are kept.", secondary = true)
+            val explanation = Kit.text(context, "Verify identical copies in the saved folder before removing ${notebooks(local.size)} from this device. Already not-downloaded notebooks are skipped. Download again before writing. Earlier versions and backups are kept.", secondary = true)
             confirmation = Kit.Sheet(context, "Free selected copies?", "Free local copies", onAction = {
                 if (!canFree()) {
                     explanation.text = "Nothing else was freed. The selection, source folder or read-only status changed. Close and try again."
@@ -1349,6 +1478,57 @@ class LibraryScreen(
         libraryMenu = null; actionsMenu = null; folderMenu = null; dateMenu=null
     }
 
+    /** P606: one tile of a Library menu: its full [label] (accessibility name, tooltip, tests), the [short] name under its icon. */
+    private class MenuChoice(val label: String, val short: String, val path: String, val tint: Int, val enabled: Boolean = true,
+                             val fault: Boolean = false, val action: () -> Unit)
+
+    /**
+     * P606: a menu in the P605 tile style (the design canvas's Menus-Notebook board): an optional [pill] and [header] on
+     * top, then each section's caption over a grid of tiles. Opens beside [anchor] when [beside], else below it; every
+     * tile closes the menu before acting.
+     */
+    private fun tileMenu(anchor: View, sections: List<Pair<String, List<MenuChoice>>>, beside: Boolean, header: View? = null,
+                         pill: Triple<String, String, () -> Unit>? = null, closed: (Popover) -> Unit): Popover {
+        lateinit var menu: Popover
+        menu = Popover(anchor, 340f) { column ->
+            column.dpi(12f).let { column.setPadding(it, it, it, it) }
+            pill?.let { (text, path, action) -> column.addView(ToolControls.pill(context, text, path) { menu.dismiss(); main.post { action() } }, ToolControls.pillParams(context)) }
+            header?.let { column.addView(it) }
+            sections.forEach { (caption, choices) ->
+                column.addView(ToolControls.tileCaption(context, caption))
+                column.addView(ToolControls.tileGrid(context, choices.map { choice ->
+                    MenuTile(context, choice.label, choice.short, choice.path, choice.tint, choice.enabled, fault = choice.fault) { menu.dismiss(); main.post { choice.action() } }
+                }))
+            }
+        }
+        menu.window.setBackgroundDrawable(Glass.float(context, night, ToolControls.TILE_MENU_RADIUS))
+        menu.window.setOnDismissListener { closed(menu) }
+        if (beside) menu.showBeside() else menu.show()
+        return menu
+    }
+
+    /** P606: a notebook's menu starts with the notebook itself (its cover, title, pages and folder), as in the design canvas. */
+    private fun bookHeader(entry: LibraryEntry) = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        setPadding(dpi(1f), 0, dpi(6f), dpi(5f))
+        addView(CoverTile(context, coverStyles[entry.id], false).apply {
+            isClickable = false; isFocusable = false; foreground = null; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(dpi(50f), dpi(62f)))
+        val place = listOfNotNull(if (entry.pageCount == 1) "1 page" else "${entry.pageCount} pages",
+            filed[entry.id]?.let { "in ${leafOf(it)}" }, if (!entry.availableOffline) "Not downloaded" else null).joinToString(" · ")
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(context).apply {
+                text = entry.title; textSize = 17f; typeface = Tokens.SANS_MEDIUM; setTextColor(Glass.text(night))
+                maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+            })
+            addView(TextView(context).apply {
+                text = place; textSize = 13f; typeface = Tokens.SANS; setTextColor(Glass.secondary(night))
+                maxLines = 2; ellipsize = TextUtils.TruncateAt.END; setPadding(0, dpi(2f), 0, 0)
+            })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dpi(7f) })
+    }
+
     /** A menu of [rows] (label to action; null is a divider) opened beside [anchor]; each row closes it before acting. */
     private fun sideMenu(anchor: View, heading: String, rows: List<Pair<String, () -> Unit>?>, closed: (Popover) -> Unit): Popover {
         lateinit var menu: Popover
@@ -1376,31 +1556,32 @@ class LibraryScreen(
         if (selecting || openMenu != null || renameDialog != null || trashDialog != null) return false
         val at = anchor ?: tiles[id]?.cover ?: return false
         note = null
-        if (!entry.availableOffline) {
-            actionsMenu = sideMenu(at, entry.title, listOf(
-                (if (id in archived) "Return to library" else "Archive") to { setArchived(id, id !in archived); Unit },
-                "Offline storage…" to { showStorage(id); Unit },
-                (if (id in pinned) "Unpin" else "Pin to top") to { setPinned(id, id !in pinned); Unit },
-                "Move to folder…" to { showMoveToFolder(id); Unit },
-                "Cover…" to { showCoverStyles(id); Unit },
-                "Tags…" to { showTags(id); Unit },
-            )) { if (actionsMenu === it) actionsMenu = null }
-            return true
-        }
-        actionsMenu = sideMenu(at, entry.title, listOf(
-            "Edit notebook…" to { showEditNotebook(id); Unit },
-            "Rename…" to { showRename(id); Unit },
-            "Duplicate" to { duplicate(id); Unit },
-            "Earlier versions…" to { showVersions(id); Unit },
-            (if (id in archived) "Return to library" else "Archive") to { setArchived(id, id !in archived); Unit },
-            "Offline storage…" to { showStorage(id); Unit },
-            (if (id in pinned) "Unpin" else "Pin to top") to { setPinned(id, id !in pinned); Unit },
-            "Move to folder…" to { showMoveToFolder(id); Unit },
-            "Cover…" to { showCoverStyles(id); Unit },
-            "Tags…" to { showTags(id); Unit },
-            null,
-            "Move to trash…" to { confirmTrash(id); Unit },
-        )) { if (actionsMenu === it) actionsMenu = null }
+        // P606: grouped Notebook / Arrange / Store as tiles, as in the design canvas; a notebook that is not on this
+        // device keeps only what works without its pages.
+        val ink = MenuIcons.INSERT; val arrange = MenuIcons.PAGES; val store = MenuIcons.NOTEBOOK
+        val here = entry.availableOffline
+        val sections = listOfNotNull(
+            if (here) "Notebook" to listOf(
+                MenuChoice("Edit notebook…", "Edit", MenuIcons.PAPER, ink) { showEditNotebook(id) },
+                MenuChoice("Rename…", "Rename", MenuIcons.PEN, ink) { showRename(id) },
+                MenuChoice("Duplicate", "Duplicate", MenuIcons.DUPLICATE, ink) { duplicate(id) },
+                MenuChoice("Earlier versions…", "Earlier versions", MenuIcons.HISTORY, ink) { showVersions(id) },
+            ) else null,
+            "Arrange" to listOf(
+                if (id in pinned) MenuChoice("Unpin", "Unpin", MenuIcons.PIN, arrange) { setPinned(id, false) }
+                else MenuChoice("Pin to top", "Pin to top", MenuIcons.PIN, arrange) { setPinned(id, true) },
+                MenuChoice("Move to folder…", "Move to folder", MenuIcons.MOVE_FOLDER, arrange) { showMoveToFolder(id) },
+                MenuChoice("Cover…", "Cover", MenuIcons.COVER, arrange) { showCoverStyles(id) },
+                MenuChoice("Tags…", "Tags", MenuIcons.TAG, arrange) { showTags(id) },
+            ),
+            "Store" to listOfNotNull(
+                if (id in archived) MenuChoice("Return to library", "Return to library", MenuIcons.ARCHIVE, store) { setArchived(id, false) }
+                else MenuChoice("Archive", "Archive", MenuIcons.ARCHIVE, store) { setArchived(id, true) },
+                MenuChoice("Offline storage…", "Offline storage", MenuIcons.OFFLINE, store) { showStorage(id) },
+                if (here) MenuChoice("Move to trash…", "Move to trash", MenuIcons.TRASH, Tokens.FAULT, fault = true) { confirmTrash(id) } else null,
+            ),
+        )
+        actionsMenu = tileMenu(at, sections, beside = true, header = bookHeader(entry)) { if (actionsMenu === it) actionsMenu = null }
         return true
     }
 
@@ -1506,7 +1687,7 @@ class LibraryScreen(
         if (!noDialogOpen()) return false
         val known = tagged.values.flatten().distinctBy { it.lowercase() }.sortedWith(String.CASE_INSENSITIVE_ORDER)
         val checked = BooleanArray(known.size) { carries(id, known[it]) }
-        val input = EditText(context).apply { setSingleLine(); hint = if (known.isEmpty()) "Tags, separated by commas" else "New tags, separated by commas" }
+        val input = EditText(context).apply { setSingleLine(); if (known.isEmpty()) fitHint("Tags, separated by commas", "Tags, comma-separated", "Tags") else fitHint("New tags, separated by commas", "New tags, comma-separated", "New tags") }
         val frame = FrameLayout(context).apply { setPadding(dpi(24f), dpi(8f), dpi(24f), 0); addView(input) }
         fun typed() = input.text.split(',').filter { it.isNotBlank() }
         val dialog = AlertDialog.Builder(context).setTitle("Tags for “${entry.title}”")
@@ -1519,6 +1700,7 @@ class LibraryScreen(
             .setOnDismissListener { if (tagsDialog === it) tagsDialog = null }
             .show()
         tagsDialog = dialog
+        stopTagList(dialog)
         val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -1526,6 +1708,18 @@ class LibraryScreen(
             override fun afterTextChanged(s: Editable?) { button.isEnabled = typed().all { tagName(it) != null } }
         })
         return true
+    }
+
+    /**
+     * P655: with many tags the list took the whole sheet and pushed the typing field, Save and Cancel out of it (40 tags
+     * squeezed both buttons to nothing). The list now stops at 40% of the screen and scrolls inside that.
+     */
+    private fun stopTagList(dialog: AlertDialog) {
+        val list = dialog.listView ?: return
+        val most = (resources.displayMetrics.heightPixels * .4f).toInt()
+        list.addOnLayoutChangeListener { v, _, top, _, bottom, _, _, _, _ ->
+            if (bottom - top > most && v.layoutParams.height != most) v.post { v.layoutParams = v.layoutParams.apply { height = most } }
+        }
     }
 
     /** Long-press sheet of a tag chip: Rename tag…, Remove tag…. */
@@ -1579,7 +1773,7 @@ class LibraryScreen(
         (listOf<String?>(null) + COVER_DESIGNS.keys).forEach { key ->
             row.addView(CoverSwatch(context, key, selected = coverStyles[id] == key).apply {
                 setOnClickListener { setCoverStyle(id, key); dialog.dismiss() }
-            }, LinearLayout.LayoutParams(dpi(72f), dpi(112f)).apply { marginEnd = dpi(4f) })
+            }, LinearLayout.LayoutParams(dpi(72f), dpi(112f) + kotlin.math.ceil(CoverSwatch.grow(context)).toInt()).apply { marginEnd = dpi(4f) })
         }
         dialog = AlertDialog.Builder(context).setTitle("Cover for “${entry.title}”")
             .setView(HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; addView(row) })
@@ -1750,7 +1944,7 @@ class LibraryScreen(
         right.put(grid(paperTiles, 3, 14f), 10f)
         right.put(caption("Size"), 24f)
         fun describeSizes(well: ViewGroup) = sizes.forEachIndexed { i, (name, _) ->
-            well.getChildAt(i).contentDescription = "$name page size" + if (name == size) ", selected" else ""
+            well.getChildAt(i).contentDescription = (if (name == "Keep existing sizes") "Keep existing page sizes" else "$name page size") + if (name == size) ", selected" else ""
         }
         lateinit var sizeWell: ViewGroup
         sizeWell = Kit.segmented(context, sizes.map { SEGMENT_NAMES[it.first] ?: it.first }, sizes.indexOfFirst { it.first == size }) { which ->
@@ -1772,13 +1966,23 @@ class LibraryScreen(
         }
         right.put(error, 12f)
 
-        val wide = resources.displayMetrics.let { it.widthPixels / it.density } >= 760f
-        val columns = LinearLayout(context).apply { orientation = if (wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL }
-        if (wide) {
-            columns.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, .42f))
-            columns.addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, .58f).apply { marginStart = dpi(30f) })
-        } else { columns.addView(left); columns.addView(right, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dpi(24f) }) }
+        val columns = LinearLayout(context)
+        /** Side by side from 760 dp, stacked below; chosen again when the tablet turns with the sheet open (P650). */
+        fun arrange() {
+            val wide = resources.displayMetrics.let { it.widthPixels / it.density } >= 760f
+            if (columns.childCount > 0 && (columns.orientation == LinearLayout.HORIZONTAL) == wide) return
+            columns.removeAllViews(); columns.orientation = if (wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            if (wide) {
+                columns.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, .42f))
+                columns.addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, .58f).apply { marginStart = dpi(30f) })
+            } else {
+                columns.addView(left, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                columns.addView(right, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dpi(24f) })
+            }
+        }
+        arrange()
         sheet.add(columns, 8f)
+        sheet.onTurned { arrange() }
         sheet.dialog.setOnDismissListener { if (newNotebookSheet === sheet) newNotebookSheet = null }
         sheet.show()
         val create = sheet.actionButton!!
@@ -1800,12 +2004,14 @@ class LibraryScreen(
         private val label = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = dp(12f); typeface = Tokens.SANS_MEDIUM; textAlign = Paint.Align.CENTER }
         private val frame = RectF()
         private val name = key?.let { COVER_DESIGNS[it]!!.name } ?: "First page"
+        // P639: the name grows with the reader's text size; the swatch grows under the cover to hold it.
+        private val most = context.readerSize(12f, 16f)
         var on = selected; set(value) { field = value; describe(); invalidate() }
         init { isClickable = true; isFocusable = true; foreground = ripple(night, dp(10f)); describe() }
         private fun describe() { contentDescription = "$name cover" + if (on) ", selected" else "" }
         override fun onDraw(canvas: Canvas) {
             val u = dp(1f)
-            frame.set(10f * u, 8f * u, width - 10f * u, height - 28f * u)
+            frame.set(10f * u, 8f * u, width - 10f * u, height - 28f * u - grow(context))
             val design = COVER_DESIGNS[key]
             paint.style = Paint.Style.FILL; paint.color = 0x24182636; canvas.drawRoundRect(frame.left, frame.top + u, frame.right, frame.bottom + 2 * u, 4 * u, 4 * u, paint)
             if (design == null) {
@@ -1819,8 +2025,14 @@ class LibraryScreen(
                 paint.style = Paint.Style.FILL
             }
             label.color = if (on) accentInk(night) else Glass.secondary(night)
-            val text = TextUtils.ellipsize(key?.let { name } ?: "Page", label, width - 4f * u, TextUtils.TruncateAt.END).toString()
+            val shown = key?.let { name } ?: "Page"
+            label.fitText(shown, width - 4f * u, most, dp(12f))
+            val text = TextUtils.ellipsize(shown, label, width - 4f * u, TextUtils.TruncateAt.END).toString()
             canvas.drawText(text, width / 2f, height - 9f * u, label)
+        }
+        companion object {
+            /** P639: the extra height the name needs at a larger text size (none at normal size). */
+            fun grow(context: Context) = (context.readerSize(12f, 16f) - context.dp(12f)) * 1.25f
         }
     }
 
@@ -1923,10 +2135,14 @@ class LibraryScreen(
         private val clip = Path()
         private val keep = name == "Keep existing paper"
         private val paper = if (keep) PaperStyle(PaperPattern.RULED) else paper
+        // P639: the name grows with the reader's text size, and the tile grows under the paper to hold it.
+        private val most = context.readerSize(13f, 18f)
+        private val grow = (most - dp(13f)) * 1.25f
         var on = selected; set(value) { field = value; describe(); invalidate() }
         init { isClickable = true; isFocusable = true; foreground = ripple(night, dp(14f)); describe() }
-        private fun describe() { contentDescription = "$name paper" + if (on) ", selected" else "" }
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) = setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), dpi(136f))
+        // P638: "Keep existing paper" already says paper; a screen reader read "Keep existing paper paper".
+        private fun describe() { contentDescription = (if (keep) name else "$name paper") + if (on) ", selected" else "" }
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) = setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), dpi(136f) + kotlin.math.ceil(grow).toInt())
         override fun onDraw(canvas: Canvas) {
             val u = dp(1f)
             tile.set(5 * u, 5 * u, width - 5 * u, 101 * u)
@@ -1948,7 +2164,8 @@ class LibraryScreen(
             paint.style = Paint.Style.FILL
             label.typeface = if (on) Kit.Type.TITLE.typeface else Tokens.SANS_MEDIUM
             label.color = if (on) Kit.accentText(night) else Glass.text(night)
-            canvas.drawText(TextUtils.ellipsize(name, label, width - 4f * u, TextUtils.TruncateAt.END).toString(), width / 2f, 126 * u, label)
+            label.fitText(name, width - 4f * u, most, dp(13f))
+            canvas.drawText(TextUtils.ellipsize(name, label, width - 4f * u, TextUtils.TruncateAt.END).toString(), width / 2f, 126 * u + grow, label)
         }
     }
     /** B50: the folder, tag or Archived view and the scroll position, so returning from a notebook lands where it was opened. */
@@ -2045,6 +2262,221 @@ class LibraryScreen(
         return true
     }
 
+    // ---------------------------------------------------------------------------------------------------------------
+    // P608: hold a notebook and drop it on a folder (the design canvas's Library-Drag board). The held notebook lifts
+    // (tilted, a little larger, a deep shadow), its place shows a dashed outline, and a dark hint pill says what to do.
+    // A folder tile, or a folder in the side list, lights up under the finger; letting go there files the notebook.
+    // Letting go anywhere else slides it back; letting go without moving opens its menu, as a hold always did.
+
+    private var touchDown = false
+    private var touchX = 0f
+    private var touchY = 0f
+    private val slop = ViewConfiguration.get(context).scaledTouchSlop
+    private val here = IntArray(2)
+    private val there = IntArray(2)
+
+    private inner class Lift(val id: String, var cover: Cover, val from: String?, val startX: Float, val startY: Float) {
+        var off = false
+        var ghost: View? = null
+        var hint: View? = null
+        var outline: Path? = null
+        var grabX = 0f
+        var grabY = 0f
+        var target: String? = null
+    }
+    private var lift: Lift? = null
+    /** P608: the notebook being held for a drag, or null. */
+    val liftedId: String? get() = lift?.id
+    /** P608: true once the held notebook has left its place and follows the finger. */
+    val lifting: Boolean get() = lift?.off == true
+    /** P608: the folder the held notebook would be filed in if let go now, or null. */
+    val liftTarget: String? get() = lift?.target
+    /** P608: the floating copy of the held notebook while it follows the finger (for tests and screenshots). */
+    val liftGhost: View? get() = lift?.ghost
+
+    /** Room around the lifted copy for its shadow. */
+    private val ghostMargin get() = dpi(40f)
+
+    private fun rectOf(view: View): RectF {
+        getLocationInWindow(here); view.getLocationInWindow(there)
+        val left = (there[0] - here[0]).toFloat(); val top = (there[1] - here[1]).toFloat()
+        return RectF(left, top, left + view.width, top + view.height)
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> touchDown = true
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> touchDown = false
+        }
+        touchX = event.x; touchY = event.y
+        val held = lift ?: return super.dispatchTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_MOVE -> {
+                if (!held.off && hypot(event.x - held.startX, event.y - held.startY) > slop) {
+                    // The tile under the finger lets go of its touch; from here this screen follows the finger.
+                    MotionEvent.obtain(event).also { it.action = MotionEvent.ACTION_CANCEL; super.dispatchTouchEvent(it); it.recycle() }
+                    liftOff(held)
+                }
+                if (held.off) follow(held) else super.dispatchTouchEvent(event)
+            }
+            MotionEvent.ACTION_UP -> {
+                if (held.off) drop(held)
+                else {
+                    super.dispatchTouchEvent(event)
+                    lift = null; held.cover.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+                    showActions(held.id, held.cover)
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> { if (!held.off) super.dispatchTouchEvent(event); settle(held, null) }
+            else -> if (!held.off) super.dispatchTouchEvent(event)
+        }
+        return true
+    }
+
+    /** Starts holding notebook [id] when a finger is down on its tile; false (the caller opens the menu) otherwise. */
+    private fun beginLift(id: String, tile: Tile): Boolean {
+        if (!touchDown || lift != null || selecting || showingTrash || folderNames.isEmpty() || canAct(id) == null) return false
+        if (openMenu != null || renameDialog != null || trashDialog != null || !noDialogOpen()) return false
+        tile.parent?.requestDisallowInterceptTouchEvent(true)
+        tile.cover.animate().scaleX(1.04f).scaleY(1.04f).setDuration(120).start()
+        lift = Lift(id, tile.cover, filed[id], touchX, touchY)
+        return true
+    }
+
+    /** The held notebook leaves its place: a copy follows the finger and the hint appears. */
+    private fun liftOff(held: Lift) {
+        val cover = held.cover
+        cover.animate().cancel(); cover.scaleX = 1f; cover.scaleY = 1f
+        if (cover.width == 0 || cover.height == 0 || !cover.isAttachedToWindow) { settle(held, null, animate = false); return }
+        held.off = true
+        val at = rectOf(cover); val m = ghostMargin
+        val shot = Bitmap.createBitmap(cover.width, cover.height, Bitmap.Config.ARGB_8888)
+        cover.draw(Canvas(shot))
+        val outline = Path(cover.outline)
+        held.outline = outline
+        held.grabX = held.startX - at.left; held.grabY = held.startY - at.top
+        val ghost = Ghost(context, shot, outline, m)
+        addView(ghost, LayoutParams(cover.width + 2 * m, cover.height + 2 * m))
+        ghost.translationX = at.left - m; ghost.translationY = at.top - m
+        ghost.pivotX = m + held.grabX; ghost.pivotY = m + held.grabY
+        ghost.animate().scaleX(1.06f).scaleY(1.06f).rotation(-3f).setDuration(160).start()
+        held.ghost = ghost
+        cover.liftedOut = outline
+        val hint = liftHint()
+        val area = rectOf(scroll)
+        addView(hint, LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpi(44f)))
+        hint.measure(MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED), MeasureSpec.makeMeasureSpec(dpi(44f), MeasureSpec.EXACTLY))
+        hint.translationX = area.centerX() - hint.measuredWidth / 2f
+        // P609: a phone has no free band above the grid (the first folder tile sits there), so the pill waits at the foot.
+        hint.translationY = if (compact) min(area.bottom, height.toFloat()) - dp(44f) - dp(28f) else area.top + dp(12f)
+        hint.alpha = 0f; hint.animate().alpha(1f).setDuration(160).start()
+        held.hint = hint
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
+    /** "Drop on a folder to move it": the board's dark pill with a folder-arrow icon. */
+    private fun liftHint() = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        setPadding(dpi(18f), 0, dpi(18f), 0)
+        background = rounded(if (night) 0xff3a4252.toInt() else 0xff1d2433.toInt(), dp(22f))
+        elevation = dp(30f); importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        addView(ImageView(context).apply { setImageDrawable(Kit.Icon(MOVE_HINT_ICON, Color.WHITE, dpi(18f))) }, LinearLayout.LayoutParams(dpi(18f), dpi(18f)))
+        addView(TextView(context).apply {
+            text = "Drop on a folder to move it"; setTextColor(Color.WHITE); textSize = 14f; typeface = Tokens.SANS_MEDIUM; maxLines = 1
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dpi(10f) })
+    }
+
+    /** Moves the lifted copy with the finger, lights the folder under it and scrolls near the grid's edges. */
+    private fun follow(held: Lift, edges: Boolean = true) {
+        val ghost = held.ghost ?: return
+        ghost.translationX = touchX - held.grabX - ghostMargin; ghost.translationY = touchY - held.grabY - ghostMargin
+        val target = folderAt(touchX, touchY, held)
+        if (target != held.target) {
+            held.target?.let { old -> folderTiles[old]?.dropTarget = false; folderRows[old]?.dropTarget = false }
+            target?.let { now -> folderTiles[now]?.dropTarget = true; folderRows[now]?.dropTarget = true; performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
+            held.target = target
+        }
+        if (!edges) return
+        val area = rectOf(scroll); val edge = dp(72f)
+        val pull = touchY < area.top + edge || touchY > area.bottom - edge
+        if (pull && area.contains(touchX, touchY)) { removeCallbacks(edgeScroll); postOnAnimation(edgeScroll) }
+    }
+
+    private val edgeScroll = object : Runnable {
+        override fun run() {
+            val held = lift?.takeIf { it.off } ?: return
+            val area = rectOf(scroll); val edge = dp(72f)
+            if (!area.contains(touchX, touchY)) return
+            val step = when {
+                touchY < area.top + edge -> -((area.top + edge - touchY) / edge * dp(18f)).coerceAtLeast(dp(2f))
+                touchY > area.bottom - edge -> ((touchY - (area.bottom - edge)) / edge * dp(18f)).coerceAtLeast(dp(2f))
+                else -> return
+            }
+            if (!scroll.canScrollVertically(if (step < 0) -1 else 1)) return
+            scroll.scrollBy(0, step.toInt())
+            follow(held, edges = false)
+            postOnAnimation(this)
+        }
+    }
+
+    /** The folder (a grid tile, or a row of the side list) under ([x], [y]), other than the one the notebook is in. */
+    private fun folderAt(x: Float, y: Float, held: Lift): String? {
+        if (rectOf(scroll).contains(x, y)) folderTiles.forEach { (path, tile) ->
+            if (tile.isAttachedToWindow && tile.isShown && rectOf(tile).contains(x, y)) return path.takeIf { it != held.from }
+        }
+        if (side.isShown) folderRows.forEach { (path, row) ->
+            if (row.isShown && rectOf(row).contains(x, y)) return path.takeIf { it != held.from }
+        }
+        return null
+    }
+
+    /** Letting go: into the lit folder (the copy shrinks into it), or back to the notebook's place. */
+    private fun drop(held: Lift) {
+        val target = held.target
+        // The copy flies into what is under the finger: the side list's row, or else the grid tile's picture.
+        val into = target?.let { path ->
+            folderRows[path]?.takeIf { it.isShown }?.let { rectOf(it) }?.takeIf { it.contains(touchX, touchY) }
+                ?: folderTiles[path]?.takeIf { it.isShown }?.let { rectOf(it.art) }
+                ?: folderRows[path]?.takeIf { it.isShown }?.let { rectOf(it) }
+        }
+        if (target != null && into != null && moveToFolder(held.id, target)) settle(held, into)
+        else settle(held, null)
+    }
+
+    /** Ends a hold: the copy flies [into] a folder's place and fades, or (null) slides back where the notebook is. */
+    private fun settle(held: Lift, into: RectF?, animate: Boolean = true) {
+        if (lift === held) lift = null
+        removeCallbacks(edgeScroll)
+        held.target?.let { old -> folderTiles[old]?.dropTarget = false; folderRows[old]?.dropTarget = false }
+        held.cover.animate().cancel(); held.cover.scaleX = 1f; held.cover.scaleY = 1f
+        held.hint?.let { hint -> if (animate) hint.animate().alpha(0f).setDuration(140).withEndAction { removeView(hint) }.start() else removeView(hint) }
+        val ghost = held.ghost
+        val finish = { ghost?.let { removeView(it) }; held.cover.liftedOut = null }
+        if (ghost == null || !animate) { finish(); return }
+        val m = ghostMargin; val home = held.cover.takeIf { it.isAttachedToWindow && it.isShown }?.let { rectOf(it) }
+        when {
+            into != null -> {
+                ghost.pivotX = ghost.width / 2f; ghost.pivotY = ghost.height / 2f
+                ghost.animate().translationX(into.centerX() - ghost.width / 2f).translationY(into.centerY() - ghost.height / 2f)
+                    .scaleX(.3f).scaleY(.3f).rotation(0f).alpha(0f).setDuration(220).withEndAction(finish).start()
+            }
+            home != null -> ghost.animate().translationX(home.left - m).translationY(home.top - m).scaleX(1f).scaleY(1f).rotation(0f)
+                .setDuration(220).withEndAction(finish).start()
+            else -> ghost.animate().alpha(0f).setDuration(160).withEndAction(finish).start()
+        }
+    }
+
+    /** The lifted copy: the cover as it was drawn, over a deep soft shadow in the book's own shape. */
+    private class Ghost(context: Context, private val shot: Bitmap, private val outline: Path, private val margin: Int) : View(context) {
+        private val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; setShadowLayer(dp(24f), 0f, dp(14f), 0x47141b26) }
+        init { setLayerType(LAYER_TYPE_SOFTWARE, null); elevation = dp(30f); outlineProvider = null; importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
+        override fun onDraw(canvas: Canvas) {
+            canvas.translate(margin.toFloat(), margin.toFloat())
+            canvas.drawPath(outline, shadow)
+            canvas.drawBitmap(shot, 0f, 0f, null)
+        }
+    }
+
     /** Files a readable library notebook in a folder, or unfiles it (null); false when refused. */
     fun moveToFolder(id: String, folder: String?): Boolean {
         if (showingTrash || (folder != null && folder !in folderNames) || entriesSource().none { it.id == id && it.error == null }) return false
@@ -2091,12 +2523,12 @@ class LibraryScreen(
     fun showMoveToFolder(id: String): Boolean {
         val entry = canAct(id) ?: return false
         if (!noDialogOpen()) return false
-        showFolderChooser("Move “${entry.title}” to", filed[id], true, { moveToFolder(id, it) }) { showNewFolder(moveId = id) }
+        showFolderChooser("Move to folder", filed[id], true, { moveToFolder(id, it) }, entry.title) { showNewFolder(moveId = id) }
         return true
     }
 
     /** P534: each folder as its tile, in its own colour. [marked] says whether [current] is shown as where the notebook is now. */
-    private fun showFolderChooser(title: String, current: String?, marked: Boolean, move: (String?) -> Unit, newFolder: () -> Unit) {
+    private fun showFolderChooser(title: String, current: String?, marked: Boolean, move: (String?) -> Unit, subtitle: String? = null, newFolder: () -> Unit) {
         val icon = { d: android.graphics.drawable.Drawable -> ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER; setImageDrawable(d) } }
         val top = PictureChooser.Item("No folder", if (marked && current == null) "Here now" else "In the Library", "No folder", marked && current == null,
             art = { icon(Kit.Icon(Kit.Paths.DOCUMENT, Glass.secondary(context.night), dpi(30f))) })
@@ -2109,7 +2541,7 @@ class LibraryScreen(
                 art = { FolderArt(context).apply { design = COVER_DESIGNS[folderColors[path] ?: DEFAULT_FOLDER]!! } })
         }
         val add = PictureChooser.Item("New folder…", null, "New folder", art = { icon(Kit.Icon(Glyph.PLUS, Glass.accent(context.night), dpi(30f))) })
-        folderChooser = PictureChooser(context, title, listOf(top) + tiles + add, onDismiss = { folderChooser = null }) { which ->
+        folderChooser = PictureChooser(context, title, listOf(top) + tiles + add, onDismiss = { folderChooser = null }, subtitle = subtitle) { which ->
             if (which <= folders.size) move(if (which == 0) null else folders[which - 1]) else main.post { newFolder() }
         }.show()
     }
@@ -2310,7 +2742,7 @@ class LibraryScreen(
         return true
     }
 
-    private fun versionTime(time: Long) = DateUtils.formatDateTime(context, time, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_YEAR or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_ABBREV_MONTH)
+    private fun versionTime(time: Long) = EnglishTime.dateTime(context, time)
     /** One row of the versions list. */
     fun versionLabel(version: NotebookLibrary.Version): String =
         if (version.error != null) "${versionTime(version.time)} · cannot be read: ${version.error}"
@@ -2428,9 +2860,14 @@ class LibraryScreen(
         }
         notebooksLabel.text = if (showingTrash) "In the trash" else if (showingArchived) "Archived notebooks" else "Notebooks"
         hint.visibility = if (showingTrash && all.isNotEmpty()) VISIBLE else GONE
-        val kept = readableAll.count { it.availableOffline }
-        val remote = readableAll.size - kept
-        storageLine.text = (if (kept == 1) "1 notebook · kept on this tablet" else "$kept notebooks · kept on this tablet") +
+        // P571: the header counts the place that is open (a folder with its subfolders, a tag), not the whole library.
+        val here = readableAll.filter { entry ->
+            openFolder.let { folder -> folder == null || filed[entry.id]?.let { isWithin(it, folder) } == true } &&
+                openTag.let { tag -> tag == null || carries(entry.id, tag) }
+        }
+        val kept = here.count { it.availableOffline }
+        val remote = here.size - kept
+        storageLine.text = (if (kept == 1) "1 notebook · kept on this device" else "$kept notebooks · kept on this device") +
             (if (remote > 0) " · $remote not downloaded" else "")
         storageLine.visibility = if (showingTrash || !repository.loaded) GONE else VISIBLE
         empty.text = when {
@@ -2560,7 +2997,7 @@ class LibraryScreen(
     /** How long ago an edit was, as a tile and a recent card say it ("just now", "3 hours ago", "yesterday"). */
     private fun editedAgo(modified: Long, now: Long): String =
         if (now - modified < DateUtils.MINUTE_IN_MILLIS) "just now"
-        else DateUtils.getRelativeTimeSpanString(modified, now, DateUtils.MINUTE_IN_MILLIS).toString()
+        else EnglishTime.ago(modified, now)
             // "Yesterday" reads as part of the sentence; month names keep their capital.
             .let { if (now - modified < 2 * DateUtils.DAY_IN_MILLIS) it.replaceFirstChar { c -> c.lowercase() } else it }
 
@@ -2588,7 +3025,7 @@ class LibraryScreen(
             val titleRow = LinearLayout(context).apply { orientation = HORIZONTAL; gravity = Gravity.TOP }
             titleRow.addView(TextView(context).apply {
                 text = entry.title; setTextColor(if (entry.error == null) Glass.text(night) else Glass.secondary(night))
-                textSize = 14f; typeface = Tokens.SANS_SEMIBOLD; maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+                textSize = 14f; typeface = Tokens.SANS_SEMIBOLD; maxLines = 2; ellipsize = TextUtils.TruncateAt.END; keepWordsWhole(leastShare = NAME_SHARE)
                 setPadding(dpi(2f), dpi(4f), dpi(2f), 0)
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             more?.let { titleRow.addView(it, LinearLayout.LayoutParams(dpi(36f), dpi(34f)).apply { marginEnd = -dpi(8f) }) }
@@ -2676,6 +3113,11 @@ class LibraryScreen(
         private val ring = RectF()
 
         fun cancel() { request?.cancel(); request = null; requestedFor = null }
+        /** P608: the book's outline as last drawn, in this view's coordinates (empty before the first draw). */
+        val outline: Path get() = shape
+        /** P608: while the notebook is lifted away, its place shows this outline dashed instead of the cover. */
+        var liftedOut: Path? = null; set(value) { if (field !== value) { field = value; invalidate() } }
+        private val gapDash = DashPathEffect(floatArrayOf(dp(7f), dp(5f)), 0f)
         /** Lets go of the preview while the cover is far from the screen; the thumbnail cache may still hold it. */
         fun release() { if (bitmap == null && request == null) return; cancel(); bitmap = null }
 
@@ -2699,6 +3141,13 @@ class LibraryScreen(
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) { super.onSizeChanged(w, h, oldw, oldh); if (w > 0) scheduleBind() }
 
         override fun onDraw(canvas: Canvas) {
+            liftedOut?.let { gap ->
+                paint.style = Paint.Style.FILL; paint.pathEffect = null; paint.color = if (night) 0x0affffff else 0x081d2433
+                canvas.drawPath(gap, paint)
+                paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2f); paint.pathEffect = gapDash
+                paint.color = if (night) 0x47ffffff else 0x381d2433; canvas.drawPath(gap, paint); paint.pathEffect = null
+                return
+            }
             val image = bitmap
             val aspect = when {
                 style != null -> BOOK_ASPECT
@@ -2825,7 +3274,11 @@ class LibraryScreen(
             if (filled) { outlineSpotShadowColor = Glass.accent(night); outlineAmbientShadowColor = Glass.accent(night) }
         }
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val wide = dp(16f) + dp(18f) + dp(8f) + text.measureText(label) + dp(20f)
+            // P639: the label grows with the reader's text size, back down where the row has less room (never below 15 dp).
+            val fixed = dp(16f) + dp(18f) + dp(8f) + dp(20f)
+            val room = if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.UNSPECIFIED) Float.MAX_VALUE else MeasureSpec.getSize(widthMeasureSpec) - fixed
+            text.fitText(label, room, context.readerSize(15f, 19f), dp(15f))
+            val wide = fixed + text.measureText(label)
             setMeasuredDimension(resolveSize(wide.toInt(), widthMeasureSpec), resolveSize(dpi(46f), heightMeasureSpec))
         }
         override fun setEnabled(enabled: Boolean) { super.setEnabled(enabled); alpha = if (enabled) 1f else .45f }
@@ -2855,6 +3308,8 @@ class LibraryScreen(
         var iconColor = Glass.ACCENT; set(value) { field = value; invalidate() }
         private var count: Int? = null
         private var on = false
+        /** P608: lit while a lifted notebook is over this folder's row: accent at 12% with a 2 dp ring, the name in the accent. */
+        var dropTarget = false; set(value) { if (field != value) { field = value; invalidate() } }
         private val text = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = dp(15f); typeface = Tokens.SANS_MEDIUM }
         private val number = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = dp(13f); typeface = Tokens.SANS_MEDIUM; textAlign = Paint.Align.RIGHT }
         private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -2873,9 +3328,14 @@ class LibraryScreen(
         }
         override fun setEnabled(enabled: Boolean) { super.setEnabled(enabled); alpha = if (enabled) 1f else .45f }
         override fun onDraw(canvas: Canvas) {
-            if (on) { fill.color = Glass.accent(night); box.set(0f, 0f, width.toFloat(), height.toFloat()); canvas.drawRoundRect(box, dp(12f), dp(12f), fill) }
+            val lit = dropTarget
+            if (lit) {
+                fill.color = (Glass.accent(night) and 0xffffff) or 0x1f000000; box.set(dp(1f), dp(1f), width - dp(1f), height - dp(1f))
+                canvas.drawRoundRect(box, dp(12f), dp(12f), fill)
+                stroke.color = Glass.accent(night); stroke.strokeWidth = dp(2f); canvas.drawRoundRect(box, dp(11f), dp(11f), stroke); stroke.strokeWidth = dp(1.8f)
+            } else if (on) { fill.color = Glass.accent(night); box.set(0f, 0f, width.toFloat(), height.toFloat()); canvas.drawRoundRect(box, dp(12f), dp(12f), fill) }
             val s = dp(20f); val x = dp(10f); val y = (height - s) / 2; val c = s / 24f
-            val tint = when { on -> Color.WHITE; icon == NavIcon.FOLDER -> if (night) seenAtNight(iconColor) else iconColor; else -> accentInk(night) }
+            val tint = when { lit -> accentInk(night); on -> Color.WHITE; icon == NavIcon.FOLDER -> if (night) seenAtNight(iconColor) else iconColor; else -> accentInk(night) }
             stroke.color = tint; fill.color = tint
             path.reset()
             when (icon) {
@@ -2924,8 +3384,11 @@ class LibraryScreen(
             val labelX = x + s + dp(12f); val right = width - dp(12f)
             val shownCount = count?.toString()
             number.color = if (on) 0xd9ffffff.toInt() else Glass.secondary(night)
-            text.color = if (on) Color.WHITE else Glass.text(night)
+            text.color = if (dropTarget) accentInk(night) else if (on) Color.WHITE else Glass.text(night)
+            // P639: the name and count grow with the reader's text size as far as the row holds, the name back down to fit.
+            number.textSize = context.readerSize(13f, 17f)
             val room = right - labelX - (shownCount?.let { number.measureText(it) + dp(8f) } ?: 0f)
+            text.fitText(label, max(0f, room), context.readerSize(15f, 20f), dp(15f))
             val baseline = height / 2f - (text.descent() + text.ascent()) / 2
             canvas.drawText(TextUtils.ellipsize(label, text, max(0f, room), TextUtils.TruncateAt.END).toString(), labelX, baseline, text)
             shownCount?.let { canvas.drawText(it, right, baseline, number) }
@@ -2955,7 +3418,7 @@ class LibraryScreen(
             words.addView(View(context).apply { background = rounded(COVER_DESIGNS[coverStyles[entry.id]]?.color ?: Glass.accent(night), dp(3f)) },
                 LinearLayout.LayoutParams(dpi(28f), dpi(6f)).apply { bottomMargin = dpi(12f) })
             words.addView(TextView(context).apply {
-                text = entry.title; setTextColor(Glass.text(night)); textSize = 17f; typeface = Tokens.SANS_SEMIBOLD
+                text = entry.title; setTextColor(Glass.text(night)); textSize = 17f; typeface = Tokens.SANS_SEMIBOLD; keepWordsWhole(leastShare = NAME_SHARE)
                 maxLines = 2; ellipsize = TextUtils.TruncateAt.END
             })
             val pages = if (entry.pageCount == 1) "1 page" else "${entry.pageCount} pages"
@@ -2982,6 +3445,18 @@ class LibraryScreen(
     private inner class FolderTile(context: Context, val path: String, design: CoverDesign, notebooks: Int, folders: Int) : LinearLayout(context) {
         val art = FolderArt(context).apply { this.design = design; importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
         val more = MoreDots(context, "Options for folder ${leafOf(path)}")
+        private val holdsText = TextView(context)
+        private var holdsLine = ""
+        /** P608: lit while a lifted notebook is over this folder: accent at 10% with a ring, and "Drop to move here". */
+        var dropTarget = false
+            set(value) {
+                if (field == value) return
+                field = value
+                background = if (value) rounded((Glass.accent(night) and 0xffffff) or 0x1a000000, dp(18f), Glass.accent(night), dpi(2.5f)) else null
+                holdsText.text = if (value) "Drop to move here" else holdsLine
+                holdsText.setTextColor(if (value) accentInk(night) else Glass.secondary(night))
+                holdsText.typeface = if (value) Tokens.SANS_MEDIUM else Tokens.SANS
+            }
         init {
             orientation = VERTICAL
             setPadding(dpi(10f), dpi(10f), dpi(10f), dpi(12f))
@@ -2998,8 +3473,9 @@ class LibraryScreen(
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             titleRow.addView(more, LinearLayout.LayoutParams(dpi(36f), dpi(34f)).apply { marginEnd = -dpi(8f) })
             addView(titleRow)
-            addView(TextView(context).apply {
-                text = holds.joinToString(" · "); setTextColor(Glass.secondary(night)); textSize = 12f; typeface = Tokens.SANS
+            holdsLine = holds.joinToString(" · ")
+            addView(holdsText.apply {
+                text = holdsLine; setTextColor(Glass.secondary(night)); textSize = 12f; typeface = Tokens.SANS
                 maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(dpi(2f), dpi(2f), dpi(2f), 0)
             })
         }
@@ -3051,6 +3527,7 @@ class LibraryScreen(
                 tile.setOnLongClickListener { if (selecting) false else showFolderActions(path, tile.art) }
                 tile.more.setOnClickListener { showFolderActions(path, tile.more) }
                 holder.folderTile = tile; folderTiles[path] = tile
+                if (lift?.target == path) tile.dropTarget = true
                 holder.frame.addView(tile, FrameLayout.LayoutParams(-1, -2))
             } else {
                 val entry = shownEntries!![index - shownFolderPaths.size]
@@ -3059,13 +3536,15 @@ class LibraryScreen(
                 if (showingTrash) tile.setOnClickListener { restore(entry.id) }
                 else {
                     tile.setOnClickListener { if (selecting) toggleSelected(entry.id) else open(entry.id) }
-                    tile.setOnLongClickListener { if (selecting) toggleSelected(entry.id) else showActions(entry.id, tile.cover) }
+                    // P608: a hold lifts the notebook to drop on a folder; letting go where it was opens its menu.
+                    tile.setOnLongClickListener { if (selecting) toggleSelected(entry.id) else beginLift(entry.id, tile) || showActions(entry.id, tile.cover) }
                     tile.more?.setOnClickListener { if (selecting) toggleSelected(entry.id) else showActions(entry.id, tile.more) }
                 }
                 tile.isEnabled = canTapNotebook(entry)
                 tile.cover.current = !showingTrash && entry.id == repository.session?.notebook?.id
                 tile.showTicked(selecting && !showingTrash, entry.id in selection)
                 holder.notebookTile = tile; tiles[entry.id] = tile
+                lift?.let { held -> if (held.off && held.id == entry.id) { held.cover = tile.cover; tile.cover.liftedOut = held.outline } }
                 holder.frame.addView(tile, FrameLayout.LayoutParams(-1, -2))
             }
             scheduleBind()
@@ -3094,8 +3573,13 @@ private const val MAIN_PAD = 24f
 private const val SIDE_WIDTH = 248f
 private const val SIDE_WIDTH_WIDE = 280f
 private const val SIDE_RADIUS = 30f
+/** P577: below this width (dp) the side panel slides out from a button instead of standing beside the notebooks. */
+private const val COMPACT_WIDTH = 600f
 /** P568: the Library's colours: as they were by day, the Glass kit's at night. */
 private fun deskOf(night: Boolean) = if (night) Kit.desk(true) else Glass.DESK
+/** P608: the hint pill's folder-arrow icon, from the Library-Drag board. */
+private const val MOVE_HINT_ICON = "M3 6.5h6l2 2h10v10.5H3zM9.5 14h5.5M12.5 11.5L15 14l-2.5 2.5"
+
 private fun accentInk(night: Boolean) = if (night) Kit.accentText(true) else Glass.ACCENT
 private fun faultInk(night: Boolean) = if (night) Kit.dangerText(true) else Tokens.FAULT
 private fun selectedFill(night: Boolean) = if (night) Kit.accentFill(true) else Glass.SELECTED
@@ -3265,16 +3749,19 @@ private class FolderArt(context: Context) : View(context) {
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = dp(12f); color = if (context.night) Glass.TEXT_NIGHT else Tokens.INK; textAlign = Paint.Align.CENTER; typeface = Tokens.SANS }
     private val box = RectF()
     private val path = android.graphics.Path()
+    // P639: the colour's name grows with the reader's text size; the swatch grows under the folder to hold it.
+    private val most = context.readerSize(12f, 16f)
+    private val grow = (most - dp(12f)) * 1.25f
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.EXACTLY && MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.EXACTLY) {
             super.onMeasure(widthMeasureSpec, heightMeasureSpec); return
         }
         // A swatch in the colour chooser.
-        val w = dpi(76f); setMeasuredDimension(w, (w * .82f).toInt() + if (label != null) dpi(22f) else 0)
+        val w = dpi(76f); setMeasuredDimension(w, (w * .82f).toInt() + if (label != null) dpi(22f) + kotlin.math.ceil(grow).toInt() else 0)
     }
     override fun onDraw(canvas: Canvas) {
         val design = design ?: return
-        val labelH = if (label != null) dp(22f) else 0f
+        val labelH = if (label != null) dp(22f) + grow else 0f
         val pad = dp(4f)
         val availW = width - 2 * pad; val availH = height - labelH - 2 * pad
         // A folder is wider than tall; centre it in the tile's cover frame.
@@ -3328,7 +3815,7 @@ private class FolderArt(context: Context) : View(context) {
             val o = dp(2.5f); canvas.drawRoundRect(box.left - o, box.top - o, box.right + o, box.bottom + o, r + o, r + o, paint)
             paint.style = Paint.Style.FILL
         }
-        label?.let { canvas.drawText(it, width / 2f, height - dp(6f), text) }
+        label?.let { text.fitText(it, width - dp(4f), most, dp(12f)); canvas.drawText(it, width / 2f, height - dp(6f), text) }
     }
 }
 

@@ -12,7 +12,7 @@ import android.widget.TextView
 
 /**
  * P612: what a held page offers, as on the design canvas's Pages-Panel board. A glass bar (Duplicate, Settings,
- * Delete) with a "Drag to move" note under it, shown beside the page the moment it lifts, while the finger is still
+ * Peek (P670), Delete) with a "Drag to move" note under it, shown beside the page the moment it lifts, while the finger is still
  * down. It replaces the old dialog that only opened after letting go. The popup never takes focus, so the held finger
  * keeps driving the page: dragging hides the bar ([hide]) and moves the page as before. Let go without moving and the bar
  * stays to be tapped; a touch anywhere else closes it.
@@ -24,7 +24,7 @@ internal class PageHoldBar(private val activity: MainActivity, private val night
     val showing get() = popup?.isShowing == true
 
     enum class Action(val label: String, val icon: String) {
-        DUPLICATE("Duplicate", MenuIcons.DUPLICATE), SETTINGS("Settings", MenuIcons.SLIDERS), DELETE("Delete", MenuIcons.TRASH)
+        DUPLICATE("Duplicate", MenuIcons.DUPLICATE), SETTINGS("Settings", MenuIcons.SLIDERS), PEEK("Peek", MenuIcons.PEEK), DELETE("Delete", MenuIcons.TRASH)
     }
 
     /**
@@ -81,6 +81,7 @@ internal class PageHoldBar(private val activity: MainActivity, private val night
         when (action) {
             Action.DUPLICATE -> activity.duplicatePage(id)
             Action.SETTINGS -> activity.pageSettingsDialog(id)
+            Action.PEEK -> activity.frame.peek.open(id)
             Action.DELETE -> activity.deletePageDialog(id)
         }
     }

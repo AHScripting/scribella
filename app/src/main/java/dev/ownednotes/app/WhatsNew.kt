@@ -13,6 +13,16 @@ import kotlin.concurrent.thread
  */
 internal object WhatsNew {
     val NOTES: Map<String, List<String>> = mapOf(
+        "0.3.0-alpha" to listOf(
+            "Peek: a floating window shows another page of the notebook. Move it, resize it, or fold it to a small bubble at the edge.",
+            "Show beside: choose which page sits next to this one in the landscape two-page view.",
+            "The slim bar holds every button: page buttons in the middle, Show pages by the pin, and the notebook's name in a small pill with a pencil to rename it.",
+            "Add highlights from PDF (Study menu) brings a marked-up copy's highlights into the notebook.",
+            "A PDF with pages of another shape asks once: fit them to your paper, or keep their size.",
+            "A damaged page no longer stops the notebook from opening; the other pages open.",
+            "A cloud folder that stops answering can no longer freeze sync or backups.",
+            "The fountain pen stays fast on full pages, and two-page view keeps both pages sharp.",
+        ),
         "0.2.0-alpha" to listOf(
             "A slim bar: fold the toolbar into one thin strip, and let it fold by itself when you start writing if you like.",
             "Pick your own pens and highlighters: the + after them adds one, holding one removes it. New: a fountain pen with an Everyday and a Soft nib, and highlighters with a chisel or fine tip.",

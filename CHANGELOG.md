@@ -2,6 +2,31 @@
 
 Scribella is an alpha: expect rough edges, and export your notebooks now and then so you always have a copy.
 
+## 0.3.0 alpha
+
+The third alpha adds a floating second page, lets you choose the two-page pairs, finishes the slim bar and makes the app sturdier with damaged pages and slow cloud folders.
+
+### New
+
+- **Peek.** A floating window shows another page of the notebook while you write. Move it, resize it, or fold it into a small bubble at the edge of the screen; drag the bubble anywhere and tap it to open it again.
+- **Show beside.** In the landscape two-page view, choose which page sits next to this one (Page actions). The pages around it pair up on their own.
+- **Add highlights from PDF.** Under Study, pick a marked-up copy of the notebook's PDF and its highlights come into the notebook as highlighter ink you can erase or recolour, in one Undo step. The same file twice adds nothing.
+- **Imported PDFs of another shape.** When a PDF's pages are a different shape from your paper, Scribella asks once: *Fit to my paper* (the slide at the top, room to write below) or *Keep the PDF's size*, with *Remember for next time*. Settings → Pages & layout → Imported PDFs changes it.
+
+### Slim bar
+
+- It now holds every button of the full toolbar. Buttons that do not fit wait behind ». Pens stand tip up, as on the full toolbar.
+- The page buttons sit in the middle, and *Show pages* has its own button by the pin.
+- The notebook's name is a button beside Back. It opens a small pill with the name and a pencil: tap the pencil to rename, and the check keeps the new name.
+- An S Pen hovering over a button names it.
+
+### Fixed
+
+- **Fountain pen on full pages.** A page full of fountain writing draws about as fast as ballpoint and looks the same.
+- **Two-page view.** The second page of a PDF or picture is as sharp as the first. A page with landscape paper shows alone and fills the screen. Turning between pages of different sizes lands where the page will show.
+- **Damaged pages.** A notebook with a damaged page opens its other pages; the damaged one shows blank, marked "Damaged page", and a copy of the damaged file is kept.
+- **Slow cloud folders.** Sync, backups and restores run in their own process with time limits, so a cloud folder that stops answering can no longer freeze Scribella; it fails after a minute with a message instead.
+
 ## 0.2.0 alpha
 
 The second alpha brings a new way to hold the toolbar, pens you choose yourself, PDF markings that survive import, and a long list of fixes for phones, large text and screen readers.

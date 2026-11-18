@@ -68,6 +68,32 @@ class NotebookLibrary(private val directory: File,private val attachmentDirector
     fun readSession(id: String): DocumentSession = DocumentSession.read(path(id),attachmentDirectory()).also {
         require(it.notebook.id == id) { "Notebook filename and identity differ" }
     }
+    /**
+     * P672: opens a notebook whose ordinary read failed, with its damaged pages blank and marked
+     * ([NotebookPackage.readSalvaged]). The damaged file is first copied to damaged/ beside the notebooks, once per content,
+     * so a later save cannot lose what is left in it; that folder is never pruned. [kept] is that copy.
+     */
+    class Salvaged(val session: DocumentSession, val damaged: List<Int>, val kept: File)
+    fun readSalvaged(id: String): Salvaged {
+        val file = path(id)
+        val salvage = attachmentDirectory()?.let { NotebookPackage.readSalvaged(file, it) } ?: NotebookPackage.readSalvaged(file)
+        require(salvage.notebook.id == id) { "Notebook filename and identity differ" }
+        return Salvaged(DocumentSession(salvage.notebook), salvage.damaged, keepDamaged(id, file))
+    }
+    private fun keepDamaged(id: String, file: File): File {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input -> val buffer = ByteArray(65536); while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) } }
+        val folder = File(directory, DAMAGED)
+        if (!folder.isDirectory && !folder.mkdirs()) throw IOException("Cannot keep a copy of the damaged notebook")
+        val kept = File(folder, "$id-${digest.digest().take(8).joinToString("") { "%02x".format(it) }}.inknote")
+        if (kept.isFile && kept.length() == file.length()) return kept
+        val pending = File(folder, ".${kept.name}-${UUID.randomUUID()}.pending")
+        try {
+            FileOutputStream(pending).use { out -> file.inputStream().use { it.copyTo(out) }; out.fd.sync() }
+            Files.move(pending.toPath(), kept.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
+        } finally { Files.deleteIfExists(pending.toPath()) }
+        return kept
+    }
     /** The notebook with only its first page, for its cover; the rest is not read. */
     fun readCover(id: String): Notebook = readPackageCover(path(id)).also { require(it.id == id) { "Notebook filename and identity differ" } }
     /** A list entry from the package's manifest alone, so a long library lists quickly; pages are checked when opened. */
@@ -238,6 +264,8 @@ class NotebookLibrary(private val directory: File,private val attachmentDirector
     companion object {
         /** The folder beside the notebooks that holds kept versions, one subfolder per notebook. */
         const val VERSIONS = "versions"
+        /** P672: copies of notebook files that opened with damaged pages, kept as they were. */
+        const val DAMAGED = "damaged"
         const val DELETIONS = ".deleted"
     }
 }

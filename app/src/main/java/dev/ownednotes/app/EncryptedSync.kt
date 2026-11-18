@@ -35,7 +35,7 @@ internal object EncryptedSync {
         if(tree==LibrarySync.folderUri(app)) { passphrase.fill('\u0000');done(Result.failure(IOException("Choose a separate folder; current sync is kept.")));return }
         try { app.contentResolver.takePersistableUriPermission(tree,Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         catch(error: Exception) { passphrase.fill('\u0000');done(Result.failure(error));return }
-        prepare(app,tree,passphrase,{ LibrarySync.TreeFolder(app,tree) },done)
+        prepare(app,tree,passphrase,{ FolderProcess.folder(app,tree) },done)
     }
     /** Synthetic provider injection is used only by isolated acceptance checks. Work stays on the save queue. */
     internal fun prepare(app: NotesApplication,tree: Uri,passphrase: CharArray,remote: ()->FolderSync.Folder,done: (Result<Unit>)->Unit) {
@@ -73,7 +73,7 @@ internal object EncryptedSync {
         fun guard() { check(permitted()) { "Encrypted sync stopped" };if(LibrarySync.wifiOnly(app) && !wifi())throw IOException(LibrarySync.WIFI_WAITING) }
         app.repository.syncLibrary({busy,titles->
             guard()
-            val raw=remote?.invoke() ?: LibrarySync.TreeFolder(app,tree,createIfMissing=false)
+            val raw=remote?.invoke() ?: FolderProcess.folder(app,tree,createIfMissing=false)
             val guarded=object: FolderSync.Folder {
                 override fun list(): Map<String,FolderSync.Stat> {guard();return raw.list()}
                 override fun read(name: String): InputStream {guard();return raw.read(name)}

@@ -61,6 +61,8 @@ open class NotesApplication : Application() {
     /** P574: the What's new note and the automatic update check belong to the real library, not to test runs. */
     open val showsNews: Boolean get() = preferencesName == "library"
     internal val isRecoveryProcess get() = Application.getProcessName().endsWith(":recovery")
+    /** P674: the process that reads and writes the sync folder; it needs nothing of the editor. */
+    internal val isFolderProcess get() = Application.getProcessName().endsWith(FolderProcess.PROCESS)
     open val automaticSafetyCopies: Boolean get() = preferencesName == "library" && personalTools
     internal val safetyCopies by lazy { SafetyCopies(this) }
     val main = Handler(Looper.getMainLooper())
@@ -135,6 +137,7 @@ open class NotesApplication : Application() {
     }
     override fun onCreate() {
         super.onCreate()
+        if (isFolderProcess) return
         com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(this)
         PdfAccess.initialize(this)
         DocumentSession.redrawConnector = ConnectorInk::redraw
@@ -422,6 +425,7 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
             if(recovery.unavailable)unavailableRecoveryIds+=notebook.id else unavailableRecoveryIds-=notebook.id
         }
         recoveryCheckpoint = null
+        if (warning != null && warning == salvageWarning) { warning = null; salvageWarning = null }
         if(recoveryUnavailable) warning="Recovery data is unavailable. This is the last saved copy, opened read-only. Unsaved recovery data has been preserved."
         else journal?.warning?.let { warning = it }
         if (journal?.recoveredEdits != 0 && journal != null) app.main.post {
@@ -727,9 +731,24 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
     fun openNotebook(id: String): Boolean {
         if (localEntry(id) == null) return false
         var parsed: DocumentSession? = null
-        return changeNotebook({ library.readSession(id).also { parsed=it }.notebook },prepare={ notebook ->
+        var salvaged: NotebookLibrary.Salvaged? = null
+        // P672: when the ordinary read fails, the healthy pages open and the damaged ones are blank and marked; the damaged
+        // file is copied aside first. When nothing can be salvaged the ordinary read's error stands.
+        return changeNotebook({
+            val session = try { library.readSession(id) } catch (e: Exception) {
+                try { library.readSalvaged(id).also { salvaged = it }.session } catch (_: Exception) { throw e }
+            }
+            session.also { parsed = it }.notebook
+        },prepare={ notebook ->
             requireNotNull(parsed).also { check(it.notebook === notebook) }
-        },readOnlyId=id)
+        },readOnlyId=id, opened = { salvaged?.let { salvageWarning = damagedMessage(it.damaged, it.session.notebook.pages.size); warning = salvageWarning } })
+    }
+    /** P672: the note shown while a notebook opened with damaged pages is on screen. */
+    private var salvageWarning: String? = null
+    internal fun damagedMessage(damaged: List<Int>, pages: Int): String {
+        val numbers = damaged.take(6).map { it + 1 }.let { if (damaged.size > 6) it.joinToString(", ") + "…" else if (it.size == 1) "$it".trim('[', ']') else it.dropLast(1).joinToString(", ") + " and " + it.last() }
+        val which = if (damaged.size == 1) "Page $numbers" else "${damaged.size} of $pages pages ($numbers)"
+        return "$which could not be read and ${if (damaged.size == 1) "is" else "are"} marked \"Damaged page\". The other pages opened. A copy of the damaged file is kept on this device."
     }
 
     /** P214: Library-only confirmation may explicitly close the current saved notebook.

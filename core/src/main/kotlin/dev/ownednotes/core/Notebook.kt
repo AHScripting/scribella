@@ -625,6 +625,21 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
         commit(target.copy(pages = target.pages.map { if (it.id == pageId) it.copy(strokes = it.strokes + copies) else it }))
         return copies.map { it.id }.toSet()
     }
+    /** P662: adds ready-made strokes to several pages in one commit, so the whole set is one Undo step.
+     *  Each copy gets a new id, is unlocked, and goes on the page's top layer when the page has layers.
+     *  Pages that are missing or have no room are skipped. Returns how many strokes were added. */
+    fun addStrokes(byPage: Map<String, List<InkStroke>>): Int {
+        var added = 0
+        val pages = notebook.pages.map { page ->
+            val strokes = byPage[page.id].orEmpty()
+            if (strokes.isEmpty() || strokes.size > 10_000 - page.strokes.size) return@map page
+            val layer = page.layers.lastOrNull()?.id
+            added += strokes.size
+            page.copy(strokes = page.strokes + strokes.map { it.copy(id = UUID.randomUUID().toString(), layer = layer, locked = false) })
+        }
+        if (added == 0 || !commit(notebook.copy(pages = pages))) return 0
+        return added
+    }
     /** Positive independent axis scales followed by clockwise rotation; canonical outlines stay authoritative. */
     fun transformStrokes(ids: Set<String>, pageId: String, pivot: Point, scale: Float = 1f, degrees: Float = 0f, scaleY: Float = scale, imageIds: Set<String> = emptySet(), textIds: Set<String> = emptySet()): Boolean {
         require(pivot.x.isFinite() && pivot.y.isFinite() && scale.isFinite() && scale > 0f && scaleY.isFinite() && scaleY > 0f && degrees.isFinite()) { "Invalid selection transform" }

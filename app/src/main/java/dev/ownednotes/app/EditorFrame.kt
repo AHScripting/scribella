@@ -258,7 +258,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     internal val palette get() = toolPill
     private val column = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
     private val middle = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
-    private val toolBar = LinearLayout(c)
+    internal val toolBar = LinearLayout(c)
     private val toolGroup = LinearLayout(c)
     private val zoomGroup = LinearLayout(c)
     /** P175 (G1): the Glass chrome. Bars are strips of desk; the controls float on them in frosted pills. */
@@ -365,6 +365,17 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
     private val slimMirrors = mutableListOf<Pair<SlimBar.Slot, ChromeButton>>()
     private val slimEdits = mutableListOf<SlimBar.Slot>()
     private var slimName: SlimBar.Slot? = null
+    /** P669: the page number on the slim bar, the name under a hovered or held button, and the small bar » opens. */
+    private var slimPage: SlimBar.Slot? = null
+    /** P670 (board 15): the floating window that shows another page of this notebook. */
+    internal lateinit var peek: PeekWindow; private set
+    internal val slimTipView = TextView(c).apply {
+        textSize = 13f; setTextColor(Color.WHITE); typeface = Kit.Type.CAPTION.typeface; includeFontPadding = false
+        background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = c.dp(8f); setColor(if (night) 0xff3a404c.toInt() else 0xff1d2433.toInt()) }
+        setPadding(c.dpi(10f), c.dpi(6f), c.dpi(10f), c.dpi(6f)); elevation = c.dp(8f); visibility = View.GONE
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    internal var slimMore: android.widget.PopupWindow? = null
     private var slimHold = false
 
     init {
@@ -448,8 +459,11 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         configureStrip()
         placePanel()
         slimBar.onOver = ::slimOver
+        slimBar.onTip = ::slimTip
+        stage.addView(slimTipView, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.LEFT))
         slimPeek.visibility = View.GONE; slimPeek.elevation = c.dp(8f)
         stage.addView(slimPeek, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.TOP or Gravity.LEFT))
+        peek = PeekWindow(activity, { repository }, stage, preferences, night, { topChrome.height }) { if (dock == Dock.BOTTOM && toolBar.parent === stage) toolBar.height else 0 }
         foldToSlim.setOnClickListener { act { setSlim(true) } }
         if (preferences.getBoolean("slimBar", false)) setSlim(true, refresh = false)
     }
@@ -857,7 +871,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         val pages = repository.session?.notebook?.pages ?: return false
         val index = pages.indexOfFirst { it.id == repository.selectedPageId }
         return index >= 0 && (index == pages.lastIndex ||
-            (ink.spreadShown && BookSpread.start(index) + 2 >= pages.size))
+            (ink.spreadShown && ink.lastSpreadShown))
     }
 
     /** Single-page mode, last page: a swipe past it slides in the empty page with "Add page". False when nothing was shown. */
@@ -1098,6 +1112,8 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             preferences.edit().putString("toolbarDock", target.name).apply()
             placeToolBar()
                 placePanel()
+            // P677: the slim bar's Show pages follows the side the panel opens on.
+            buildSlim()
         }
         return true
     }
@@ -1141,7 +1157,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         slimMotion?.cancel()
         slim = on
         if (remember) preferences.edit().putBoolean("slimBar", on).apply()
-        popover?.dismiss()
+        popover?.dismiss(); slimMore?.dismiss(); slimTipView.visibility = View.GONE
         slimPeek.visibility = View.GONE
         // P628 (board 12): folding dips the full bars away (up 8 dp, to 96%, fading), then the slim bar stretches out of
         // its pin; pinning rolls the slim bar back into the pin, then the full bars drop in and their tools pop in one by
@@ -1221,20 +1237,38 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             tools.forEachIndexed { i, tool -> tool.scaleX = 1f; tool.scaleY = 1f; tool.translationY = 0f; tool.alpha = kept[i] }
         }
     }
-    /** P621: the slim bar's slots, built again when a pen or highlighter is added or removed. */
+    /**
+     * P621: the slim bar's slots, built again when a pen or highlighter is added or removed.
+     * P669 (board 14 as the user changed it on 17 November): every button of the full toolbar, in its order: Back and the
+     * name button; the page buttons; the pens, the highlighters, the tools with the paint brush; the colours; Undo and
+     * Redo; Page and paper, Insert, Capture; Study, Search, Export, the menu; zoom; » and the pin. Short of room, whole
+     * groups wait behind », the least used first (zoom, the menus, the add buttons, Study tape, the paint brush and Text
+     * box, then the page buttons).
+     * P677 (the user's 18 November notes, board 14 redrawn): the page buttons moved to the middle of the bar, after the
+     * colours. Show pages is a button of its own at the end where the pages panel opens (by the pin, or after the name when
+     * the tools are docked right), its icon divided on that side, and it never waits behind ».
+     */
     private fun buildSlim() {
+        slimMore?.dismiss()
         slimAnchors.clear(); slimPens.clear(); slimMarkers.clear(); slimDots.clear(); slimMirrors.clear(); slimEdits.clear()
         val bar = slimBar
-        fun slot(kind: SlimBar.Kind, w: Float, label: String, path: String? = null, mirror: ChromeButton? = null, tap: () -> Unit) =
+        fun slot(kind: SlimBar.Kind, w: Float, label: String, path: String? = null, mirror: ChromeButton? = null, fold: Int = 0, tap: () -> Unit) =
             bar.Slot(kind, w, label, path).also { s ->
+                s.fold = fold
                 s.setOnClickListener { tap() }
                 mirror?.let { slimAnchors[it] = s; slimMirrors += s to it }
             }
         val divider = { bar.Slot(SlimBar.Kind.DIVIDER) }
         val left = mutableListOf<SlimBar.Slot>()
-        left += slot(SlimBar.Kind.ACTION, SlimBar.BACK_W, "Back to the Library", SlimBar.BACK, library) { library.performClick() }
-        left += slot(SlimBar.Kind.NAME, 0f, "Rename notebook") { if (title.isEnabled) activity.renameDialog() }.also { slimName = it; slimAnchors[namedPill] = it }
-        left += bar.Slot(SlimBar.Kind.GAP)
+        left += slot(SlimBar.Kind.ACTION, SlimBar.BACK_W, "Back to the Library", SlimBar.BACK, library) { library.performClick() }.also { it.bare = true }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Notebook name", SlimBar.NOTEBOOK) { slimNameCard() }
+            .also { it.bare = true; slimName = it; slimAnchors[namedPill] = it }
+        left += divider()
+        // P677: Show pages, on its own at the end where the pages panel opens; it stays even where the bar is short of room.
+        val panelRight = dock != Dock.RIGHT
+        val showPages = slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Show pages", if (panelRight) SlimBar.PANEL_RIGHT else SlimBar.PANEL,
+            panelToggle) { panelToggle.performClick() }
+        if (!panelRight) { left += showPages; left += divider() }
         fun tools(buttons: List<ChromeButton>, highlighter: Boolean, into: MutableList<SlimBar.Slot>) = buttons.forEachIndexed { index, button ->
             val s = bar.Slot(SlimBar.Kind.PEN, SlimBar.PEN_W, if (highlighter) "Highlighter ${index + 1}" else "Pen ${index + 1}")
             s.marker = highlighter
@@ -1249,25 +1283,177 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         left += slot(SlimBar.Kind.ADD, SlimBar.ADD_W, "Add a highlighter", SlimBar.ADD, addHighlighter) { addHighlighter.performClick() }
         left += divider()
         left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Eraser", SlimBar.ERASER, eraser) { eraser.performClick() }
+        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Paint brush", SlimBar.BRUSH, paintBrush, fold = 5) { paintBrush.performClick() }
         left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Lasso", SlimBar.LASSO, lasso) { lasso.performClick() }
         left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Shapes", SlimBar.SHAPES, shapes) { shapes.performClick() }
-        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Text box", SlimBar.TEXT) { runCommand(EditorCommand.TEXT) }.also { slimEdits += it }
-        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Study tape", MenuIcons.TAPE) { slimTape() }.also { slimEdits += it }
+        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Text box", SlimBar.TEXT, fold = 5) { runCommand(EditorCommand.TEXT) }.also { slimEdits += it }
+        left += slot(SlimBar.Kind.TOOL, SlimBar.ACTION_W, "Study tape", MenuIcons.TAPE, fold = 4) { slimTape() }.also { slimEdits += it }
         left += divider()
         repeat(3) { left += slot(SlimBar.Kind.COLOUR, SlimBar.COLOUR_W, "Colour") { }.also { slimDots += it } }
         slimDots.forEach { s -> s.setOnClickListener { s.colour?.let { color -> act { applyRingColor(color.toLong() and 0xffffffffL) } } } }
-        val right = listOf(
-            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Undo", SlimBar.UNDO, undo) { undo.performClick() },
-            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Redo", SlimBar.REDO, redo) { redo.performClick() },
-            divider(),
-            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Study", SlimBar.STUDY, study) { study.performClick() },
-            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Search", SlimBar.SEARCH, search) { search.performClick() },
-            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Notebook menu", SlimBar.MORE, more) { more.performClick() },
-            divider(),
-            slot(SlimBar.Kind.PIN, SlimBar.PIN_W, "Pin the full toolbar", SlimBar.PIN) { act { setSlim(false) } })
+        left += divider()
+        // P677: the page buttons, laid out toward the middle of the bar (SlimBar centres them in the room left over).
+        listOf(
+            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Previous page", SlimBar.PREVIOUS, previous, fold = 6) { previous.performClick() },
+            slot(SlimBar.Kind.PAGE, SlimBar.PAGE_W, "Page actions", mirror = pages, fold = 6) { pages.performClick() }.also { slimPage = it },
+            slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Next page", SlimBar.NEXT, next, fold = 6) { next.performClick() }
+        ).forEach { it.centred = true; left += it }
+        left += divider()
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Undo", SlimBar.UNDO, undo) { undo.performClick() }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Redo", SlimBar.REDO, redo) { redo.performClick() }
+        left += divider()
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Page and paper", SlimBar.PAPER, pageSettings, fold = 3) { pageSettings.performClick() }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Insert", SlimBar.INSERT, insert, fold = 3) { insert.performClick() }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Capture and files", SlimBar.CAPTURE, capture, fold = 3) { capture.performClick() }
+        left += divider()
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Study", SlimBar.STUDY, study, fold = 2) { study.performClick() }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Search", SlimBar.SEARCH, search, fold = 2) { search.performClick() }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Export", SlimBar.EXPORT, share, fold = 2) { share.performClick() }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Notebook menu", SlimBar.MORE, more, fold = 2) { more.performClick() }
+        left += divider()
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Zoom out", SlimBar.ZOOM_OUT, zoomOut, fold = 1) { zoomOut.performClick() }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Fit page", SlimBar.FIT, fit, fold = 1) { fit.performClick() }
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "Zoom in", SlimBar.ZOOM_IN, zoomIn, fold = 1) { zoomIn.performClick() }
+        left += divider()
+        left += slot(SlimBar.Kind.ACTION, SlimBar.ACTION_W, "More buttons", SlimBar.OVERFLOW, fold = -1) { slimOpenMore() }
+        val pin = slot(SlimBar.Kind.PIN, SlimBar.PIN_W, "Pin the full toolbar", SlimBar.PIN) { act { setSlim(false) } }
+        val right = if (panelRight) listOf(showPages, divider(), pin) else listOf(pin)
         bar.setSlots(left, right)
         refreshSlim()
         root.post { fitSlim() }
+    }
+    /**
+     * P669: the name button's card. P677 (the user's 18 November notes, board 14): a small pill under the button holding
+     * only the notebook's name, as wide as the name, where it is edited in place; Done or a tap outside keeps a new name.
+     * The page count (already on the bar) and the Rename button are gone; the card was 260 dp wide and much too large.
+     * P677, the user's next note: a round blue-tinted pencil button after the name says it can be edited. The pencil (or a
+     * tap on the name) selects the name and brings up the keyboard; while editing the button is a check that keeps it.
+     */
+    private fun slimNameCard() {
+        val anchor = slimName ?: return
+        val look = Kit.text(c, title.text, Kit.Type.HEADLINE, name = true)
+        val original = title.text.toString()
+        val editable = title.isEnabled && !repository.readOnly
+        val field = EditText(c).apply {
+            setText(original); setSingleLine(); background = null; setPadding(0, 0, 0, 0)
+            typeface = look.typeface; setTextColor(look.currentTextColor)
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, look.textSize)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            filters = arrayOf(android.text.InputFilter.LengthFilter(500))
+            contentDescription = "Notebook name"; isEnabled = editable
+        }
+        fun widthFor(text: CharSequence) = ((field.paint.measureText(text.toString()) +
+            c.dp(SLIM_NAME_PAD + 8f + if (editable) SLIM_NAME_GAP + SLIM_NAME_BUTTON + SLIM_NAME_END else SLIM_NAME_PAD)) / c.dp(1f))
+            .coerceIn(SLIM_NAME_MIN, SLIM_NAME_MAX)
+        var kept = false
+        fun keep() {
+            if (kept) return
+            kept = true
+            val name = field.text.toString().trim()
+            if (editable && name.isNotEmpty() && name != original)
+                runCatching { repository.edit { it.rename(name) } }.onFailure { activity.message(it.message ?: "Invalid title") }
+        }
+        val accent = Glass.accent(night)
+        fun round(fill: Int, ring: Int) = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(fill); if (ring != 0) setStroke(c.dpi(1f), ring)
+        }
+        // The pencil: a round, tinted button, so it reads as something to tap; it becomes a solid check while editing.
+        val button = android.widget.ImageView(c).apply {
+            scaleType = android.widget.ImageView.ScaleType.CENTER
+            visibility = if (editable) View.VISIBLE else View.GONE
+        }
+        fun editing(on: Boolean) {
+            button.setImageDrawable(Kit.Icon(if (on) SLIM_NAME_CHECK else SLIM_NAME_PENCIL, if (on) Color.WHITE else accent, c.dpi(16f)))
+            button.background = if (on) round(accent, 0) else round((accent and 0xFFFFFF) or 0x22000000, (accent and 0xFFFFFF) or 0x4D000000)
+            button.contentDescription = if (on) "Keep the name" else "Edit name"
+            if (android.os.Build.VERSION.SDK_INT >= 26) button.tooltipText = button.contentDescription
+        }
+        editing(false)
+        open(anchor, width = widthFor(original), radius = SLIM_NAME_H / 2) { column ->
+            val v = c.dpi((SLIM_NAME_H - SLIM_NAME_BUTTON) / 2)
+            column.setPadding(c.dpi(SLIM_NAME_PAD), v, c.dpi(if (editable) SLIM_NAME_END else SLIM_NAME_PAD), v)
+            // The name shows first; the keyboard waits for the pencil or a tap in the name.
+            column.isFocusableInTouchMode = true
+            val row = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
+            row.addView(field, LinearLayout.LayoutParams(0, c.dpi(22f), 1f))
+            row.addView(button, LinearLayout.LayoutParams(c.dpi(SLIM_NAME_BUTTON), c.dpi(SLIM_NAME_BUTTON)).apply { marginStart = c.dpi(SLIM_NAME_GAP) })
+            column.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, c.dpi(SLIM_NAME_BUTTON)))
+        }
+        val pop = popover ?: return
+        pop.content.requestFocus()
+        field.setOnFocusChangeListener { _, focused -> editing(focused) }
+        button.setOnClickListener {
+            if (field.isFocused) { keep(); pop.dismiss() }
+            else {
+                field.requestFocus(); field.selectAll()
+                (c.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                    .showSoftInput(field, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+        field.setOnEditorActionListener { _, action, _ ->
+            if (action == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) { keep(); pop.dismiss(); true } else false
+        }
+        field.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                // The pill grows and shrinks with the name, within its bounds.
+                val w = c.dpi(widthFor(s ?: ""))
+                if (pop.window.isShowing && w != pop.window.width) { pop.content.minimumWidth = w; pop.window.update(w, -1) }
+            }
+        })
+        pop.window.setOnDismissListener { keep() }
+    }
+    /** For tests (P677): the name pill's size, in dp. */
+    internal val SLIM_NAME_H = 38f
+    internal val SLIM_NAME_PAD = 16f
+    internal val SLIM_NAME_MIN = 96f
+    internal val SLIM_NAME_MAX = 320f
+    internal val SLIM_NAME_BUTTON = 28f
+    internal val SLIM_NAME_GAP = 8f
+    internal val SLIM_NAME_END = 5f
+    private val SLIM_NAME_PENCIL = "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"
+    private val SLIM_NAME_CHECK = "M5 12.5l4.5 4.5L19 7"
+    /** P669: the name of the slim bar's button under a hovering S Pen or a holding finger, in a dark label under it. */
+    private fun slimTip(slot: SlimBar.Slot?) {
+        if (slot == null || !slim || popover?.window?.isShowing == true) { slimTipView.visibility = View.GONE; return }
+        slimTipView.text = slot.tip ?: slot.label
+        slimTipView.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val w = slimTipView.measuredWidth
+        slimTipView.translationX = (slimBar.left + slot.left + slot.width / 2f - w / 2).coerceIn(c.dp(4f), maxOf(c.dp(4f), stage.width - w - c.dp(4f)))
+        slimTipView.translationY = topChrome.top + slimBar.bottom + c.dp(4f)
+        slimTipView.visibility = View.VISIBLE; slimTipView.bringToFront()
+    }
+    /**
+     * P669: » opens the buttons waiting behind it in a small bar just under it, in their groups; it closes when one is
+     * used or the pen touches the page.
+     */
+    private fun slimOpenMore() {
+        val anchor = slimBar.overflow ?: return
+        if (slimMore?.isShowing == true) { slimMore?.dismiss(); return }
+        popover?.dismiss()
+        val groups = slimBar.waitingGroups()
+        if (groups.isEmpty()) return
+        val sub = SlimBar(c, night)
+        val window = android.widget.PopupWindow(sub, 1, c.dpi(SlimBar.HEIGHT), false)
+        val list = mutableListOf<SlimBar.Slot>()
+        groups.forEachIndexed { i, group ->
+            if (i > 0) list += sub.Slot(SlimBar.Kind.DIVIDER)
+            group.forEach { s ->
+                list += sub.Slot(s.kind, s.widthDp, s.label, s.path).also { m ->
+                    m.text = s.text; m.isEnabled = s.isEnabled; m.chosen = s.chosen; m.contentDescription = s.contentDescription
+                    m.setOnClickListener { window.dismiss(); s.performClick() }
+                }
+            }
+        }
+        sub.setSlots(list, emptyList())
+        window.width = sub.needed()
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        window.isOutsideTouchable = true; window.isTouchable = true
+        window.setOnDismissListener { if (slimMore === window) slimMore = null }
+        slimMore = window
+        val x = anchor.width - window.width + c.dpi(SlimBar.EDGE + SlimBar.INSET + SlimBar.PAD)
+        window.showAsDropDown(anchor, x, c.dpi(2f))
     }
     /**
      * P621: a pen or highlighter not yet held is taken. P623: the one held opens its whole board (kind, colour, size,
@@ -1330,7 +1516,8 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             s.contentDescription = s.label + if (!button.active) "" else if (button === shapes) ", shape pen on" else ", selected"
         }
         slimEdits.forEach { it.isEnabled = lasso.isEnabled }
-        slimName?.let { it.text = title.text.toString(); it.isEnabled = title.isEnabled }
+        slimName?.let { val name = title.text.toString(); it.tip = name; it.contentDescription = "Notebook name, $name" }
+        slimPage?.let { it.text = pages.text; it.contentDescription = "Page actions, page ${pages.text ?: ""}" }
         val marker = drawingWithHighlighter
         val colors = InkColors(preferences).quick(marker).take(slimDots.size)
         val current = (if (marker) ink.highlighterStyle else ink.penStyle).color
@@ -1344,7 +1531,9 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         }
     }
     /** P621: in the slim bar a menu of a hidden full-toolbar control opens from its slot, or from the notebook menu's. */
-    private fun shown(anchor: View): View = if (!slim || anchor.isShown) anchor else slimAnchors[anchor] ?: slimAnchors[more] ?: anchor
+    private fun shown(anchor: View): View = if (!slim || anchor.isShown) anchor
+        // P669: a button waiting behind » opens its menu from ».
+        else slimAnchors[anchor]?.takeIf { (it as? SlimBar.Slot)?.waiting != true } ?: slimBar.overflow ?: slimAnchors[more] ?: anchor
 
     private fun placeToolBar() {
         (toolBar.parent as? ViewGroup)?.removeView(toolBar)
@@ -1937,6 +2126,16 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
                 it.put(note("Two pages open side by side like a book. Write on either page; the pen makes it current."))
             }
         }
+        // P671 (board 6): the answer remembered from the import sheet, and the way back to being asked.
+        block(layout, "Imported PDFs") { card ->
+            card.body {
+                val saved = PdfFit.remembered(preferences)
+                it.put(Kit.segmented(c, listOf("Ask", "Fit to my paper", "Keep size"), when (saved) { null -> 0; PdfFit.Choice.FIT -> 1; PdfFit.Choice.KEEP -> 2 }) { i ->
+                    PdfFit.remember(preferences, listOf(null, PdfFit.Choice.FIT, PdfFit.Choice.KEEP)[i])
+                }.apply { contentDescription = "Imported PDF pages" })
+                it.put(note("When a PDF's pages are a different shape from your paper. Fit puts each page at the top of your paper."))
+            }
+        }
         block(layout, "Turning pages") { card ->
             card.body {
                 it.put(label("Turn pages in single-page mode").apply { setPadding(0, 0, 0, dpi(10f)) })
@@ -2223,7 +2422,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
      */
     private fun open(anchor: View, alignEnd: Boolean = false, width: Float? = 340f, toward: Boolean = false, above: Boolean = false,
         tool: Boolean = false, radius: Float? = null, passThrough: Boolean = false, build: (LinearLayout) -> Unit) {
-        popover?.dismiss()
+        popover?.dismiss(); slimMore?.dismiss(); slimTipView.visibility = View.GONE
         popover = Popover(shown(anchor), width, tool, passThrough, build).also {
             radius?.let { r -> it.window.setBackgroundDrawable(Glass.float(c, night, r)) }
             if (passThrough) {
@@ -2465,6 +2664,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             EditorCommand.MORE_ROOM -> edit && page?.hasBackground == false
             EditorCommand.PDF_SELECT_TEXT -> change && page?.pdfBackground!=null && !activity.pdfTextReading
             EditorCommand.TEXT_MARK -> edit && page?.hasBackground == true
+            EditorCommand.PDF_HIGHLIGHTS -> edit && note?.pages?.any { it.pdfBackground != null } == true
             EditorCommand.CLEAR_TRANSCRIPT -> edit && page?.reviewedInk?.isNotEmpty() == true
             EditorCommand.TAPE -> change && ink.pageHasTape
             EditorCommand.LASER -> change && page != null
@@ -2473,6 +2673,8 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             EditorCommand.COPY_PAGE -> change && repository.otherNotebooks().isNotEmpty()
             EditorCommand.TRANSFER_PAGE -> edit && (note?.pages?.size ?: 0) > 1 && repository.otherNotebooks().isNotEmpty()
             EditorCommand.MOVE_PAGE, EditorCommand.DELETE_PAGE -> edit && (note?.pages?.size ?: 0) > 1
+            EditorCommand.SHOW_BESIDE -> idle && (note?.pages?.size ?: 0) > 1
+            EditorCommand.PEEK -> idle && (note?.pages?.size ?: 0) > 1
             EditorCommand.UNLOCK -> edit && page?.let { p -> p.strokes.any { it.locked } || p.images.any { it.locked } || p.textBoxes.any { it.locked } || p.attachments.any { it.locked } } == true
             EditorCommand.CLEAR_INK -> edit && page?.strokes?.isNotEmpty() == true
             EditorCommand.MERGE -> edit && repository.otherNotebooks().isNotEmpty()
@@ -2506,6 +2708,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             EditorCommand.PAGE_TEXT -> activity.pageTextDialog()
             EditorCommand.PDF_SELECT_TEXT -> activity.startPdfTextSelection()
             EditorCommand.TEXT_MARK -> activity.textMarkDialog()
+            EditorCommand.PDF_HIGHLIGHTS -> activity.launchAddHighlights()
             EditorCommand.PREPARE_STUDY -> activity.prepareStudyCopy()
             EditorCommand.INK_EXPORT -> activity.launchExportStudyInk()
             EditorCommand.CLEAR_TRANSCRIPT -> activity.clearHandwritingDialog()
@@ -2518,6 +2721,8 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
             EditorCommand.MORE_ROOM -> PageRoomSheet.show(activity)
             EditorCommand.BOOKMARK -> activity.bookmarkDialog()
             EditorCommand.MOVE_PAGE -> activity.movePageDialog()
+            EditorCommand.SHOW_BESIDE -> activity.showBesideDialog()
+            EditorCommand.PEEK -> activity.peekDialog()
             EditorCommand.COPY_PAGE -> activity.pageToNotebookDialog(false)
             EditorCommand.TRANSFER_PAGE -> activity.pageToNotebookDialog(true)
             EditorCommand.LAYERS -> activity.layersDialog()
@@ -2669,6 +2874,7 @@ class EditorFrame(private val activity: MainActivity, private val primaryCanvas:
         if (flashcardBar?.notebookId != null && flashcardBar?.notebookId != session?.notebook?.id) closeFlashcards()
         if (session == null) { closeRecall(); closeFlashcards(); closeStudyPanel() }
         studyPanel?.refresh()
+        peek.refresh()
         // Preserve the last idle appearance, including already unavailable Undo/Redo, during a stroke/save.
         // Real enabled flags below continue to prevent navigation or tool changes in the middle of input.
         val holdChrome = session != null && !repository.busy && !repository.fileBusy &&

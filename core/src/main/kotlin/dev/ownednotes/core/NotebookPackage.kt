@@ -192,7 +192,7 @@ object NotebookPackage {
         }
         fun rollback() { created.forEach { it.discardUnpublished() };createdPdfs.forEach { it.discardUnpublished() } }
     }
-    private fun withOwnedAttachments(directory: File,block: (OwnedAttachments)->Notebook): Notebook {
+    private fun <T> withOwnedAttachments(directory: File,block: (OwnedAttachments)->T): T {
         require(directory.isDirectory) { "Attachment storage directory is unavailable" }
         val owned=OwnedAttachments(directory)
         try { return block(owned) } catch(error: Throwable) { owned.rollback();throw error }
@@ -427,6 +427,71 @@ object NotebookPackage {
                 zip.getInputStream(requireNotNull(zip.getEntry(path))).use { store.readPdf(it,total) }
             } }) { zip.bytes(it, total) }.also { checkSize(manifest, 0, total.get()) }
         }
+    }
+
+    /** P672: a notebook read with its damaged pages replaced; [damaged] holds their positions (0-based). */
+    class Salvage(val notebook: Notebook, val damaged: List<Int>)
+
+    /** The bookmark that marks a page [readSalvaged] could not read. */
+    const val DAMAGED_PAGE = "Damaged page: could not be read"
+    const val DAMAGED_TEXT = "This page could not be read: its saved data is damaged. The other pages opened. A copy of the damaged file is kept on this device."
+
+    /**
+     * P657/P672: reads a package whose ordinary [read] fails, keeping every page that still reads and checks out. A page
+     * whose data is missing, damaged or fails its checksum, or that uses a PDF, picture or attached file that is, becomes a
+     * blank page of the same size with the [DAMAGED_PAGE] bookmark and a note. The manifest itself must still read. Fails
+     * when no page can be read. The file is never changed.
+     */
+    fun readSalvaged(file: File, ownedDirectory: File? = null): Salvage =
+        if (ownedDirectory == null) salvageFile(file, null) else withOwnedAttachments(ownedDirectory) { salvageFile(file, it) }
+
+    private fun salvageFile(file: File, owned: OwnedAttachments?): Salvage {
+        val zip = requireNotNull(open(file)) { "The notebook file is too damaged to open" }
+        return zip.use {
+            val manifest = parseManifest(zip.bytes("manifest.json", AtomicLong()))
+            val total = AtomicLong()
+            val budget = InkCodec.Budget()
+            fun <T> attempt(block: () -> T): T? = try { block() } catch (e: Exception) { null }
+            val decoded = manifest.pages.parallelStream().map { reference ->
+                val bytes = attempt { zip.bytes(reference.file, total) }
+                bytes to bytes?.let { attempt { decodePage(manifest, reference, it, reference.ink?.let { ink -> zip.bytes(ink, total) }, budget) } }
+            }.collect(Collectors.toList())
+            fun intact(reference: AssetReference, file: String) = reference.file == file && reference.id == reference.sha256 && attempt {
+                zip.getInputStream(requireNotNull(zip.getEntry(reference.file))).use { input ->
+                    val digest = MessageDigest.getInstance("SHA-256"); val buffer = ByteArray(65536)
+                    while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
+                    digest.digest().joinToString("") { "%02x".format(it) }
+                } == reference.sha256
+            } == true
+            val healthy = manifest.assets.filter { intact(it, "assets/${it.id}.pdf") }.map { it.id }.toSet() +
+                manifest.imageAssets.filter { intact(it, it.file.takeIf { f -> f.startsWith("images/${it.id}.") } ?: "") }.map { it.id } +
+                manifest.attachments.filter { intact(it, "files/${it.id}.bin") }.map { it.id }
+            val damaged = ArrayList<Int>()
+            val pages = manifest.pages.mapIndexed { index, reference ->
+                val (bytes, page) = decoded[index]
+                if (page != null && (listOfNotNull(page.pdfBackground?.assetId) + page.imageAssetIds + page.attachmentAssetIds).all { it in healthy }) page
+                else { damaged += index; damagedPage(reference.id, bytes) }
+            }
+            require(damaged.size < pages.size) { "No page of this notebook can be read" }
+            val used = pages.flatMap { listOfNotNull(it.pdfBackground?.assetId) + it.imageAssetIds + it.attachmentAssetIds }.toSet()
+            val kept = manifest.copy(schemaVersion = if (damaged.isEmpty()) manifest.schemaVersion else maxOf(manifest.schemaVersion, 11),
+                assets = manifest.assets.filter { it.id in used }, imageAssets = manifest.imageAssets.filter { it.id in used },
+                attachments = manifest.attachments.filter { it.id in used })
+            val notebook = assemble(kept, pages, attachment = owned?.let { store -> { path: String ->
+                zip.getInputStream(requireNotNull(zip.getEntry(path))).use { store.read(it, total) }
+            } }, pdf = owned?.let { store -> { path: String ->
+                zip.getInputStream(requireNotNull(zip.getEntry(path))).use { store.readPdf(it, total) }
+            } }) { zip.bytes(it, total) }
+            Salvage(notebook, damaged)
+        }
+    }
+
+    /** A blank stand-in for a page that could not be read: its size when its own data still says it, a bookmark and a note. */
+    private fun damagedPage(id: String, bytes: ByteArray?): Page {
+        val shape = bytes?.let { data -> try { json.decodeFromString<Page>(data.toString(Charsets.UTF_8)) } catch (e: Exception) { null } }
+        fun blank(width: Float, height: Float) = Page(id = id, width = width, height = height, bookmark = DAMAGED_PAGE,
+            textBoxes = listOf(TextBox(DAMAGED_TEXT, ImagePlacement(60f, 60f, maxOf(width - 120f, 200f), 160f))))
+        return shape?.let { s -> try { blank(s.width, s.height).also { Notebook(pages = listOf(it)).validate() } } catch (e: Exception) { null } } ?: blank(1000f, 1400f)
     }
 
     /** What a library list shows. Only the manifest is read; pages are checked when the notebook opens. */

@@ -91,14 +91,30 @@ fun Page.standardShapeFit(): StandardShapeFit? {
     return StandardShapeFit(w, h, scale, (w - width * scale) / 2, (h - height * scale) / 2)
 }
 
+/**
+ * P671 (design canvas board 6, "Fit to my paper"): where a page of another size lands on a page of the user's paper
+ * ([paperWidth] × [paperHeight]): as large as fits without stretching, at the top, centred across, so the room to write is
+ * below it. Null when the page already has the paper's shape (within 2%), which only the view's zoom tells apart.
+ */
+fun Page.paperFit(paperWidth: Float, paperHeight: Float): StandardShapeFit? {
+    require(paperWidth in 1f..100_000f && paperHeight in 1f..100_000f) { "Invalid page size" }
+    if (abs(width / height - paperWidth / paperHeight) <= .02f * paperWidth / paperHeight) return null
+    val scale = minOf(paperWidth / width, paperHeight / height)
+    return StandardShapeFit(paperWidth, paperHeight, scale, (paperWidth - width * scale) / 2, 0f)
+}
+
 /** P412 (B52): give imported pages the Standard page shape with blank paper around the old area, so they show as wide as
  * pages made here. Content is scaled uniformly (never stretched); a PDF background moves to [padded], a caller-made PDF page
  * that shows the old page centred with blank margins. Photo backgrounds are refused; original assets are only dropped once unused.
  */
-fun Notebook.withStandardPageShape(ids: Set<String>, padded: Map<String, Pair<PdfAsset, PdfBackground>>): Notebook {
+fun Notebook.withStandardPageShape(ids: Set<String>, padded: Map<String, Pair<PdfAsset, PdfBackground>>): Notebook =
+    withPageShape(ids, padded) { it.standardShapeFit() }
+
+/** P671: [withStandardPageShape] for any placement; [fitOf] says where each page's old area lands (null: unchanged). */
+fun Notebook.withPageShape(ids: Set<String>, padded: Map<String, Pair<PdfAsset, PdfBackground>>, fitOf: (Page) -> StandardShapeFit?): Notebook {
     require(ids.isNotEmpty() && pages.map { it.id }.containsAll(ids)) { "Page not found" }
     val next = pages.map { page ->
-        val fit = if (page.id in ids) page.standardShapeFit() else null
+        val fit = if (page.id in ids) fitOf(page) else null
         if (fit == null) page else {
             require(page.imageBackground == null) { "Pages with a photo background keep their shape" }
             val background = page.pdfBackground?.let { requireNotNull(padded[page.id]) { "Padded PDF page missing" }.second }

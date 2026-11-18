@@ -11,6 +11,8 @@ import com.tom_roush.pdfbox.util.Matrix
 import dev.ownednotes.core.Notebook
 import dev.ownednotes.core.PdfAsset
 import dev.ownednotes.core.PdfBackground
+import dev.ownednotes.core.Page
+import dev.ownednotes.core.StandardShapeFit
 import dev.ownednotes.core.standardShapeFit
 import java.io.File
 
@@ -20,8 +22,10 @@ import java.io.File
  * Runs off the main thread.
  */
 internal object StandardPageShape {
-    fun padded(notebook: Notebook, ids: Set<String>, cache: File, owned: File): Map<String, Pair<PdfAsset, PdfBackground>> {
-        val targets = notebook.pages.filter { it.id in ids && it.pdfBackground != null && it.standardShapeFit() != null }
+    /** P671: [fitOf] places a page of the given width and height (the Standard shape unless given; board 6 gives the user's paper). */
+    fun padded(notebook: Notebook, ids: Set<String>, cache: File, owned: File,
+               fitOf: (Page) -> StandardShapeFit? = { it.standardShapeFit() }): Map<String, Pair<PdfAsset, PdfBackground>> {
+        val targets = notebook.pages.filter { it.id in ids && it.pdfBackground != null && fitOf(it) != null }
         if (targets.isEmpty()) return emptyMap()
         val workspace = File.createTempFile("pdf-pad-", "", cache)
         check(workspace.delete() && workspace.mkdir()) { "Cannot create PDF workspace" }
@@ -47,11 +51,11 @@ internal object StandardPageShape {
                                 require(((page.rotation % 360) + 360) % 360 == 0) { "Rotated PDF pages keep their shape" }
                                 val crop = page.cropBox
                                 require(crop.width > 0f && crop.height > 0f) { "Invalid PDF crop box" }
-                                val fit = dev.ownednotes.core.Page(width = width, height = height).standardShapeFit()!!
+                                val fit = fitOf(Page(width = width, height = height))!!
                                 val target = PDPage(PDRectangle(fit.width, fit.height)).also(output::addPage)
                                 val form = layers.importPageAsForm(original, page)
                                 form.setMatrix(AffineTransform()); form.bBox = crop
-                                // The old page area: scaled uniformly, centred; PDF y runs upwards.
+                                // The old page area: scaled uniformly and moved by the fit; PDF y runs upwards.
                                 val sx = width * fit.scale / crop.width; val sy = height * fit.scale / crop.height
                                 val bottom = fit.height - fit.dy - height * fit.scale
                                 PDPageContentStream(output, target).use { content ->

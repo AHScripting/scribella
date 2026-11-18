@@ -31,7 +31,7 @@ class PageCurlView(
      * P587: [live] when the editor underneath shows the page on screen fully drawn, so this view leaves it in view. */
     private class Turn(val notebook: Notebook, val page: Page, val target: Page, val direction: TurnDirection,
         val leaf: Bitmap, val under: Bitmap, val leafBounds: RectF, val underBounds: RectF, val corner: PointF, val restX: Float, val turnedX: Float,
-        val addPage: Boolean = false, val live: Boolean = false) {
+        val addPage: Boolean = false, val live: Boolean = false, val mate: Bitmap? = null, val mateBounds: RectF = RectF()) {
         val back get() = direction == TurnDirection.PREVIOUS
         val start get() = if (back) turnedX else restX
         val end get() = if (back) restX else turnedX
@@ -48,6 +48,7 @@ class PageCurlView(
     private var revealDeadline = 0L
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val paper = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val fade = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val shade = Paint(Paint.ANTI_ALIAS_FLAG).apply { isDither = true }
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1f; color = 0x44807158 }
     private val sourceCorners = FloatArray(8)
@@ -130,6 +131,15 @@ class PageCurlView(
     /** For tests: the free corner's position, and the spine's two corners on its side. */
     internal val tipPosition get() = current?.let { PointF(tip.x, tip.y) }
     internal val leafWidth get() = current?.leafBounds?.width() ?: 0f
+    /** For tests (P677): where the turning page and the page beside its destination lie. */
+    internal val leafBoundsForTest get() = current?.let { RectF(if (it.back) it.leafBounds else it.underBounds) }
+    internal val mateBoundsForTest get() = current?.takeIf { it.mate != null }?.let { RectF(it.mateBounds) }
+    /**
+     * P677: where the editor shows a page once a turn lands on it, when that is in a two-page spread: its own slot, and the
+     * page beside it with that page's slot. Null when it shows alone, fitted as [fitted] does.
+     */
+    class Landing(val bounds: RectF, val mate: Page?, val mateBounds: RectF)
+    var landingFor: (Page) -> Landing? = { null }
     internal val spineCorners get() = current?.let { t -> RectF(t.leafBounds.left, t.corner.y, t.leafBounds.left, if (t.corner.y <= t.leafBounds.top) t.leafBounds.bottom else t.leafBounds.top) }
     val previewsReady: Boolean get() {
         val notebook = repository.session?.notebook ?: return false
@@ -190,13 +200,17 @@ class PageCurlView(
             val (shown, shownBounds) = currentPage(notebook, page, bounds) ?: return
             val other = other0 ?: endSheet(shownBounds)
             val back = direction == TurnDirection.PREVIOUS
-            val targetBounds = if (end) RectF(shownBounds) else RectF().also { fitted(target, it) }
+            // P677: a page that lands in a two-page spread (landscape paper turned back to portrait pages, say) is laid in its
+            // slot there, and the page beside it comes in with the turn, so nothing jumps sideways when the editor takes over.
+            val place = if (end) null else landingFor(target)
+            val targetBounds = if (end) RectF(shownBounds) else place?.bounds?.let(::RectF) ?: RectF().also { fitted(target, it) }
+            val mate = place?.mate?.let { thumbnails.cached(notebook, it.id, PREVIEW_WIDTH) }
             // Forward: the current page is the leaf, the next page lies under it. Back: the previous page is the leaf.
             val leafBounds = if (back) targetBounds else RectF(shownBounds)
             val corner = PointF(leafBounds.right, if (originY < bounds.centerY()) leafBounds.top else leafBounds.bottom)
             t = Turn(notebook, page, target, direction, if (back) other else shown, if (back) shown else other,
                 leafBounds, if (back) RectF(shownBounds) else targetBounds, corner, corner.x, corner.x - 2 * leafBounds.width(), addPage = end,
-                live = canReveal())
+                live = canReveal(), mate = mate, mateBounds = place?.mateBounds?.let(::RectF) ?: RectF())
             begin(t, corner, dy)
         }
         follow(t, dx, dy)
@@ -426,11 +440,14 @@ class PageCurlView(
         super.onDraw(canvas)
         val t = current ?: return
         // Once turned, only the destination shows until the editor has drawn it: the under page forward, the leaf back.
-        if (revealed) { canvas.drawColor(deskColor); if (t.back) sheet(canvas, t.leaf, t.leafBounds) else sheet(canvas, t.under, t.underBounds); return }
+        if (revealed) {
+            canvas.drawColor(deskColor); t.mate?.let { sheet(canvas, it, t.mateBounds) }
+            if (t.back) sheet(canvas, t.leaf, t.leafBounds) else sheet(canvas, t.under, t.underBounds); return
+        }
         // P587: with the editor showing the page on screen ([Turn.live]), that page is left in view wherever it still lies
         // flat: the turning page up to its roll (forward), or the page underneath (back). Otherwise all is drawn here.
         val forwardLive = t.live && !t.back
-        if (!t.live) { canvas.drawColor(deskColor); sheet(canvas, t.under, t.underBounds) }
+        if (!t.live) { canvas.drawColor(deskColor); if (!t.back) t.mate?.let { sheet(canvas, it, t.mateBounds) }; sheet(canvas, t.under, t.underBounds) }
         val length = hypot(t.corner.x - tip.x, t.corner.y - tip.y)
         if (length < 1f) { if (!forwardLive) canvas.drawBitmap(t.leaf, null, t.leafBounds, bitmapPaint); return }
         val nx = (t.corner.x - tip.x) / length; val ny = (t.corner.y - tip.y) / length
@@ -447,8 +464,17 @@ class PageCurlView(
         // clip's soft edge lies under the roll's own drawing).
         if (forwardLive) {
             canvas.save(); canvas.clipPath(halfPlane(nx, ny, axis + 1f))
-            canvas.drawColor(deskColor); sheet(canvas, t.under, t.underBounds)
+            canvas.drawColor(deskColor); t.mate?.let { sheet(canvas, it, t.mateBounds) }; sheet(canvas, t.under, t.underBounds)
             canvas.restore()
+        }
+        // P677: back onto a page of another size, the page being left fades into the desk wherever the one coming over won't
+        // cover it, and the page beside the destination fades in, so the turn ends as the editor then shows it. (It showed
+        // the landscape page round the smaller one to the end, then swapped both for the spread in a single frame.)
+        if (t.back && (t.mate != null || !t.leafBounds.contains(t.underBounds))) {
+            val across = if (t.turnedX == t.restX) 1f else ((tip.x - t.restX) / (t.turnedX - t.restX)).coerceIn(0f, 1f)
+            val arrived = (1f - across).let { it * it * (3 - 2 * it) }
+            fade.color = deskColor; fade.alpha = (255 * arrived).toInt(); canvas.drawRect(t.underBounds, fade)
+            t.mate?.let { fade.alpha = (255 * arrived).toInt(); canvas.drawBitmap(it, null, t.mateBounds, fade) }
         }
         corners(t.leafBounds)
         val under = (70 * lift(length, width)).toInt() + 20

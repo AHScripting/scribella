@@ -1328,30 +1328,43 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                 textSelection.draw(canvas, handleUnit, photoViewport, effectiveLasso)
             }
             canvas.restore()
-            } finally { pdfTiles.endFrame() }
+            } finally { pdfTiles.endFrame(); if (FountainInk.takePending()) postInvalidateOnAnimation() }
         }
         /** The spread's other page: crisp live ink on plain paper; PDF pages use their preview once it is ready. */
         private fun drawPartner(canvas: Canvas, s: Spread) {
             val notebook = repository.session?.notebook ?: return
             val partner = notebook.pages.firstOrNull { it.id == s.partnerId } ?: return
             canvas.save(); canvas.clipRect(s.partner)
-            val preview = if (partner.pdfBackground != null || partner.imageBackground != null || partner.images.isNotEmpty() || partner.textBoxes.isNotEmpty() || partner.attachments.isNotEmpty()) partnerPreview(notebook, partner) else null
+            val k = s.partner.width() / partner.width
+            // P665: drawn like the current page, background at full size and ink as lines, so the two look equally sharp.
+            // Until its background is ready, the small preview (ink included) stands in.
+            val needsArt = partner.pdfBackground != null || partner.imageBackground != null || partner.images.isNotEmpty()
+            val art = if (needsArt) partnerArt(notebook, partner) else null
+            val preview = if (needsArt && art == null) partnerPreview(notebook, partner) else null
             if (preview != null) {
                 canvas.drawBitmap(preview, null, s.partner, bitmapPaint)
-                val k = s.partner.width() / partner.width
                 val partnerViewport = Matrix(viewport).apply { preTranslate(s.partner.left, s.partner.top); preScale(k, k) }
                 canvas.save(); canvas.translate(s.partner.left, s.partner.top); canvas.scale(k, k)
                 pdfTiles.draw(canvas, notebook, partner, partnerViewport,
                     RectF(0f, 0f, this@InkCanvas.width.toFloat(), this@InkCanvas.height.toFloat()), flattened = true)
                 canvas.restore()
-            } else {
-                val k = s.partner.width() / partner.width
+            } else if (!needsArt || art != null) {
                 canvas.translate(s.partner.left, s.partner.top); canvas.scale(k, k)
                 PaperRenderer.draw(canvas, partner, paint)
+                art?.background?.let { pageBounds.set(0f, 0f, partner.width, partner.height); canvas.drawBitmap(it, null, pageBounds, bitmapPaint) }
+                if (partner.pdfBackground != null) {
+                    val partnerViewport = Matrix(viewport).apply { preTranslate(s.partner.left, s.partner.top); preScale(k, k) }
+                    pdfTiles.draw(canvas, notebook, partner, partnerViewport, RectF(0f, 0f, this@InkCanvas.width.toFloat(), this@InkCanvas.height.toFloat()))
+                }
                 val paths = partnerPaths(partner.strokes)
-                val flat = InkGeometry.flatHighlights(partner.drawnStrokes) { paths.getValue(it.id) }
-                partner.drawnStrokes.forEach { InkGeometry.draw(canvas, it, inkPaint, partner.opacityOf(it), flat[it] ?: paths.getValue(it.id)) }
-            }
+                partner.paintSlices.forEach { slice ->
+                    if (slice.images.isNotEmpty()) PhotoRendering.drawPage(canvas, slice, notebook.imageAssets, paint = bitmapPaint, decoded = art?.photos ?: mutableMapOf())
+                    TextRendering.drawPage(canvas, slice)
+                    AttachmentRendering.drawPage(canvas, slice, notebook.attachmentAssets)
+                    val flat = InkGeometry.flatHighlights(slice.drawnStrokes) { paths.getValue(it.id) }
+                    slice.drawnStrokes.forEach { InkGeometry.draw(canvas, it, inkPaint, partner.opacityOf(it), flat[it] ?: paths.getValue(it.id)) }
+                }
+            } else PaperRenderer.draw(canvas.apply { translate(s.partner.left, s.partner.top); scale(k, k) }, partner, paint)
             canvas.restore()
             gutter.draw(canvas, s.partner, spineOnRight = !s.currentOnLeft)
         }
@@ -1375,6 +1388,34 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         }
         return null
     }
+    /** P665: the spread's other page's background and photos, made off the main thread as the current page's are. */
+    private class PartnerArt(val page: Page, val background: Bitmap?, val photos: MutableMap<String, Bitmap>)
+    private var partnerArt: PartnerArt? = null
+    private var partnerArtLoading: Page? = null
+    private var partnerArtFailed: Page? = null
+    private fun partnerArt(notebook: Notebook, page: Page): PartnerArt? {
+        partnerArt?.takeIf { it.page === page }?.let { return it }
+        if (partnerArtLoading === page || partnerArtFailed === page || !isAttachedToWindow) return null
+        partnerArtLoading = page
+        app.pageRendering.execute {
+            val result = runCatching {
+                val background = page.pdfBackground?.let { b -> PdfSupport.render(app.cacheDir, notebook.assets.first { it.id == b.assetId }, b) }
+                    ?: page.imageBackground?.let { b -> ImageSupport.render(notebook.imageAssets.first { it.id == b.assetId }, b) }
+                val photos = mutableMapOf<String, Bitmap>()
+                // Drawing once on a scratch picture decodes the photos here instead of on the main thread.
+                if (page.images.isNotEmpty()) Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).let { scratch ->
+                    try { page.paintSlices.forEach { PhotoRendering.drawPage(Canvas(scratch), it, notebook.imageAssets, decoded = photos) } } finally { scratch.recycle() }
+                }
+                PartnerArt(page, background, photos)
+            }
+            app.main.post {
+                if (partnerArtLoading === page) partnerArtLoading = null
+                result.onSuccess { if (isAttachedToWindow) { partnerArt = it; dry.invalidate() } }
+                    .onFailure { partnerArtFailed = page }
+            }
+        }
+        return null
+    }
     // B01: the library marks its renderer hook restricted; PencilWetRenderer only draws through it.
     @SuppressLint("RestrictedApi")
     private val wet = InProgressStrokesView(context).apply { rendererFactory = { PencilWetRenderer() } }
@@ -1382,6 +1423,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     val pendingCount get() = active.size + finishing.size + (if (selection.isEditing) 1 else 0) + (if (photoSelection.isEditing) 1 else 0) + (if (textSelection.isEditing) 1 else 0)
     init {
         addView(dry, LayoutParams(-1, -1)); addView(wet, LayoutParams(-1, -1)); addView(laser, LayoutParams(-1,-1))
+        dry.setLayerType(LAYER_TYPE_HARDWARE, null) // P677: see [pageLayer], declared further down
         wet.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
                 var wrote = false
@@ -1616,7 +1658,8 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         pageCurl?.deskColor = deskColor; bookFlip?.deskColor = deskColor
         val turnable = pageCurlEnabled && strip == null && !zoomedIn && inputEnabled && !isEditing
         pageCurl?.sync(turnable && spread == null)
-        bookFlip?.sync(turnable && spread != null)
+        // A chosen pair turns without the book flip, whose pictures follow page-number pairs.
+        bookFlip?.sync(turnable && spread != null && spread?.custom != true)
     }
     /** Fits the page to the view, or in continuous mode lays it exactly over its slot in the strip. Frozen while input is pending. */
     fun fit(overview: Boolean = false) {
@@ -1879,15 +1922,31 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         pageCurl = PageCurlView(context, repository, thumbnails, { direction ->
             inputEnabled && !isEditing && !repository.busy && !repository.fileBusy && onPageTurn(direction)
         }, { pdfBackgroundReady }).also {
-            it.endCard = endCard; it.fitArea = { fitArea }; addView(it, LayoutParams(-1, -1))
+            it.endCard = endCard; it.fitArea = { fitArea }; it.landingFor = ::landingFor; addView(it, LayoutParams(-1, -1))
             // P587: during a turn the page doesn't change, so the graphics chip keeps it as one picture rather than redrawing
             // every stroke under the turning page each frame (about 12 ms a frame on the tablet with a written page).
-            it.onTurning = { on -> dry.setLayerType(if (on) LAYER_TYPE_HARDWARE else LAYER_TYPE_NONE, null) }
+            it.onTurning = { on -> dry.setLayerType(if (on || pageLayer) LAYER_TYPE_HARDWARE else LAYER_TYPE_NONE, null) }
         }
         thumbnailService = thumbnails
         bookFlip = BookFlipView(context, repository, thumbnails, { offset ->
             inputEnabled && !isEditing && !repository.busy && !repository.fileBusy && onPageJump(offset)
-        }, { pdfBackgroundReady }).also { it.seeThrough = seeThroughEnabled; it.onShownChanged = { onBookFlipChanged() }; addView(it, LayoutParams(-1, -1)) }
+        }, { pdfBackgroundReady }).also { it.seeThrough = seeThroughEnabled; it.onShownChanged = { onBookFlipChanged() }; it.spreads = { n -> BookSpread.groups(n.pages, customPairs(n.pages)) }; addView(it, LayoutParams(-1, -1)) }
+    }
+    /**
+     * P677: the finished page (paper, background, ink, photos, text) is kept by the graphics chip as one picture, redrawn
+     * only when the page itself changes. The pen's hover cursor, tooltips, menus and the toolbar then cost one picture per
+     * frame instead of every stroke again; a page of small fountain writing slowed them all down. P587 did this during
+     * page turns only. Tests switch it off to compare.
+     */
+    internal var pageLayer = true
+        set(value) { field = value; dry.setLayerType(if (value || pageCurlActive) LAYER_TYPE_HARDWARE else LAYER_TYPE_NONE, null) }
+    /**
+     * Tests (P677): a software drawing of the editor as the screen shows it. A software draw of a view kept as a layer reuses
+     * a cached copy that can be stale, so the page's layer is dropped for the drawing.
+     */
+    internal fun drawForTest(canvas: Canvas) {
+        val type = dry.layerType; dry.setLayerType(LAYER_TYPE_NONE, null)
+        try { draw(canvas) } finally { dry.setLayerType(type, null) }
     }
     /** P585: frames the page left to the strip's picture while its background loaded (tests). */
     internal var stripWaitingDraws = 0L
@@ -1898,7 +1957,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     }
     fun disposePageCurl() {
         pageCurl?.dispose(); pageCurl = null; curlEligible = false
-        bookFlip?.dispose(); bookFlip = null; partnerRequest?.cancel(); partnerRequest = null; partnerRequestKey = null; thumbnailService = null
+        bookFlip?.dispose(); bookFlip = null; partnerRequest?.cancel(); partnerRequest = null; partnerRequestKey = null; thumbnailService = null; partnerArt = null; partnerArtFailed = null
     }
     private fun cancelCurl() { pageCurl?.cancel(); bookFlip?.cancel(); curlEligible = false; curlDx = 0f; curlDy = 0f }
     /** P560: a turn already let go lands now rather than being thrown away, so the next swipe starts on its destination. */
@@ -1937,7 +1996,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         else -> false
     } }
     /** The fitted spread: the partner's rectangle in the current page's units, and the fit for the current page. */
-    private class Spread(val partnerId: String?, val partner: RectF, val currentOnLeft: Boolean, val fit: Matrix, val scale: Float, val key: String)
+    private class Spread(val partnerId: String?, val partner: RectF, val currentOnLeft: Boolean, val fit: Matrix, val scale: Float, val key: String, val custom: Boolean = false)
     private var spread: Spread? = null
     private var thumbnailService: PageThumbnails? = null
     private var bookFlip: BookFlipView? = null
@@ -1967,12 +2026,18 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         if (!bookSpreadEnabled || strip != null || width <= height || pages.size < 2) return null
         val index = pages.indexOfFirst { it.id == page.id }
         if (index < 0) return null
-        val start = BookSpread.start(index)
-        val left = pages[start]; val right = pages.getOrNull(start + 1)
+        val chosen = customPairs(pages)
+        val mate = chosen.firstNotNullOfOrNull { (a, b) -> if (a == page.id) b else if (b == page.id) a else null }
+        // P677: the notebook's spreads in order (BookSpread.groups): a pair the user set (P667) stays together, landscape
+        // paper shows alone and fills the screen (P666), and the pages around them pair on instead of showing alone.
+        val groups = BookSpread.groups(pages, chosen)
+        val g = groups.indexOfFirst { index in it }
+        if (!BookSpread.isSpread(groups, g, pages)) return null
+        val left = pages[groups[g][0]]; val right = groups[g].getOrNull(1)?.let { pages[it] }
         val area = fitArea
         BookSpread.slots(area.width(), area.height(), 12f, left, right, slotLeft, slotRight)
         slotLeft.offset(area.left, area.top); slotRight.offset(area.left, area.top)
-        val onLeft = index == start
+        val onLeft = left.id == page.id
         val own = if (onLeft) slotLeft else slotRight
         val other = if (onLeft) slotRight else slotLeft
         val scale = own.height() / page.height
@@ -1980,7 +2045,50 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         val partnerPage = if (onLeft) right else left
         val partner = RectF((other.left - own.left) / scale, 0f, (other.right - own.left) / scale, page.height)
         // Not the view's size: onSizeChanged handles that, keeping a zoomed spread (P560).
-        return Spread(partnerPage?.id, partner, onLeft, fit, scale, "${partnerPage?.id}:${partnerPage?.width}:${partnerPage?.height}")
+        return Spread(partnerPage?.id, partner, onLeft, fit, scale, "${partnerPage?.id}:${partnerPage?.width}:${partnerPage?.height}:${mate != null}", custom = mate != null)
+    }
+    /**
+     * P667 (the user's item 6): pages the user chose to show side by side in landscape, kept per notebook in this app's
+     * settings, never in the notebook file. Each pair is "page it was chosen from>page shown beside"; pairs whose pages
+     * are gone are skipped.
+     */
+    private fun customPairs(pages: List<Page>? = repository.session?.notebook?.pages): List<Pair<String, String>> {
+        val id = repository.session?.notebook?.id ?: return emptyList()
+        val ids = pages?.mapTo(HashSet()) { it.id } ?: return emptyList()
+        return toolPreferences.getString("pairs.$id", null).orEmpty().split(';').mapNotNull { entry ->
+            entry.split('>').takeIf { it.size == 2 && it[0] in ids && it[1] in ids && it[0] != it[1] }?.let { it[0] to it[1] }
+        }
+    }
+    /** P677: where [page] shows once turned to, when that is in a two-page spread (see [spreadFor]), for the page turn. */
+    private fun landingFor(page: Page): PageCurlView.Landing? {
+        val pages = repository.session?.notebook?.pages ?: return null
+        if (!bookSpreadEnabled || strip != null || width <= height || pages.size < 2) return null
+        val index = pages.indexOfFirst { it.id == page.id }
+        if (index < 0) return null
+        val groups = BookSpread.groups(pages, customPairs(pages)); val g = groups.indexOfFirst { index in it }
+        if (!BookSpread.isSpread(groups, g, pages)) return null
+        val left = pages[groups[g][0]]; val right = groups[g].getOrNull(1)?.let { pages[it] }
+        val area = fitArea; val a = RectF(); val b = RectF()
+        BookSpread.slots(area.width(), area.height(), 12f, left, right, a, b)
+        a.offset(area.left, area.top); b.offset(area.left, area.top)
+        return if (left.id == page.id) PageCurlView.Landing(a, right, b) else PageCurlView.Landing(b, left, a)
+    }
+    /** P677: the current page is in the notebook's last spread (the "Add page" card may follow it). */
+    val lastSpreadShown: Boolean get() {
+        val pages = repository.session?.notebook?.pages ?: return false
+        val index = pages.indexOfFirst { it.id == repository.selectedPageId }
+        return spread != null && index >= 0 && BookSpread.groups(pages, customPairs(pages)).lastOrNull()?.contains(index) == true
+    }
+    /** The page shown beside [pageId] by the user's choice, or null when it pairs by page number. */
+    fun shownBeside(pageId: String): String? = customPairs().firstNotNullOfOrNull { (a, b) -> if (a == pageId) b else if (b == pageId) a else null }
+    /** Shows [besideId] next to [pageId] in the landscape two-page view; null goes back to pairing by page number. */
+    fun showBeside(pageId: String, besideId: String?) {
+        val id = repository.session?.notebook?.id ?: return
+        val stored = toolPreferences.getString("pairs.$id", null).orEmpty().split(';').filter { it.contains('>') }
+        val kept = stored.filter { entry -> entry.split('>').none { it == pageId || it == besideId } }
+        val next = if (besideId != null && besideId != pageId) kept + "$pageId>$besideId" else kept
+        toolPreferences.edit().apply { if (next.isEmpty()) remove("pairs.$id") else putString("pairs.$id", next.joinToString(";")) }.apply()
+        cancelCurl(); fitted = false; fit(); changed()
     }
     /** The whole spread in this view's coordinates. */
     private fun spreadBounds(s: Spread): RectF? = repository.currentPage?.let { RectF(0f, 0f, it.width, it.height).apply { union(s.partner); viewport.mapRect(this) } }
@@ -1995,23 +2103,33 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         val k = s.partner.width() / partner.width
         val next = Matrix(viewport).apply { preTranslate(s.partner.left, s.partner.top); preScale(k, k) }
         cancelCurl()
+        val leaving = repository.currentPage
+        val leavingBackground = pdfBitmap.takeIf { leaving != null && pdfKey == backgroundKey(leaving) }
         repository.selectPage(id, recordHistory = false)
         if (repository.selectedPageId != id) return
+        // P665: the two pages trade their full-size backgrounds, so neither falls back to a preview or bare paper.
+        partnerArt?.takeIf { it.page === partner && it.background != null }?.let { pdfKey = backgroundKey(partner); pdfBitmap = it.background }
+        if (leaving != null && leaving.images.isEmpty() && (backgroundKey(leaving) == null || leavingBackground != null))
+            partnerArt = PartnerArt(leaving, leavingBackground, mutableMapOf())
         val adopted = spreadFor(partner) ?: return fit()
         viewport.set(next); viewport.invert(inverse); spread = adopted; fitScale = adopted.scale
         fitted = true; fittedPageId = id; fittedPageWidth = partner.width; fittedPageHeight = partner.height
         requestPdf(); dry.invalidate(); onViewportChanged(); changed()
     }
+    /** Tests: the swipe's turn without the swipe. */
+    internal fun spreadTurnForTest(direction: TurnDirection) = spreadTurn(direction)
     /** A swipe without the animation turns the whole spread: to the next spread's first page, or the previous one's last. */
     private fun spreadTurn(direction: TurnDirection): Boolean {
         val pages = repository.session?.notebook?.pages ?: return false
         val index = pages.indexOfFirst { it.id == repository.selectedPageId }
         if (index < 0) return false
-        val start = BookSpread.start(index)
-        val target = if (direction == TurnDirection.NEXT) start + 2 else start - 1
-        if (direction == TurnDirection.NEXT && target >= pages.size)
+        // P677: to the next spread's first page or the previous one's last, in the notebook's spread order.
+        val groups = BookSpread.groups(pages, customPairs(pages)); val g = groups.indexOfFirst { index in it }
+        if (g < 0) return false
+        val target = if (direction == TurnDirection.NEXT) groups.getOrNull(g + 1)?.first() else groups.getOrNull(g - 1)?.last()
+        if (direction == TurnDirection.NEXT && target == null)
             return endCard?.takeIf { it.available }?.open() == true
-        return target in pages.indices && onPageJump(target - index)
+        return target != null && onPageJump(target - index)
     }
 
     private fun machine(s: FingerSettings): TouchIntentMachine {
@@ -2259,10 +2377,10 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                 else if (curlEligible && !isEditing) {
                     curlDx += intent.dx; curlDy += intent.dy
                     val s = spread
-                    if (s != null) pageRect?.let { own ->
+                    if (s != null) { if (!s.custom) pageRect?.let { own ->
                         val other = RectF(s.partner).also { viewport.mapRect(it) }
                         bookFlip?.drag(curlDx, if (s.currentOnLeft) own else other, if (s.currentOnLeft) other else own)
-                    } else pageRect?.let { pageCurl?.drag(curlOriginX, curlOriginY, curlDx, curlDy, it) }
+                    } } else pageRect?.let { pageCurl?.drag(curlOriginX, curlOriginY, curlDx, curlDy, it) }
                 }
             is TouchIntent.Zoom -> if (strip != null) scrollStrip(strip, -intent.dy)
             else if (zoomLocked) { if (zoomedIn) transform { it.postTranslate(intent.dx, intent.dy) } }

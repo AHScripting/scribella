@@ -17,12 +17,14 @@ import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotation
 import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationTextMarkup
 import dev.ownednotes.core.InkStroke
 import dev.ownednotes.core.Notebook
+import dev.ownednotes.core.Page
 import dev.ownednotes.core.PdfAsset
 import dev.ownednotes.core.Point
 import dev.ownednotes.core.Sample
 import dev.ownednotes.core.ShapeRecognizer
 import dev.ownednotes.core.validate
 import java.io.File
+import java.security.MessageDigest
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
@@ -84,18 +86,9 @@ internal object PdfHighlights {
             if (found.isEmpty()) return@forEach
             val strokes = found.mapNotNull { item ->
                 if (highlights + penMarks >= MAX_TOTAL) { leftOut++; return@mapNotNull null }
-                val scaleX = page.width / item.pageWidth; val scaleY = page.height / item.pageHeight
-                when (val shape = item.shape) {
-                    is Mark -> {
-                        val band = RectF(shape.band.left * scaleX, shape.band.top * scaleY, shape.band.right * scaleX, shape.band.bottom * scaleY)
-                        band.intersect(0f, 0f, page.width, page.height)
-                        stroke(Mark(band, shape.vertical, shape.color))?.also { highlights++ }
-                    }
-                    is Line -> {
-                        val points = shape.points.map { Point((it.x * scaleX).coerceIn(0f, page.width), (it.y * scaleY).coerceIn(0f, page.height)) }
-                        penStroke(Line(points, shape.width * (scaleX + scaleY) / 2f, shape.color, shape.opacity))?.also { penMarks++ }
-                    }
-                } ?: run { leftOut++; null }
+                val made = convert(page, item) ?: run { leftOut++; return@mapNotNull null }
+                if (made.brush == InkStroke.HIGHLIGHTER) highlights++ else penMarks++
+                made
             }
             if (strokes.isNotEmpty()) pages[position] = page.copy(strokes = strokes)
         }
@@ -104,6 +97,102 @@ internal object PdfHighlights {
         if (runCatching { result.validate() }.isFailure) Result(notebook, 0, 0, highlights + penMarks + leftOut, reading.notCarried)
         else Result(result, highlights, penMarks, leftOut, reading.notCarried)
     }.getOrElse { Result(notebook, 0, 0, 0) }
+
+    /** One marking drawn at [page]'s own size: a highlighter stroke for a highlight, a pen stroke otherwise. */
+    private fun convert(page: Page, item: Found): InkStroke? {
+        val scaleX = page.width / item.pageWidth; val scaleY = page.height / item.pageHeight
+        return when (val shape = item.shape) {
+            is Mark -> {
+                val band = RectF(shape.band.left * scaleX, shape.band.top * scaleY, shape.band.right * scaleX, shape.band.bottom * scaleY)
+                band.intersect(0f, 0f, page.width, page.height)
+                stroke(Mark(band, shape.vertical, shape.color))
+            }
+            is Line -> {
+                val points = shape.points.map { Point((it.x * scaleX).coerceIn(0f, page.width), (it.y * scaleY).coerceIn(0f, page.height)) }
+                penStroke(Line(points, shape.width * (scaleX + scaleY) / 2f, shape.color, shape.opacity))
+            }
+        }
+    }
+
+    /**
+     * P662: what a marked-up PDF says about itself. scripts/study/pdf_study.py writes `scribella-source:<sha256>` (the PDF it
+     * marked, which is the notebook's PDF asset id) and `scribella-notebook:<id>` into the PDF's keywords.
+     */
+    data class Source(val sha256: String, val assetId: String?, val notebookId: String?, val pageCount: Int)
+
+    fun sourceOf(file: File, cache: File): Source {
+        val sha = file.inputStream().use { input ->
+            val digest = MessageDigest.getInstance("SHA-256"); val buffer = ByteArray(64 * 1024)
+            while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        }
+        return withDocument(file, cache) { document ->
+            val words = runCatching { document.documentInformation?.keywords }.getOrNull().orEmpty().split(' ', ',', ';')
+            fun tagged(name: String) = words.firstOrNull { it.startsWith("$name:") }?.substringAfter(':')?.lowercase()?.takeIf { ID.matches(it) }
+            Source(sha, tagged("scribella-source"), tagged("scribella-notebook"), document.numberOfPages)
+        }
+    }
+    private val ID = Regex("[0-9a-z-]{1,80}")
+
+    /**
+     * The PDF of [notebook] that [source] marks up: the one its keywords name, else the one it is an unchanged copy of,
+     * else the notebook's only PDF when the page counts agree. Null when none fits, or when it names another notebook.
+     */
+    fun match(cache: File, notebook: Notebook, source: Source): String? {
+        val shown = notebook.pages.mapNotNull { it.pdfBackground?.assetId }.toSet()
+        source.assetId?.takeIf { it in shown }?.let { return it }
+        source.sha256.takeIf { it in shown }?.let { return it }
+        if (source.notebookId != null && source.notebookId != notebook.id.lowercase()) return null
+        val only = shown.singleOrNull() ?: return null
+        val asset = notebook.assets.firstOrNull { it.id == only } ?: return null
+        val pages = runCatching { PdfAccess.withFile(cache, asset) { file -> withDocument(file, cache) { it.numberOfPages } } }.getOrNull()
+        return only.takeIf { pages == source.pageCount }
+    }
+
+    /** P662: strokes for the markings of a file, by page id, not yet added to anything. */
+    data class Added(val byPage: Map<String, List<InkStroke>>, val highlights: Int, val penMarks: Int, val repeated: Int, val leftOut: Int) {
+        val total get() = highlights + penMarks
+    }
+
+    /**
+     * Reads the markings of [file], a marked-up copy of the notebook PDF [assetId], for every page of [notebook] that shows it,
+     * pages with ink included. A marking already on its page (the same file added twice) is skipped and counted as repeated.
+     */
+    fun fromFile(cache: File, notebook: Notebook, file: File, assetId: String): Added {
+        val targets = notebook.pages.filter { it.pdfBackground?.assetId == assetId }
+        if (targets.isEmpty()) return Added(emptyMap(), 0, 0, 0, 0)
+        val reading = read(file, targets.map { it.pdfBackground!!.pageIndex }.toSet(), cache)
+        val byPage = mutableMapOf<String, List<InkStroke>>()
+        var highlights = 0; var penMarks = 0; var repeated = 0; var leftOut = reading.unreadable
+        targets.forEach { page ->
+            val found = reading.found[page.pdfBackground!!.pageIndex].orEmpty()
+            val room = 10_000 - page.strokes.size
+            val made = mutableListOf<InkStroke>()
+            found.forEach { item ->
+                if (highlights + penMarks >= MAX_TOTAL || made.size >= room) { leftOut++; return@forEach }
+                val stroke = convert(page, item) ?: run { leftOut++; return@forEach }
+                if (page.strokes.any { same(it, stroke) } || made.any { same(it, stroke) }) { repeated++; return@forEach }
+                made += stroke
+                if (stroke.brush == InkStroke.HIGHLIGHTER) highlights++ else penMarks++
+            }
+            if (made.isNotEmpty()) byPage[page.id] = made
+        }
+        return Added(byPage, highlights, penMarks, repeated, leftOut)
+    }
+
+    /** The same marking: same kind and colour, starting and ending within a unit of each other. */
+    private fun same(a: InkStroke, b: InkStroke): Boolean {
+        if (a.brush != b.brush || a.color != b.color || a.samples.isEmpty() || b.samples.isEmpty()) return false
+        fun near(p: Sample, q: Sample) = abs(p.x - q.x) <= 1f && abs(p.y - q.y) <= 1f
+        return near(a.samples.first(), b.samples.first()) && near(a.samples.last(), b.samples.last())
+    }
+
+    private fun <T> withDocument(file: File, cache: File, block: (PDDocument) -> T): T {
+        val workspace = File.createTempFile("pdf-highlights-", "", cache)
+        check(workspace.delete() && workspace.mkdir()) { "Cannot create PDF workspace" }
+        try { return PDDocument.load(file, MemoryUsageSetting.setupTempFileOnly().setTempDir(workspace)).use(block) }
+        finally { workspace.deleteRecursively() }
+    }
 
     private data class Found(val shape: Shape, val pageWidth: Float, val pageHeight: Float)
     private class Reading(val found: Map<Int, List<Found>>, val unreadable: Int, val notCarried: Map<Kind, Int>)

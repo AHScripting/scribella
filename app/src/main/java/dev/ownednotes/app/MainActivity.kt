@@ -706,6 +706,120 @@ class MainActivity : ComponentActivity() {
         if(granted && target==repository.session?.notebook?.id && libraryScreen==null) {if(!app.audio.start())message(app.audio.status)}
         else if(!granted) message("Microphone permission is needed only to record audio")
     }
+    // P662: appended after recordPermission so the earlier launcher keys stay stable.
+    private val addHighlights = registerForActivityResult(ImportChooser.One()) { uri ->
+        val notebookId = highlightsTarget; highlightsTarget = null
+        if (uri == null || notebookId == null) return@registerForActivityResult
+        repository.setFileBusy(true)
+        app.io.execute {
+            val copied = runCatching {
+                val file = java.io.File.createTempFile("add-highlights-", ".pdf", app.cacheDir)
+                (app.contentResolver.openInputStream(uri) ?: error("Cannot open the PDF")).use { input -> file.outputStream().use { input.copyTo(it) } }
+                file
+            }
+            app.main.post {
+                repository.setFileBusy(false)
+                copied.fold({ addHighlightsFrom(notebookId, it, keep = false) { report -> message(report.text) } }, { message("Couldn't open the PDF: ${it.message}") })
+            }
+        }
+    }
+    private var highlightsTarget: String? = null
+    private var highlightsRunning = false
+
+    /** P662: Study → "Add highlights from PDF…": a marked-up copy of this notebook's PDF puts its highlights into the notebook. */
+    fun launchAddHighlights(): Boolean {
+        val note = repository.session?.notebook ?: return false
+        if (ink.isEditing || highlightsRunning || highlightsTarget != null || repository.readOnly || !repository.canChangeNotebook || repository.busy || repository.fileBusy) return false
+        if (note.pages.none { it.pdfBackground != null }) return false
+        highlightsTarget = note.id
+        return runCatching { chooseSource(addHighlights, "Add highlights from", "pdf", arrayOf("application/pdf")) { highlightsTarget = null }; true }.getOrElse {
+            highlightsTarget = null; message("Cannot choose PDF: ${it.message}"); false
+        }
+    }
+
+    /** What adding one file's highlights did: for the message, and for the inbox receipt. */
+    internal data class HighlightsReport(val result: String, val added: Int, val pages: Int, val repeated: Int, val leftOut: Int, val text: String)
+
+    /**
+     * P662: reads the markings in [file] and adds them to the open notebook [notebookId] as one Undo step, as ordinary
+     * highlighter (or pen) strokes on the pages that show the PDF it marks. [file] is deleted afterwards unless [keep].
+     */
+    private fun addHighlightsFrom(notebookId: String, file: java.io.File, keep: Boolean, done: (HighlightsReport) -> Unit) {
+        fun finish(report: HighlightsReport) { highlightsRunning = false; if (!keep) file.delete(); done(report); refresh() }
+        val note = repository.session?.notebook
+        if (note?.id != notebookId || highlightsRunning) { if (!keep) file.delete(); done(HighlightsReport("closed", 0, 0, 0, 0, "The notebook was closed, so nothing was added")); return }
+        highlightsRunning = true
+        repository.setFileBusy(true)
+        app.io.execute {
+            val read = runCatching {
+                val source = PdfHighlights.sourceOf(file, app.cacheDir)
+                PdfHighlights.match(app.cacheDir, note, source)?.let { PdfHighlights.fromFile(app.cacheDir, note, file, it) }
+            }
+            app.main.post {
+                repository.setFileBusy(false)
+                val found = read.getOrElse { finish(HighlightsReport("failed", 0, 0, 0, 0, "Couldn't read highlights from this PDF: ${it.message}")); return@post }
+                    ?: run { finish(HighlightsReport("no-match", 0, 0, 0, 0, "This PDF isn't a copy of this notebook's PDF, so nothing was added")); return@post }
+                val skipped = if (found.leftOut > 0) " · ${found.leftOut} couldn't be read" else ""
+                val repeated = if (found.repeated > 0) " · ${found.repeated} already there" else ""
+                if (found.total == 0) {
+                    val text = if (found.repeated > 0) "These highlights are already in the notebook" else "No highlights found in this PDF"
+                    finish(HighlightsReport("nothing", 0, 0, found.repeated, found.leftOut, text + skipped)); return@post
+                }
+                var added = 0
+                if (repository.session?.notebook?.id == notebookId) repository.edit { session -> added = session.addStrokes(found.byPage); added > 0 }
+                if (added == 0) { finish(HighlightsReport("busy", 0, 0, found.repeated, found.leftOut, "The notebook is busy or read-only, so nothing was added")); return@post }
+                val what = if (found.penMarks == 0) (if (added == 1) "highlight" else "highlights") else (if (added == 1) "marking" else "markings")
+                val pages = found.byPage.size
+                finish(HighlightsReport("added", added, pages, found.repeated, found.leftOut,
+                    "Added $added $what on $pages ${if (pages == 1) "page" else "pages"}$repeated$skipped. Undo removes them."))
+            }
+        }
+    }
+
+    /**
+     * P662 (personal tools only): marked-up PDFs an AI conversation put on the device with adb wait in
+     * Android/data/<app id>/files/highlights-inbox/ until the notebook they name is open here. Each one is added like
+     * "Add highlights from PDF…", then moved to done/ (or failed/) beside a .json receipt the conversation can read back.
+     */
+    private val inboxSkipped = mutableSetOf<String>()
+    private var inboxChecking = false
+    private fun checkHighlightsInbox() {
+        if (!personalTools || inboxChecking || highlightsRunning || ink.isEditing || libraryScreen != null) return
+        if (repository.busy || repository.fileBusy || repository.readOnly || !repository.canChangeNotebook) return
+        val note = repository.session?.notebook ?: return
+        val inbox = getExternalFilesDir("highlights-inbox") ?: return
+        val waiting = inbox.listFiles { f -> f.isFile && f.name.endsWith(".pdf", ignoreCase = true) }?.sortedBy { it.name }.orEmpty()
+            .filter { "${note.id}/${it.name}/${it.length()}/${it.lastModified()}" !in inboxSkipped }
+        if (waiting.isEmpty()) return
+        inboxChecking = true
+        app.io.execute {
+            val mine = waiting.firstOrNull { file ->
+                val source = runCatching { PdfHighlights.sourceOf(file, app.cacheDir) }.getOrNull()
+                val fits = source != null && (source.notebookId == note.id.lowercase() ||
+                    source.assetId != null && note.pages.any { it.pdfBackground?.assetId == source.assetId })
+                if (!fits) app.main.post { inboxSkipped += "${note.id}/${file.name}/${file.length()}/${file.lastModified()}" }
+                fits
+            }
+            app.main.post {
+                inboxChecking = false
+                if (mine == null || repository.session?.notebook?.id != note.id) return@post
+                addHighlightsFrom(note.id, mine, keep = true) { report ->
+                    message(report.text)
+                    val folder = java.io.File(inbox, if (report.result == "failed") "failed" else "done").apply { mkdirs() }
+                    val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT).format(java.util.Date())
+                    val base = mine.name.removeSuffix(".pdf").removeSuffix(".PDF") + "-" + stamp
+                    val moved = mine.renameTo(java.io.File(folder, "$base.pdf"))
+                    if (!moved) inboxSkipped += "${note.id}/${mine.name}/${mine.length()}/${mine.lastModified()}"
+                    runCatching {
+                        java.io.File(folder, "$base.json").writeText(org.json.JSONObject().apply {
+                            put("file", mine.name); put("notebook", note.id); put("result", report.result); put("added", report.added)
+                            put("pages", report.pages); put("repeated", report.repeated); put("leftOut", report.leftOut); put("message", report.text)
+                        }.toString(1))
+                    }
+                }
+            }
+        }
+    }
     private var audioPermissionNotebook:String?=null
     internal fun recordAudio() {
         if(app.audio.active){app.audio.stop();return}
@@ -874,7 +988,7 @@ class MainActivity : ComponentActivity() {
                     val result=runCatching {PdfSupport.importSelected(app.cacheDir,prepared,sourceTitle,indices)}
                     app.main.post {
                         repository.setFileBusy(false)
-                        result.onSuccess {source->
+                        result.onSuccess {chosen->pdfPlacement(chosen,target,sourceTitle) {source,note->
                             runCatching {
                                 if(selected!=null)selected(source)
                                 else if(target==null) {
@@ -888,14 +1002,47 @@ class MainActivity : ComponentActivity() {
                                     if(!isDestroyed && ::frame.isInitialized)frame.revealPage(ids.first())
                                     message("Inserted ${ids.size} of ${prepared.total} PDF pages")
                                 }
+                                note?.let(::message)
                             }.onFailure {message("PDF import failed: ${it.message}")}
-                        }.onFailure {message("PDF import failed: ${it.message}")}
+                        }}.onFailure {message("PDF import failed: ${it.message}")}
                     }
                 }
             }
         }).show().also {pdfSelectionDialog=it}
     }
     internal var pdfSelectionDialog: PdfPagePicker? = null
+    internal var pdfFitSheet: PdfFitSheet? = null
+
+    /**
+     * P671 (board 6): when the chosen PDF pages differ in shape from the paper they land on, asks once (or uses the
+     * remembered answer) whether to fit them to the paper or keep their size, then hands [done] the notebook to import and
+     * a note when fitting could not be done (a locked or turned PDF keeps its size). Closing the sheet imports nothing.
+     */
+    private fun pdfPlacement(source: Notebook, target: PdfInsertTarget?, title: String, done: (Notebook, String?) -> Unit) {
+        val paper = PdfFit.paper(this, target)
+        val differing = PdfFit.differing(source, paper)
+        if (differing.isEmpty() || isDestroyed) { done(source, null); return }
+        val preferences = getSharedPreferences(app.preferencesName, 0)
+        fun place(choice: PdfFit.Choice) {
+            if (choice == PdfFit.Choice.KEEP) { done(source, null); return }
+            repository.setFileBusy(true)
+            app.io.execute {
+                val fitted = runCatching { PdfFit.fitted(app, source, paper) }
+                app.main.post {
+                    repository.setFileBusy(false)
+                    if (isDestroyed) return@post
+                    fitted.onSuccess { done(it, null) }.onFailure { done(source, "Kept the PDF's size: ${it.message}") }
+                }
+            }
+        }
+        PdfFit.remembered(preferences)?.let { place(it); return }
+        val common = source.pages.filter { it.id in differing }.groupingBy { it.width to it.height }.eachCount().maxBy { it.value }.key
+        val name = if (title == "Imported PDF") title else "$title.pdf"
+        pdfFitSheet = PdfFitSheet(this, name, source.pages.size, common, paper, target != null) { choice, remember ->
+            if (remember) PdfFit.remember(preferences, choice)
+            place(choice)
+        }.show()
+    }
 
     fun pdfSourcesDialog() {
         val note = repository.session?.notebook ?: return
@@ -1651,6 +1798,50 @@ class MainActivity : ComponentActivity() {
             if (target != current && !repository.movePage(snapshot, pageId, target)) message("Page changed; reopen Move page")
         }.show()
     }
+    /**
+     * P667 (the user's item 6): picks the page shown beside this one in the landscape two-page view. Choosing this page
+     * goes back to pairing by page number. Kept in the app's settings, so the notebook file does not change.
+     */
+    internal fun showBesideDialog(): PageChooser? {
+        val snapshot = repository.session?.notebook ?: return null
+        val pageId = repository.selectedPageId ?: return null
+        val current = snapshot.pages.indexOfFirst { it.id == pageId }
+        if (current < 0 || snapshot.pages.size < 2) return null
+        val mate = ink.shownBeside(pageId)
+        val tiles = snapshot.pages.mapIndexed { i, page ->
+            when {
+                i == current -> PageChooser.Tile(page.id, "Page ${i + 1}, here now: pair by number", PageChooser.Mark.HERE)
+                page.id == mate -> PageChooser.Tile(page.id, "Page ${i + 1}, beside now", PageChooser.Mark.NONE)
+                else -> PageChooser.Tile(page.id, "Page ${i + 1}", PageChooser.Mark.NONE)
+            }
+        }
+        return PageChooser(this, "Show beside this page", snapshot, tiles, mate?.let { id -> snapshot.pages.indexOfFirst { it.id == id } }?.takeIf { it >= 0 } ?: current) { target ->
+            val chosen = snapshot.pages.getOrNull(target) ?: return@PageChooser
+            ink.showBeside(pageId, if (chosen.id == pageId) null else chosen.id)
+            message(if (chosen.id == pageId) "Pages pair by number again" else "Page ${target + 1} shows beside this page in landscape")
+        }.show()
+    }
+    /**
+     * P670 (board 15): chooses the page shown in the peek, a floating window over the page being written on. [peeked] is the
+     * page in the peek now, marked "in the peek"; the page open now is offered too.
+     */
+    internal fun peekDialog(peeked: String? = null): PageChooser? {
+        val snapshot = repository.session?.notebook ?: return null
+        val pageId = repository.selectedPageId ?: return null
+        val current = snapshot.pages.indexOfFirst { it.id == pageId }
+        if (current < 0) return null
+        val tiles = snapshot.pages.mapIndexed { i, page ->
+            when (page.id) {
+                peeked -> PageChooser.Tile(page.id, "Page ${i + 1}, in the peek now", PageChooser.Mark.HERE)
+                pageId -> PageChooser.Tile(page.id, "Page ${i + 1}, open now", PageChooser.Mark.NONE)
+                else -> PageChooser.Tile(page.id, "Page ${i + 1}", PageChooser.Mark.NONE)
+            }
+        }
+        val start = peeked?.let { id -> snapshot.pages.indexOfFirst { it.id == id } }?.takeIf { it >= 0 } ?: (if (current + 1 < snapshot.pages.size) current + 1 else maxOf(0, current - 1))
+        return PageChooser(this, "Peek at a page", snapshot, tiles, start) { target ->
+            snapshot.pages.getOrNull(target)?.let { frame.peek.open(it.id) }
+        }.show()
+    }
     /** P099 (F070): copies, or with [move] moves, this page to the end of another notebook. */
     internal fun pageToNotebookDialog(move: Boolean): NotebookChooser? {
         if (move && repository.readOnly) return null
@@ -2037,6 +2228,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         syncCompanionPane()
+        checkHighlightsInbox()
         val enabled = repository.session != null && !repository.fileBusy && !repository.busy && libraryScreen == null && !frame.settingsOpen && !frame.organizerOpen && scanScreen == null
         val active = ink
         primaryInk.inputEnabled = enabled && active === primaryInk
@@ -2092,7 +2284,7 @@ class MainActivity : ComponentActivity() {
             .setMessage("Notebooks in “${LibraryBackup.folderName(this@MainActivity)}” in ${LibraryBackup.folderLabel(this)} that are not in your library or its trash are added back. " +
                 "Nothing in your library is replaced, and the backup folder is not changed.")
             .setPositiveButton("Restore") { _, _ ->
-                if (!app.repository.restoreFromBackup({ LibraryBackup.TreeFolder(app, tree) }) { message(repository.libraryMessage ?: "Restore finished.") })
+                if (!app.repository.restoreFromBackup({ FolderProcess.backupFolder(app, tree) }) { message(repository.libraryMessage ?: "Restore finished.") })
                     message("Restore is not available while the notebook is busy.")
             }
             .setNegativeButton("Cancel", null)

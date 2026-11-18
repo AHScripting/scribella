@@ -10,15 +10,21 @@ package dev.ownednotes.app
  * letting go without moving still opens its menu. Move to folder… in the menu is unchanged.
  * P607: the page strip is a floating Pages card (the design canvas's Pages-Panel board). A page's menu (duplicate, move,
  * delete) opens by holding the page and letting go where it was; the ⋮ under each page is gone. A New page tile ends the strip.
+ * P667: "Show beside…" (Page actions, after Move page…) picks the page shown next to this one in the landscape two-page view;
+ * kept in the app's settings per notebook, never in the notebook file. Choosing this page again goes back to pairing by number.
+ * P670 feature record (board 15): Peek. Task: see another page of this notebook while writing. Scope: the open notebook.
+ * Home: Page actions, "Peek at a page…" after Show beside…; a held page in the Pages panel offers "Peek". Frequency:
+ * occasional. Destructive: none; a floating window that moves, resizes, folds to an edge tab and closes; its page, place
+ * and size are kept per notebook in the app's settings, never in the notebook file.
  */
 internal enum class EditorMenu(val label: String) { INSERT("Insert"), CAPTURE("Capture and files"), STUDY("Study"), NAVIGATE("Search and navigation"), PAGES("Page actions"), EXPORT("Export"), NOTEBOOK("Notebook") }
 internal enum class EditorCommand(val label: String, val home: EditorMenu) {
     PDF_SELECT_TEXT("Select PDF text…", EditorMenu.STUDY),
     PASTE("Paste", EditorMenu.INSERT), BLANK("Blank page after this page", EditorMenu.INSERT), TEXT("Text box…", EditorMenu.INSERT), STICKY_NOTE("Sticky note…", EditorMenu.INSERT), TABLE("Table…", EditorMenu.INSERT), STICKERS("Stickers…", EditorMenu.INSERT), STAMPS("Stamps…", EditorMenu.INSERT),
     VIDEO("Video…", EditorMenu.CAPTURE), SCAN("Scan document…", EditorMenu.CAPTURE), PHOTO("Photo…", EditorMenu.CAPTURE), PDF_PAGES("PDF pages…", EditorMenu.CAPTURE), IMAGE_PAGE("Image page…", EditorMenu.CAPTURE), ATTACH("Attach file…", EditorMenu.CAPTURE), PDF_SOURCES("Manage PDF sources…", EditorMenu.CAPTURE),
-    LASER("Laser pointer", EditorMenu.STUDY), STUDY_PANEL("Study panel…", EditorMenu.STUDY), HANDWRITING("Read handwriting…", EditorMenu.STUDY), PAGE_TEXT("Copy printed page text (OCR)…", EditorMenu.STUDY), TEXT_MARK("Highlight printed text…", EditorMenu.STUDY), PREPARE_STUDY("Prepare study copy for PC", EditorMenu.STUDY), INK_EXPORT("Export handwriting only…", EditorMenu.STUDY), CLEAR_TRANSCRIPT("Remove saved handwriting text…", EditorMenu.STUDY), TAPE("Reveal / cover study tape", EditorMenu.STUDY),
+    LASER("Laser pointer", EditorMenu.STUDY), STUDY_PANEL("Study panel…", EditorMenu.STUDY), HANDWRITING("Read handwriting…", EditorMenu.STUDY), PAGE_TEXT("Copy printed page text (OCR)…", EditorMenu.STUDY), TEXT_MARK("Highlight printed text…", EditorMenu.STUDY), PDF_HIGHLIGHTS("Add highlights from PDF…", EditorMenu.STUDY), PREPARE_STUDY("Prepare study copy for PC", EditorMenu.STUDY), INK_EXPORT("Export handwriting only…", EditorMenu.STUDY), CLEAR_TRANSCRIPT("Remove saved handwriting text…", EditorMenu.STUDY), TAPE("Reveal / cover study tape", EditorMenu.STUDY),
     SEARCH("Search text…", EditorMenu.NAVIGATE), BOOKMARKS("Bookmarks…", EditorMenu.NAVIGATE), HISTORY("Navigation history…", EditorMenu.NAVIGATE), ORGANIZER("All pages…", EditorMenu.NAVIGATE),
-    DUPLICATE_PAGE("Duplicate page", EditorMenu.PAGES), MORE_ROOM("More room…", EditorMenu.PAGES), BOOKMARK("Bookmark page…", EditorMenu.PAGES), MOVE_PAGE("Move page…", EditorMenu.PAGES), COPY_PAGE("Copy page to notebook…", EditorMenu.PAGES), TRANSFER_PAGE("Move page to notebook…", EditorMenu.PAGES), LAYERS("Layers…", EditorMenu.PAGES), UNLOCK("Unlock page objects", EditorMenu.PAGES), CLEAR_INK("Clear page ink…", EditorMenu.PAGES), DELETE_PAGE("Delete page…", EditorMenu.PAGES),
+    DUPLICATE_PAGE("Duplicate page", EditorMenu.PAGES), MORE_ROOM("More room…", EditorMenu.PAGES), BOOKMARK("Bookmark page…", EditorMenu.PAGES), MOVE_PAGE("Move page…", EditorMenu.PAGES), SHOW_BESIDE("Show beside…", EditorMenu.PAGES), PEEK("Peek at a page…", EditorMenu.PAGES), COPY_PAGE("Copy page to notebook…", EditorMenu.PAGES), TRANSFER_PAGE("Move page to notebook…", EditorMenu.PAGES), LAYERS("Layers…", EditorMenu.PAGES), UNLOCK("Unlock page objects", EditorMenu.PAGES), CLEAR_INK("Clear page ink…", EditorMenu.PAGES), DELETE_PAGE("Delete page…", EditorMenu.PAGES),
     NATIVE_EXPORT("Notebook file…", EditorMenu.EXPORT), PDF_EXPORT("PDF copy…", EditorMenu.EXPORT), PNG_EXPORT("Current page image…", EditorMenu.EXPORT), TEXT_EXPORT("Text or Markdown…", EditorMenu.EXPORT),
     READ_ONLY("Read-only mode", EditorMenu.NOTEBOOK), RENAME("Rename notebook…", EditorMenu.NOTEBOOK), MERGE("Merge another notebook…", EditorMenu.NOTEBOOK),
     // P530 (F081/F082) task: work in two notebooks at once; scope: two open notebooks; home: the open notebook's menu; frequency: sometimes per session;
@@ -85,6 +91,13 @@ internal enum class PageStripAction(val label: String) { SELECT("Select"), DONE(
  * fold button at the palette's end; the pin at the strip's right end brings the full toolbar back. Frequency: occasional
  * (it stays as chosen). Destructive: none. See MENU-AND-VISUAL-AUDIT.md.
  *
+ * P662 feature record: Add highlights from PDF (PDF_HIGHLIGHTS). Task: put the highlights of a marked-up copy of this
+ * notebook's PDF (made on the PC by an AI conversation, docs/AI-READ-AND-HIGHLIGHT-GUIDE.md) into the notebook itself.
+ * Scope: every page that shows that PDF. Home: the Study group of the Search popover, after "Highlight printed text…",
+ * and the command palette; public builds too. Frequency: occasional. Destructive: adds highlighter strokes as one Undo
+ * step, never removes anything; a repeated file adds nothing. Personal builds also take files pushed by adb into
+ * Android/data/<app id>/files/highlights-inbox/ while their notebook is open. See MENU-AND-VISUAL-AUDIT.md.
+ *
  * P625 feature record: the + menu. Task: add a pen of a chosen kind, or a chisel or fine highlighter. Scope: the tool bar
  * and the slim bar. Home: the + after the pens and after the highlighters opens it. Frequency: occasional. Destructive: none.
  *
@@ -99,6 +112,16 @@ internal enum class PageStripAction(val label: String) { SELECT("Select"), DONE(
  * P631: a palette that scrolls keeps the fold button still at its end, outside the scroll. P632: where the slim bar
  * cannot fit (a phone, or a tablet held upright with many pens and highlighters) the fold button is hidden and the full
  * toolbar shows; a slim bar chosen comes back by itself once it fits again. Nothing else moved.
+ *
+ * P669 (board 14): the slim bar carries every full-toolbar button (page buttons and the page number, Paint brush, Page
+ * and paper, Insert, Capture and files, Export, zoom). The notebook name is a button after Back opening a card with the
+ * name, the page and Rename. Too narrow, the least used groups wait behind » ("More buttons"), which opens them in a
+ * small bar. Scope: the editor. Frequency: frequent. Destructive: none. An S Pen hover names a button.
+ * P677 (board 14 redrawn): the page buttons stand in the middle of the slim bar, after the colours; Show pages is its own
+ * button beside the pin (where the pages panel opens, its icon divided on that side) and never waits behind ». The name
+ * button opens a small pill with the name and a round pencil button (Edit name) that selects it for editing and turns
+ * into a check (Keep the name); Done or a tap outside keeps it too. The card's page count and Rename button are gone
+ * (Rename stays in the notebook menu). Nothing else moved.
  */
 
 /** F054 / P372 menu placement: selected closed shapes use the existing Style… pop-out for

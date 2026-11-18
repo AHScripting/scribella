@@ -22,6 +22,42 @@ object BookSpread {
     fun partner(index: Int, count: Int): Int? = (if (index % 2 == 0) index + 1 else index - 1).takeIf { it in 0 until count }
 
     /**
+     * P677: the notebook's spreads in reading order, as page indexes (one or two each). Pages pair 1-2, 3-4, ... until
+     * something breaks the rhythm, and the pages after it pair on from there: a pair the user chose ([chosen]: the page it
+     * was chosen from, then the page shown beside it) stays together where the first of those lies, the earlier page on
+     * the left; landscape paper shows alone. Pairing strictly by page number left the pages around a chosen pair alone
+     * and a turn back from it landed on the pair again.
+     */
+    fun groups(pages: List<Page>, chosen: List<Pair<String, String>>): List<IntArray> {
+        val at = HashMap<String, Int>(pages.size * 2); pages.forEachIndexed { i, p -> at[p.id] = i }
+        val mate = HashMap<Int, Int>(); val anchor = HashSet<Int>()
+        chosen.forEach { (from, beside) ->
+            val i = at[from] ?: return@forEach; val j = at[beside] ?: return@forEach
+            if (i != j && i !in mate && j !in mate) { mate[i] = j; mate[j] = i; anchor += i }
+        }
+        fun wide(i: Int) = pages[i].width > pages[i].height
+        val placed = BooleanArray(pages.size); val out = ArrayList<IntArray>()
+        for (i in pages.indices) {
+            if (placed[i]) continue
+            val m = mate[i]
+            val group = when {
+                m != null && i in anchor -> intArrayOf(minOf(i, m), maxOf(i, m))
+                m != null -> continue // shown with the page it was chosen from, where that page lies
+                wide(i) -> intArrayOf(i)
+                i + 1 < pages.size && !placed[i + 1] && i + 1 !in mate && !wide(i + 1) -> intArrayOf(i, i + 1)
+                else -> intArrayOf(i)
+            }
+            group.forEach { placed[it] = true }; out += group
+        }
+        return out
+    }
+    /** Whether spread [g] of [groups] shows as two slots: a pair, or a portrait last page with the right slot empty. */
+    fun isSpread(groups: List<IntArray>, g: Int, pages: List<Page>): Boolean {
+        val group = groups.getOrNull(g) ?: return false
+        return group.size == 2 || (group[0] == pages.lastIndex && pages[group[0]].let { it.width <= it.height })
+    }
+
+    /**
      * Screen slots for a spread: both pages share one height and meet at the spine. Without a right page the right
      * slot keeps the left page's shape, so the left page does not jump when the last page of an odd notebook is reached.
      */
@@ -105,12 +141,15 @@ class BookFlipView(
     private val union = RectF()
     init { visibility = INVISIBLE; importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }
 
+    /** P677: the notebook's spreads ([BookSpread.groups]); the editor adds the pairs the user chose. */
+    var spreads: (Notebook) -> List<IntArray> = { BookSpread.groups(it.pages, emptyList()) }
     /** The pages a turn from the current spread can show: previous, current and next spreads. */
     private fun window(notebook: Notebook): List<Page> {
         val index = notebook.pages.indexOfFirst { it.id == repository.selectedPageId }
         if (index < 0) return emptyList()
-        val start = BookSpread.start(index)
-        return (start - 2..start + 3).mapNotNull { notebook.pages.getOrNull(it) }
+        val groups = spreads(notebook); val g = groups.indexOfFirst { index in it }
+        if (g < 0) return emptyList()
+        return (g - 1..g + 1).flatMap { groups.getOrNull(it)?.toList().orEmpty() }.map { notebook.pages[it] }
     }
 
     /** Keep the neighbouring spreads warm so a gesture frame never waits on PDF or ink rendering. */
@@ -152,23 +191,26 @@ class BookFlipView(
         val pages = notebook.pages
         val index = pages.indexOfFirst { it.id == repository.selectedPageId }
         val page = pages.getOrNull(index) ?: return null
-        val start = BookSpread.start(index)
+        val groups = spreads(notebook); val g = groups.indexOfFirst { index in it }
+        val here = groups.getOrNull(g) ?: return null
         fun preview(i: Int) = pages.getOrNull(i)?.let { thumbnails.cached(notebook, it.id, PREVIEW_WIDTH) }
+        // P677: only between two spreads; a page shown alone turns without the sheet.
         return if (direction == TurnDirection.NEXT) {
-            val target = pages.getOrNull(start + 2) ?: return null
+            val next = groups.getOrNull(g + 1) ?: return null
+            if (here.size < 2 || !BookSpread.isSpread(groups, g + 1, pages)) return null
             // The current right page turns over; the next spread's left page is printed on its back.
-            Flip(notebook, page, target, start + 2 - index, direction,
-                staticLeft = preview(start) ?: return null,
-                staticRight = if (start + 3 < pages.size) preview(start + 3) ?: return null else null,
-                leftFace = preview(start + 2) ?: return null, rightFace = preview(start + 1) ?: return null,
+            Flip(notebook, page, pages[next[0]], next[0] - index, direction,
+                staticLeft = preview(here[0]) ?: return null,
+                staticRight = if (next.size > 1) preview(next[1]) ?: return null else null,
+                leftFace = preview(next[0]) ?: return null, rightFace = preview(here[1]) ?: return null,
                 left = RectF(left), right = RectF(right))
         } else {
-            if (start < 2) return null
-            val target = pages[start - 1]
-            Flip(notebook, page, target, start - 1 - index, direction,
-                staticLeft = preview(start - 2) ?: return null,
-                staticRight = if (start + 1 < pages.size) preview(start + 1) ?: return null else null,
-                leftFace = preview(start) ?: return null, rightFace = preview(start - 1) ?: return null,
+            val previous = groups.getOrNull(g - 1) ?: return null
+            if (previous.size < 2) return null
+            Flip(notebook, page, pages[previous[1]], previous[1] - index, direction,
+                staticLeft = preview(previous[0]) ?: return null,
+                staticRight = if (here.size > 1) preview(here[1]) ?: return null else null,
+                leftFace = preview(here[0]) ?: return null, rightFace = preview(previous[1]) ?: return null,
                 left = RectF(left), right = RectF(right))
         }
     }

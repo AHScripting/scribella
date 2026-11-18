@@ -227,7 +227,7 @@ object LibraryBackup {
         val tree = folderUri(app) ?: return done(null)
         val previous = readState(app)
         app.io.execute {
-            val outcome = runCatching { app.afterQueuedSaves(); run(File(app.storageRoot, "notebooks"), TreeFolder(app, tree), titles, previous) }
+            val outcome = runCatching { app.afterQueuedSaves(); run(File(app.storageRoot, "notebooks"), FolderProcess.backupFolder(app, tree), titles, previous) }
             val text = outcome.fold({ result ->
                 // Trashed notebooks stay in the state, so their backups are never re-copied or removed.
                 preferences(app).edit()

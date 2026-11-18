@@ -43,12 +43,30 @@ import kotlin.math.abs
  * A finger (or a hovering S Pen) can slide along the bar: the slot under it lights up, a pen shows its faded tip under
  * the bar ([onOver], drawn by [SlimPeek]) and letting go takes it. Holding a pen offers to remove it, lit while held.
  * Each slot is its own view with a TalkBack name, so TalkBack and tests reach them as buttons.
+ *
+ * P669 (board 14, "Slim bar, every button", with the user's change of 17 November): every button of the full toolbar is
+ * here at the same size. Slots with a [Slot.fold] rank wait behind the » slot (fold -1) when the bar is short of room, the
+ * lowest rank first, and [waitingGroups] lists them for the small bar » opens; nothing shrinks. [Kind.PAGE] is the page
+ * number pill. A hovering S Pen (0.4 s) or a finger hold names the button under it through [onTip].
+ *
+ * P677 (the user's 18 November note): a run of [Slot.centred] slots (the page buttons) moves toward the middle of the bar
+ * as far as the room left over allows, and the slots after it then stand against the end list.
  */
 class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context) {
-    enum class Kind { ACTION, NAME, PEN, ADD, TOOL, COLOUR, PIN, DIVIDER, GAP }
+    enum class Kind { ACTION, NAME, PAGE, PEN, ADD, TOOL, COLOUR, PIN, DIVIDER, GAP }
 
     /** One place on the bar. [path] is a 24-unit SVG icon; pens carry [style] (and [marker] for highlighters). */
-    inner class Slot(val kind: Kind, private val widthDp: Float = 0f, val label: String = "", private val path: String? = null) : View(context) {
+    inner class Slot(val kind: Kind, val widthDp: Float = 0f, val label: String = "", val path: String? = null) : View(context) {
+        /** P669: 0 never waits behind »; 1, 2, … wait behind it in that order when the bar is short of room; -1 is » itself. */
+        var fold = 0
+        /** P669: the name a hover or a hold shows, when not [label] (the notebook's name on the name button). */
+        var tip: String? = null
+        /** P669: waiting behind » (laid out with no width, not drawn). */
+        internal var waiting = false
+        /** P669: an area holding this slot has no well (Back and the name button). */
+        var bare = false
+        /** P677: one of the run laid out toward the middle of the bar (the page buttons). */
+        var centred = false
         var style: PenStyle? = null; set(value) { if (field != value) { field = value; invalidate() } }
         var marker = false; set(value) { if (field != value) { field = value; invalidate() } }
         var chosen = false; set(value) { if (field != value) { field = value; invalidate(); thumbSoon() } }
@@ -64,12 +82,14 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         internal fun natural(): Int = when (kind) {
             Kind.NAME -> (namePaint.measureText(text.orEmpty()) + context.dp(12f)).toInt().coerceAtMost(context.dpi(NAME_MAX))
             Kind.DIVIDER, Kind.GAP -> 0
+            Kind.PAGE -> context.dpi(widthDp.takeIf { it > 0f } ?: PAGE_W)
             else -> context.dpi(widthDp)
         }
 
         override fun setEnabled(enabled: Boolean) { if (enabled != isEnabled) { super.setEnabled(enabled); invalidate() } }
 
         override fun onDraw(canvas: Canvas) {
+            if (waiting) return
             // During a stroke or a save the bar keeps its look, as the full toolbar does; taps wait for the real state.
             val on = isEnabled || holding
             val off = if (night) Glass.OFF_NIGHT else Glass.OFF
@@ -94,6 +114,14 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
                     namePaint.color = if (on) Glass.text(night) else off
                     val shown = TextUtils.ellipsize(text.orEmpty(), namePaint, width - context.dp(8f), TextUtils.TruncateAt.END).toString()
                     canvas.drawText(shown, context.dp(4f), height / 2f - (namePaint.descent() + namePaint.ascent()) / 2, namePaint)
+                }
+                Kind.PAGE -> {
+                    paint.style = Paint.Style.FILL; paint.color = if (night) 0x1affffff else 0x121d2433
+                    box.set(context.dp(2f), context.dp(3f), width - context.dp(2f), height - context.dp(3f))
+                    canvas.drawRoundRect(box, box.height() / 2, box.height() / 2, paint)
+                    pagePaint.color = if (on) Glass.text(night) else off
+                    val shown = TextUtils.ellipsize(text.orEmpty(), pagePaint, width - context.dp(6f), TextUtils.TruncateAt.END).toString()
+                    canvas.drawText(shown, width / 2f, height / 2f - (pagePaint.descent() + pagePaint.ascent()) / 2, pagePaint)
                 }
                 Kind.PEN -> drawPen(canvas, on)
                 Kind.COLOUR -> colour?.let { drawDot(canvas, it, on) }
@@ -121,18 +149,20 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
             paint.color = ink; canvas.drawPath(p, paint)
             canvas.restore()
         }
-        /** The tool lying at the board's slant (52°, tip down and to the left) in its own ink. */
+        /**
+         * P668 (board 13, look A, the user's choice of 17 November): the tool stands tip up in a tray, as on the full
+         * toolbar, in its own ink; the barrel ends at the slot's foot and the tool in hand rises a little.
+         */
         private fun drawPen(canvas: Canvas, on: Boolean) {
             val s = style ?: return
             val tool = if (marker) ToolArt.Tool.HIGHLIGHTER else ToolArt.of(s.kind)
             val ink = if (marker) ToolArt.mix(s.color.toInt(), Tokens.INK, .1f) else s.color.toInt()
             val count = canvas.save()
             if (!on) canvas.saveLayerAlpha(0f, 0f, width.toFloat(), height.toFloat(), 90)
-            // The board's 164 x 128 view of a 200-unit pen fits a 26 x 24 box.
-            val scale = minOf(context.dp(26f) / 164f, context.dp(24f) / 128f)
-            canvas.translate(width / 2f, height / 2f); canvas.scale(scale, scale); canvas.rotate(232f)
-            canvas.translate(-ToolArt.WIDTH / 2, -PEN_LENGTH / 2)
-            ToolArt.draw(canvas, tool, ink, PEN_LENGTH, fine = marker && s.width <= ToolArt.FINE_HIGHLIGHTER)
+            canvas.clipRect(0f, 0f, width.toFloat(), height.toFloat())
+            val scale = context.dp(12f) / ToolArt.WIDTH
+            canvas.translate(width / 2f - ToolArt.WIDTH / 2 * scale, context.dp(if (chosen) 1.5f else 4f)); canvas.scale(scale, scale)
+            ToolArt.draw(canvas, tool, ink, ToolArt.PALETTE_LENGTH, fine = marker && s.width <= ToolArt.FINE_HIGHLIGHTER)
             canvas.restoreToCount(count)
         }
         private fun drawDot(canvas: Canvas, color: Int, on: Boolean) {
@@ -153,6 +183,7 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
     private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val box = RectF()
     private val namePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = context.dp(12.5f); typeface = Tokens.SANS_SEMIBOLD }
+    private val pagePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = context.dp(11.5f); typeface = Tokens.SANS_SEMIBOLD; textAlign = Paint.Align.CENTER }
     // Board 12's colours: the bar frosted white by day and graphite by night, the wells a faint tint of ink.
     private val barFill = if (night) 0xf52a2f3a.toInt() else 0xf5fafbfd.toInt()
     private val barEdge = if (night) 0x1affffff else 0x141d2433
@@ -165,7 +196,7 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
     /** One area of the bar: the slots it holds and its well; back with the name, and the pin, have no well. */
     private class Area(val slots: List<Slot>) {
         val pin = slots.any { it.kind == Kind.PIN }
-        val plain = pin || slots.any { it.kind == Kind.NAME }
+        val plain = pin || slots.any { it.kind == Kind.NAME || it.bare }
         val rect = RectF()
     }
     private var areas: List<Area> = emptyList()
@@ -175,7 +206,20 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
     private var held = false
     /** True while the editor holds its chrome's look (a stroke or a save); see [Slot.onDraw]. */
     var holding = false; set(value) { if (field != value) { field = value; (start + end).forEach { it.invalidate() } } }
-    private val hold = Runnable { under?.takeIf { it.kind == Kind.PEN && it.isEnabled }?.let { held = true; it.performLongClick() } }
+    private val hold = Runnable {
+        val slot = under ?: return@Runnable
+        if (slot.kind != Kind.PEN) { held = true; tip(slot) } else if (slot.isEnabled) { held = true; slot.performLongClick() }
+    }
+    /** P669: names the button under a hovering S Pen (after [TIP_MS]) or a holding finger; null hides the name. */
+    var onTip: ((Slot?) -> Unit)? = null
+    private var tipped: Slot? = null
+    private val tipLater = Runnable { tip(under) }
+    private fun tip(slot: Slot?) {
+        val next = slot?.takeIf { it.kind != Kind.PEN }
+        if (next !== tipped) { tipped = next; onTip?.invoke(next) }
+    }
+    /** P669: the slots waiting behind » now. */
+    private var hidden: Set<Slot> = emptySet()
 
     init {
         setWillNotDraw(false)
@@ -188,7 +232,8 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         under?.lit = false; under = null
         removeAllViews(); start = left; end = right
         (left + right).forEach { addView(it) }
-        areas = split(left) + split(right)
+        hidden = hiddenAt(0); (left + right).forEach { it.waiting = it in hidden }
+        areas = split(left - hidden) + split(right - hidden)
         thumb = null; thumbAnim?.cancel()
         requestLayout(); invalidate()
     }
@@ -204,18 +249,39 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
      * P632: the least width the bar needs, its name given way entirely. Its buttons never shrink, so on a narrower screen
      * (a phone, or a tablet held upright with many pens and highlighters) the editor keeps the full toolbar instead.
      */
-    fun needed(): Int {
-        val fixed = (start + end).filter { it.kind != Kind.NAME }.sumOf { it.natural() }
-        val leftAreas = split(start).size; val rightAreas = split(end).size
+    fun needed(): Int = widthOf(hiddenAt(maxFold))
+    private val maxFold get() = (start + end).maxOfOrNull { it.fold } ?: 0
+    /** P669: the slots waiting behind » once every rank up to [rank] has gone there; with none, » itself is away. */
+    private fun hiddenAt(rank: Int): Set<Slot> = (start + end).filter { it.fold in 1..rank || (rank == 0 && it.fold < 0) }.toSet()
+    /** P669: the waiting slots in their areas, for the small bar » opens. */
+    fun waitingGroups(): List<List<Slot>> = split(start + end).map { area -> area.slots.filter { it in hidden && it.fold > 0 } }.filter { it.isNotEmpty() }
+    /** P669: the » slot when buttons wait behind it, else null. */
+    val overflow: Slot? get() = (start + end).firstOrNull { it.fold < 0 && it !in hidden }
+    private fun widthOf(gone: Set<Slot>): Int {
+        val left = start - gone; val right = end - gone
+        val fixed = (left + right).filter { it.kind != Kind.NAME }.sumOf { it.natural() }
+        val leftAreas = split(left).size; val rightAreas = split(right).size
         val extras = (leftAreas + rightAreas) * 2 * context.dpi(PAD) + (maxOf(0, leftAreas - 1) + maxOf(0, rightAreas - 1)) * context.dpi(GAP)
         return 2 * (context.dpi(EDGE) + context.dpi(INSET)) + fixed + extras + if (leftAreas > 0 && rightAreas > 0) context.dpi(GAP) else 0
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
-        val room = width - needed()
+        var rank = 0
+        while (rank < maxFold && widthOf(hiddenAt(rank)) > width) rank++
+        val gone = hiddenAt(rank)
+        if (gone != hidden) {
+            hidden = gone; areas = split(start - gone) + split(end - gone)
+            (start + end).forEach { it.waiting = it in gone; it.importantForAccessibility = if (it.waiting) IMPORTANT_FOR_ACCESSIBILITY_NO else IMPORTANT_FOR_ACCESSIBILITY_AUTO }
+            thumbSoon()
+        }
+        val room = width - widthOf(gone)
         (start + end).forEach { slot ->
-            val w = if (slot.kind == Kind.NAME) slot.natural().coerceAtMost(maxOf(0, room)) else slot.natural()
+            val w = when {
+                slot.waiting -> 0
+                slot.kind == Kind.NAME -> slot.natural().coerceAtMost(maxOf(0, room))
+                else -> slot.natural()
+            }
             slot.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(context.dpi(SLOT), MeasureSpec.EXACTLY))
         }
         setMeasuredDimension(width, context.dpi(HEIGHT))
@@ -228,6 +294,7 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         var x = inner
         var opened = false
         start.forEach {
+            if (it.waiting) { breaks(it, x); return@forEach }
             if (it.kind == Kind.DIVIDER || it.kind == Kind.GAP) { if (opened) { x += pad + gap; opened = false }; breaks(it, x); return@forEach }
             if (!opened) { x += pad; opened = true }
             it.layout(x, top, x + it.measuredWidth, top + it.measuredHeight); x += it.measuredWidth
@@ -235,15 +302,37 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         var right = r - l - inner
         opened = false
         end.asReversed().forEach {
+            if (it.waiting) { breaks(it, right); return@forEach }
             if (it.kind == Kind.DIVIDER || it.kind == Kind.GAP) { if (opened) { right -= pad + gap; opened = false }; breaks(it, right); return@forEach }
             if (!opened) { right -= pad; opened = true }
             it.layout(right - it.measuredWidth, top, right, top + it.measuredHeight); right -= it.measuredWidth
         }
+        centreRun(r - l, inner, pad, gap)
         areas.forEach { area ->
             area.rect.set((area.slots.first().left - pad).toFloat(), wellTop, (area.slots.last().right + pad).toFloat(), wellBottom)
         }
         if (thumbAnim?.isRunning != true) placeThumb(false)
         if (motion != null) pose(motionT)
+    }
+
+    /**
+     * P677: moves the [Slot.centred] run toward the middle of the bar, by no more than the room between the start list and
+     * the end list; the start slots after it move by all that room, so they stand against the end list.
+     */
+    private fun centreRun(width: Int, inner: Int, pad: Int, gap: Int) {
+        fun shown(s: Slot) = !s.waiting && s.kind != Kind.DIVIDER && s.kind != Kind.GAP
+        val run = start.filter { it.centred && shown(it) }
+        val last = start.lastOrNull(::shown) ?: return
+        if (run.isEmpty()) return
+        val limit = end.firstOrNull(::shown)?.let { it.left - pad - gap } ?: (width - inner)
+        val spare = limit - (last.right + pad)
+        if (spare <= 0) return
+        val want = (width / 2f - (run.first().left + run.last().right) / 2f).toInt().coerceIn(0, spare)
+        val from = start.indexOf(run.first()); val to = start.indexOf(run.last())
+        for (i in from until start.size) {
+            val by = if (i <= to) want else spare
+            if (by != 0) start[i].offsetLeftAndRight(by)
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -305,7 +394,7 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
     private val thumbCheck = Runnable { placeThumb(true) }
     private fun thumbSoon() { removeCallbacks(thumbCheck); post(thumbCheck) }
     private fun placeThumb(animate: Boolean) {
-        val next = (start + end).firstOrNull { it.chosen && (it.kind == Kind.PEN || it.kind == Kind.TOOL) }
+        val next = (start + end).firstOrNull { it.chosen && !it.waiting && (it.kind == Kind.PEN || it.kind == Kind.TOOL) }
         if (next == null) { thumbAnim?.cancel(); thumb = null; invalidate(); return }
         thumbTo.set(next.left.toFloat(), next.top.toFloat(), next.right.toFloat(), next.bottom.toFloat())
         val moving = animate && thumb != null && next !== thumb && isLaidOut && !thumbBox.isEmpty && ValueAnimator.areAnimatorsEnabled()
@@ -421,7 +510,7 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
     /** The slot under [x], if the finger is still near the bar. */
     private fun slotAt(x: Float, y: Float): Slot? {
         if (y < -context.dp(12f) || y > height + context.dp(28f)) return null
-        return (start + end).firstOrNull { it.kind != Kind.DIVIDER && it.kind != Kind.GAP && x >= it.left && x < it.right }
+        return (start + end).firstOrNull { it.kind != Kind.DIVIDER && it.kind != Kind.GAP && !it.waiting && x >= it.left && x < it.right }
     }
     private fun over(slot: Slot?) {
         if (slot === under) return
@@ -436,18 +525,20 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 held = false; over(slotAt(event.x, event.y))
-                if (under?.kind == Kind.PEN) postDelayed(hold, timeout)
+                if (under != null) postDelayed(hold, timeout)
             }
             MotionEvent.ACTION_MOVE -> {
                 val slot = slotAt(event.x, event.y)
-                if (slot !== under && !held) { removeCallbacks(hold); over(slot); if (slot?.kind == Kind.PEN) postDelayed(hold, timeout) }
+                if (slot !== under && !held) { removeCallbacks(hold); over(slot); if (slot != null) postDelayed(hold, timeout) }
+                // P669: a held name follows the finger along the bar.
+                else if (slot !== under && tipped != null) { over(slot); tip(slot) }
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(hold)
-                val slot = under; over(null)
+                val slot = under; over(null); tip(null)
                 if (!held && slot != null && slot.isEnabled) slot.performClick()
             }
-            MotionEvent.ACTION_CANCEL -> { removeCallbacks(hold); over(null) }
+            MotionEvent.ACTION_CANCEL -> { removeCallbacks(hold); over(null); tip(null) }
         }
         return true
     }
@@ -457,14 +548,21 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         val a11y = context.getSystemService(AccessibilityManager::class.java)
         if (a11y?.isTouchExplorationEnabled == true) return super.dispatchHoverEvent(event)
         when (event.actionMasked) {
-            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> over(slotAt(event.x, event.y))
-            MotionEvent.ACTION_HOVER_EXIT -> over(null)
+            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                val slot = slotAt(event.x, event.y)
+                if (slot !== under) {
+                    over(slot); removeCallbacks(tipLater)
+                    // P669: once a name shows, the next button's name follows at once.
+                    if (tipped != null) tip(slot) else if (slot != null) postDelayed(tipLater, TIP_MS)
+                }
+            }
+            MotionEvent.ACTION_HOVER_EXIT -> { removeCallbacks(tipLater); tip(null); over(null) }
         }
         return true
     }
 
     override fun onDetachedFromWindow() {
-        removeCallbacks(hold); removeCallbacks(thumbCheck); over(null)
+        removeCallbacks(hold); removeCallbacks(thumbCheck); removeCallbacks(tipLater); tip(null); over(null)
         motion?.cancel(); motion = null; thumbAnim?.cancel(); rest()
         super.onDetachedFromWindow()
     }
@@ -480,10 +578,11 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         const val PAD = 2f; const val GAP = 6f; const val EDGE = 8f; const val INSET = 3f
         /** The bar's width round the pin when it is all rolled in. */
         private const val COLLAPSED = 30f
-        private const val PEN_LENGTH = 200f
         /** The board's slot widths, in dp. */
         const val ACTION_W = 26f; const val BACK_W = 30f; const val PEN_W = 30f; const val ADD_W = 22f; const val PIN_W = 24f
         const val COLOUR_W = 22f; const val NAME_MAX = 160f
+        /** P669: the page number pill; how long an S Pen hovers before a button's name shows. */
+        const val PAGE_W = 44f; const val TIP_MS = 400L
         // Board 12's motion, in ms, from the moment the full bars have gone. The bar's edge sweeps out over BAR_IN_MS;
         // a well springs in after up to REVEAL_SPREAD by its distance from the pin, its slots 40 ms later, SLOT_STEP
         // apart. Going in, the farthest well leaves first and the bar's edge follows, fading from BAR_FADE_AT.
@@ -513,6 +612,22 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         const val MORE = "M6 12h.01M12 12h.01M18 12h.01"
         const val PIN = "M9 4h6l-1 6 3 3H7l3-3zM12 13v7"
         const val FOLD = "M6 15l6-6 6 6"
+        // P669 (board 14): the full toolbar's other buttons, drawn as on the board.
+        const val NOTEBOOK = "M7 3.5h10.5a1.5 1.5 0 0 1 1.5 1.5v15.5H8.5A2.5 2.5 0 0 1 6 18V4.5zM6 18a2.5 2.5 0 0 1 2.5-2.5H19M10 7.5h6M10 10.5h4"
+        const val BRUSH = "M14.5 3.5l6 6-7.5 7.5-6-6zM7 11l-2.5 2.5c-1.2 1.2-1.2 3.3 0 4.5s3.3 1.2 4.5 0L11.5 15"
+        const val PANEL = "M4 5h16v14H4zM9.5 5v14"
+        /** P677: Show pages when the pages panel opens on the right. */
+        const val PANEL_RIGHT = "M4 5h16v14H4zM14.5 5v14"
+        const val PREVIOUS = "M15 5l-7 7 7 7"
+        const val NEXT = "M9 5l7 7-7 7"
+        const val PAPER = "M6 3h9l4 4v14H6zM15 3v4h4M9 12.5h7M9 16.5h5"
+        const val INSERT = "M12 4.5v15M4.5 12h15"
+        const val CAPTURE = "M4 8h3.2l1.8-2.5h6L16.8 8H20v11H4zM12 10.5a3 3 0 1 1 0 6 3 3 0 0 1 0-6z"
+        const val EXPORT = "M12 14V3.5M8 7.5l4-4 4 4M5 12v8h14v-8"
+        const val ZOOM_OUT = "M10.5 4a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zM15.5 15.5L20 20M7.5 10.5h6"
+        const val FIT = "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"
+        const val ZOOM_IN = "M10.5 4a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zM15.5 15.5L20 20M7.5 10.5h6M10.5 7.5v6"
+        const val OVERFLOW = "M6 7l5 5-5 5M13 7l5 5-5 5"
     }
 }
 

@@ -11,6 +11,9 @@ internal object MenuIcons {
     const val MORE_ROOM = "M5 4h14M5 20h14M12 7v10M9 9.5l3-3 3 3M9 14.5l3 3 3-3"
     const val BOOKMARK = "M6.5 3.5h11v17L12 16.5l-5.5 4z"
     const val MOVE = "M12 3.5v17M8.5 7L12 3.5 15.5 7M8.5 17l3.5 3.5 3.5-3.5"
+    const val BESIDE = "M3.5 5h7.5v14H3.5zM13 5h7.5v14H13zM5.5 12h3.5M15 12h3.5"
+    /** P670: a page with a smaller page inside (Peek). */
+    const val PEEK = "M4.5 3.5h11l4 4v13h-15zM10.5 11.5h6.5v6.5h-6.5z"
     const val COPY_PAGE = "M9 3.5h8l3 3v11H9zM6 7v13.5h9"
     const val TRANSFER = "M4 6.5h6l2 2h8v10H4zM10 13.5h6M13.5 11l2.5 2.5-2.5 2.5"
     const val LAYERS = "M12 4l8.5 4.5L12 13 3.5 8.5zM3.5 12.5L12 17l8.5-4.5M3.5 16.5L12 21l8.5-4.5"
@@ -40,6 +43,8 @@ internal object MenuIcons {
     const val SCRIBBLE = "M3.5 17c2-3 3.5-9 5.5-9s0 9 2 9 2.5-5 4-5 1 3 2.5 3 2-1 3-2"
     const val PAGE_TEXT = "M6 3h9l4 4v14H6zM15 3v4h4M9 11h7M9 14.5h7M9 18h4"
     const val MARKER = "M4 20h7M9.5 15.5l-2-2 9-9a1.4 1.4 0 0 1 2 2zM7.5 13.5l-2.5 4h3.5l1-2"
+    /** P662: a PDF page with a marked band, for "Add highlights from PDF…". */
+    const val PAGE_MARKS = "M6 3h9l4 4v14H6zM15 3v4h4M8.5 11.5h8v3h-8zM8.5 17.5h5"
     const val SPARKLE = "M12 3.5l1.8 5.2 5.2 1.8-5.2 1.8L12 17.5l-1.8-5.2L5 10.5l5.2-1.8zM18.5 16v4M16.5 18h4"
     const val SHARE_OUT = "M12 14V3.5M8 7.5l4-4 4 4M5 12v8h14v-8"
     /** P621 (board 10): a roll of study tape, pulled out with a torn end. */
@@ -88,10 +93,10 @@ internal object MenuIcons {
         EditorCommand.VIDEO -> VIDEO; EditorCommand.SCAN -> SCAN; EditorCommand.PHOTO -> CAMERA; EditorCommand.PDF_PAGES -> PDF_PAGES
         EditorCommand.IMAGE_PAGE -> IMAGE; EditorCommand.ATTACH -> CLIP; EditorCommand.PDF_SOURCES -> LINK
         EditorCommand.PDF_SELECT_TEXT -> SELECT_TEXT; EditorCommand.LASER -> LASER; EditorCommand.STUDY_PANEL -> BOOK
-        EditorCommand.HANDWRITING -> SCRIBBLE; EditorCommand.PAGE_TEXT -> PAGE_TEXT; EditorCommand.TEXT_MARK -> MARKER
+        EditorCommand.HANDWRITING -> SCRIBBLE; EditorCommand.PAGE_TEXT -> PAGE_TEXT; EditorCommand.TEXT_MARK -> MARKER; EditorCommand.PDF_HIGHLIGHTS -> PAGE_MARKS
         EditorCommand.PREPARE_STUDY -> SPARKLE; EditorCommand.INK_EXPORT -> SHARE_OUT; EditorCommand.CLEAR_TRANSCRIPT -> TRASH; EditorCommand.TAPE -> TAPE
         EditorCommand.SEARCH -> SEARCH; EditorCommand.BOOKMARKS -> BOOKMARK; EditorCommand.HISTORY -> HISTORY; EditorCommand.ORGANIZER -> GRID
-        EditorCommand.DUPLICATE_PAGE -> DUPLICATE; EditorCommand.MORE_ROOM -> MORE_ROOM; EditorCommand.BOOKMARK -> BOOKMARK; EditorCommand.MOVE_PAGE -> MOVE
+        EditorCommand.DUPLICATE_PAGE -> DUPLICATE; EditorCommand.MORE_ROOM -> MORE_ROOM; EditorCommand.BOOKMARK -> BOOKMARK; EditorCommand.MOVE_PAGE -> MOVE; EditorCommand.SHOW_BESIDE -> BESIDE; EditorCommand.PEEK -> PEEK
         EditorCommand.COPY_PAGE -> COPY_PAGE; EditorCommand.TRANSFER_PAGE -> TRANSFER; EditorCommand.LAYERS -> LAYERS; EditorCommand.UNLOCK -> UNLOCK
         EditorCommand.CLEAR_INK -> ERASER; EditorCommand.DELETE_PAGE -> TRASH
         EditorCommand.NATIVE_EXPORT -> PACKAGE; EditorCommand.PDF_EXPORT -> PDF_OUT; EditorCommand.PNG_EXPORT -> IMAGE; EditorCommand.TEXT_EXPORT -> LINES
@@ -106,10 +111,10 @@ internal object MenuIcons {
         EditorCommand.VIDEO -> "Video"; EditorCommand.SCAN -> "Scan"; EditorCommand.PHOTO -> "Photo"; EditorCommand.PDF_PAGES -> "PDF pages"
         EditorCommand.IMAGE_PAGE -> "Image page"; EditorCommand.ATTACH -> "Attach file"; EditorCommand.PDF_SOURCES -> "PDF sources"
         EditorCommand.PDF_SELECT_TEXT -> "Select PDF text"; EditorCommand.LASER -> "Laser"; EditorCommand.STUDY_PANEL -> "Study panel"
-        EditorCommand.HANDWRITING -> "Read writing"; EditorCommand.PAGE_TEXT -> "Copy page text"; EditorCommand.TEXT_MARK -> "Highlight text"
+        EditorCommand.HANDWRITING -> "Read writing"; EditorCommand.PAGE_TEXT -> "Copy page text"; EditorCommand.TEXT_MARK -> "Highlight text"; EditorCommand.PDF_HIGHLIGHTS -> "Add highlights"
         EditorCommand.PREPARE_STUDY -> "Study copy"; EditorCommand.INK_EXPORT -> "Export ink"; EditorCommand.CLEAR_TRANSCRIPT -> "Clear text"; EditorCommand.TAPE -> "Study tape"
         EditorCommand.SEARCH -> "Search"; EditorCommand.BOOKMARKS -> "Bookmarks"; EditorCommand.HISTORY -> "History"; EditorCommand.ORGANIZER -> "All pages"
-        EditorCommand.DUPLICATE_PAGE -> "Duplicate"; EditorCommand.MORE_ROOM -> "More room"; EditorCommand.BOOKMARK -> "Bookmark"; EditorCommand.MOVE_PAGE -> "Move"
+        EditorCommand.DUPLICATE_PAGE -> "Duplicate"; EditorCommand.MORE_ROOM -> "More room"; EditorCommand.BOOKMARK -> "Bookmark"; EditorCommand.MOVE_PAGE -> "Move"; EditorCommand.SHOW_BESIDE -> "Show beside"; EditorCommand.PEEK -> "Peek"
         EditorCommand.COPY_PAGE -> "Copy to notebook"; EditorCommand.TRANSFER_PAGE -> "Move to notebook"; EditorCommand.LAYERS -> "Layers"; EditorCommand.UNLOCK -> "Unlock"
         EditorCommand.CLEAR_INK -> "Clear ink"; EditorCommand.DELETE_PAGE -> "Delete"
         EditorCommand.NATIVE_EXPORT -> "Notebook file"; EditorCommand.PDF_EXPORT -> "PDF"; EditorCommand.PNG_EXPORT -> "Page image"; EditorCommand.TEXT_EXPORT -> "Text"

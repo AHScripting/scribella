@@ -54,7 +54,7 @@ object LibrarySync {
         catch (error: Exception) { done(Result.failure(error)); return }
         app.io.execute {
             val result = runCatching {
-                changedSource(app, TreeFolder(app, tree), tree.toString(), initialize = true).use { }
+                changedSource(app, FolderProcess.folder(app, tree), tree.toString(), initialize = true).use { }
                 Unit
             }
             app.main.post {
@@ -70,7 +70,7 @@ object LibrarySync {
     }
 
     /** [folderName] inside a picked document tree, created on first use. */
-    class TreeFolder private constructor(private val context: Context, private val tree: Uri, createIfMissing: Boolean,
+    class TreeFolder internal constructor(private val context: Context, private val tree: Uri, createIfMissing: Boolean,
         private val path: List<String>, private val rootName:String) : FolderSync.NestedFolder {
         constructor(context: Context, tree: Uri, createIfMissing: Boolean = true, rootName:String = folderName(context)): this(context, tree, createIfMissing, emptyList(),rootName)
         override fun child(name: String, create: Boolean): FolderSync.NestedFolder {
@@ -199,7 +199,7 @@ object LibrarySync {
         if (identity.startsWith("webdav:")) WebDavSource.forApp(app).let {
             if (it.identity != identity) throw dev.ownednotes.core.WebDavHttpClient.Failure(dev.ownednotes.core.WebDavHttpClient.Problem.ACCESS)
             it.open()
-        } else TreeFolder(app, Uri.parse(identity), createIfMissing = false).let { folder ->
+        } else FolderProcess.folder(app, Uri.parse(identity), createIfMissing = false).let { folder ->
             if (changedPages(app, identity)) changedSource(app, folder, identity) else folder
         }
     internal fun sourceReadable(app: NotesApplication, identity: String): Boolean =
@@ -299,7 +299,7 @@ object LibrarySync {
             if (owner.identity != originalIdentity) throw IOException("Sync source changed")
             activeSource = owner
             owner.open(cancellation)
-        }) else originalTree?.let { tree -> { TreeFolder(app, tree) } } ?: return done(null)
+        }) else originalTree?.let { tree -> { FolderProcess.folder(app, tree) } } ?: return done(null)
         fun checkNetwork() {
             if (!permitted()) throw IOException("Sync stopped")
             if (wifiOnly(app) && !wifi()) throw IOException(WIFI_WAITING)

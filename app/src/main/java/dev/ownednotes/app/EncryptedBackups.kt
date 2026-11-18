@@ -30,7 +30,7 @@ internal object EncryptedBackups {
     }
     fun create(app:NotesApplication,tree:Uri,key:String,done:(Result<LibraryBackup.Result>)->Unit) {
         try {grant(app,tree)}catch(error:Exception){done(Result.failure(error));return}
-        createPrepared(app,tree,key,{LibrarySync.TreeFolder(app,tree,rootName=folderName(app))}) {result->FolderAccess.releaseIfUnused(app,tree);done(result)}
+        createPrepared(app,tree,key,{FolderProcess.folder(app,tree,rootName=folderName(app))}) {result->FolderAccess.releaseIfUnused(app,tree);done(result)}
     }
     internal fun createPrepared(app:NotesApplication,tree:Uri,key:String,remote:()->FolderSync.Folder,done:(Result<LibraryBackup.Result>)->Unit) {
         if(!app.documentsReady){done(Result.failure(IllegalStateException("Wait for the local save")));return}
@@ -50,7 +50,7 @@ internal object EncryptedBackups {
     }
     fun restore(app:NotesApplication,tree:Uri,key:String,done:(Result<LibraryBackup.Restore>)->Unit) {
         try {grant(app,tree)}catch(error:Exception){done(Result.failure(error));return}
-        restorePrepared(app,key,{LibrarySync.TreeFolder(app,tree,createIfMissing=false,rootName=folderName(app))}) {result->FolderAccess.releaseIfUnused(app,tree);done(result)}
+        restorePrepared(app,key,{FolderProcess.folder(app,tree,createIfMissing=false,rootName=folderName(app))}) {result->FolderAccess.releaseIfUnused(app,tree);done(result)}
     }
     internal fun restorePrepared(app:NotesApplication,key:String,remote:()->FolderSync.Folder,done:(Result<LibraryBackup.Restore>)->Unit) {
         val secret=try {cleanKey(key).toCharArray()}catch(error:Exception){done(Result.failure(error));return}

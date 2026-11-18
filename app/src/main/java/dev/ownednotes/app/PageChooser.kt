@@ -21,7 +21,7 @@ import dev.ownednotes.core.Notebook
  * edge shows which side they land on. Choosing only reports the tile's position; each caller keeps its own stale guards.
  */
 internal class PageChooser(private val activity: MainActivity, title: String, private val notebook: Notebook, internal val tiles: List<Tile>, private val startAt: Int = 0, private val choose: (Int) -> Unit) {
-    enum class Mark { BEFORE, AFTER, HERE }
+    enum class Mark { BEFORE, AFTER, HERE, NONE }
     data class Tile(val pageId: String, val label: String, val mark: Mark, val description: String = label)
     private val c get() = activity
     private val thumbnailWidth = minOf(PageThumbnails.MAX_EDGE, ((c.dpi(170f) + 31) / 32) * 32)
@@ -57,7 +57,7 @@ internal class PageChooser(private val activity: MainActivity, title: String, pr
                 setColor(if (tile.mark == Mark.HERE) Kit.accentFill(c.night) else Kit.cardFill(c.night)); cornerRadius = c.dp(14f)
                 if (tile.mark == Mark.HERE) setStroke(c.dpi(2f), Glass.accent(c.night))
             }
-            bar.visibility = if (tile.mark == Mark.HERE) View.GONE else View.VISIBLE
+            bar.visibility = if (tile.mark == Mark.HERE || tile.mark == Mark.NONE) View.GONE else View.VISIBLE
             (bar.layoutParams as FrameLayout.LayoutParams).gravity = if (tile.mark == Mark.BEFORE) Gravity.START else Gravity.END
             bar.requestLayout()
             val hit = activity.thumbnails.cached(notebook, tile.pageId, thumbnailWidth)

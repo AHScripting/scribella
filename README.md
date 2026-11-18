@@ -24,8 +24,9 @@
 
 ## What it does
 
-- **Write and draw** with calligraphy, ballpoint, pencil, pressure and dashed pens, plus highlighter, eraser and lasso. Draw a line, hold the pen still, and it becomes a clean shape.
-- **Mark up PDFs**, and bring in Office files as PDF pages.
+- **Write and draw** with fountain, calligraphy, ballpoint, pencil, pressure and dashed pens, plus highlighters, eraser and lasso. Keep up to eight of your own pens and highlighters on the toolbar. Draw a line, hold the pen still, and it becomes a clean shape.
+- **Fold the toolbar into a slim bar** at the top of the page while you write, or let it fold by itself as soon as you start.
+- **Mark up PDFs**, and bring in Office files as PDF pages. Highlights and pen drawings already in a PDF come with it.
 - **Scan paper** with the camera.
 - **Search your handwriting** from the library, and read it into text.
 - **Record audio** into a notebook.
@@ -36,6 +37,11 @@
 <p align="center">
   <img src="screenshots/pdf.png" width="49%" alt="A printed textbook page marked up with highlighter and handwritten notes">
   <img src="screenshots/pens.png" width="49%" alt="The pen settings panel, with pen types, colours and thickness">
+</p>
+
+<p align="center">
+  <img src="screenshots/slim.png" width="49%" alt="The toolbar folded into a slim bar at the top of the page">
+  <img src="screenshots/add-pen.png" width="49%" alt="The + after the pens opens a menu of pen types, the fountain pen among them">
 </p>
 
 <p align="center">

@@ -66,6 +66,9 @@ internal class BackgroundSyncRun(
     private val cancellation = SyncCancellation()
     private val startedAt = SystemClock.elapsedRealtime()
     private var completed = false
+    /** How the run ended, once it has (instant sync uses it to know the folder caught up). */
+    var outcome: BackgroundSyncHistory.State? = null
+        private set
     private var syncing = false
     private val tick = Runnable { advance() }
     private var receipt: String? = null
@@ -82,6 +85,7 @@ internal class BackgroundSyncRun(
         if (completed || cancellation.isCancelled) return
         completed = true; app.main.removeCallbacks(tick)
         receipt?.let { app.backgroundHistory.finish(it, LibrarySync.sourceIdentity(app), state) }
+        outcome = state
         finished(retry)
     }
     private fun advance() {

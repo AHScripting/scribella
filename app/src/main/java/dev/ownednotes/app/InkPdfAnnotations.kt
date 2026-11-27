@@ -21,6 +21,7 @@ import com.tom_roush.pdfbox.util.Matrix
 import dev.ownednotes.core.Page
 import dev.ownednotes.core.Notebook
 import dev.ownednotes.core.hasObjectLayers
+import dev.ownednotes.core.inkNote
 import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationRubberStamp
 import dev.ownednotes.core.Point
 import dev.ownednotes.core.visibleCenterlines
@@ -33,16 +34,20 @@ internal object InkPdfAnnotations {
         val map = SourcePdfExport.overlayTransform(target)
         fun raw(point: Point) = map.transformPoint(point.x, ceil(page.height) - point.y)
         page.paintSlices.forEach { slice ->
-        if (page.hasObjectLayers && (slice.images.isNotEmpty() || slice.textBoxes.isNotEmpty())) appendObjects(document, target, requireNotNull(notebook), slice, workspace)
+        if ((page.hasObjectLayers || (slice.inkNote != null && notebook != null)) && (slice.images.isNotEmpty() || slice.textBoxes.isNotEmpty())) appendObjects(document, target, requireNotNull(notebook), slice, workspace)
+        // P682: a handwritten note's ink is cut at the note, as on screen (P680 left export uncut).
+        val cut = slice.inkNote?.placement?.let { n -> RectF(maxOf(0f,n.x),maxOf(0f,n.y),minOf(page.width,n.x+n.width),minOf(page.height,n.y+n.height)) }
+            ?: RectF(0f,0f,page.width,page.height)
+        if (cut.isEmpty) return@forEach
         slice.drawnStrokes.forEach { stroke ->
             val path = InkGeometry.visible(stroke)
             val bounds = RectF().also { path.computeBounds(it, true) }
-            if (path.isEmpty || !bounds.intersect(0f,0f,page.width,page.height) || bounds.isEmpty) return@forEach
+            if (path.isEmpty || !bounds.intersect(cut) || bounds.isEmpty) return@forEach
             val corners = listOf(Point(bounds.left,bounds.top),Point(bounds.right,bounds.top),Point(bounds.left,bounds.bottom),Point(bounds.right,bounds.bottom)).map(::raw)
             val left=corners.minOf { it.x };val bottom=corners.minOf { it.y }
             val right=corners.maxOf { it.x };val top=corners.maxOf { it.y }
             val rectangle=PDRectangle(left,bottom,right-left,top-bottom)
-            var fragments=stroke.visibleCenterlines().flatMap { clip(it,page.width,page.height) }
+            var fragments=stroke.visibleCenterlines().flatMap { clip(it,cut) }
             if (fragments.isEmpty()) {
                 // A pressure outline may remain beside an erased centreline. Keep actual visible
                 // contours as editable paths rather than inventing points or restoring an erased gap.
@@ -54,7 +59,7 @@ internal object InkPdfAnnotations {
                     contour+=Point(samples[i+1],samples[i+2])
                 }
                 if(contour.isNotEmpty()) contours+=contour
-                fragments=contours.flatMap { clip(it,page.width,page.height) }
+                fragments=contours.flatMap { clip(it,cut) }
             }
             require(fragments.isNotEmpty()) { "This stroke cannot be exported as editable ink. Turn off editable ink and try again." }
             val annotation=PDAnnotationMarkup(COSDictionary().apply { setName(COSName.SUBTYPE,PDAnnotationMarkup.SUB_TYPE_INK) }).apply {
@@ -72,7 +77,7 @@ internal object InkPdfAnnotations {
                     val sheet=android.startPage(PdfDocument.PageInfo.Builder(ceil(page.width).toInt(),ceil(page.height).toInt(),1).create())
                     try {
                         sheet.canvas.clipRect(0f,0f,page.width,page.height)
-                        InkGeometry.draw(sheet.canvas,stroke,Paint(Paint.ANTI_ALIAS_FLAG),page.opacityOf(stroke),path)
+                        InkNoteLook.clipInk(sheet.canvas,slice,null) { InkGeometry.draw(sheet.canvas,stroke,Paint(Paint.ANTI_ALIAS_FLAG),page.opacityOf(stroke),path) }
                     } finally { android.finishPage(sheet) }
                     overlay.outputStream().use { android.writeTo(it) }
                 } finally { android.close() }
@@ -130,12 +135,13 @@ internal object InkPdfAnnotations {
     }
 
     /** Clip sampled segments to the visible page; never join across masked/off-page gaps. */
-    private fun clip(points: List<Point>, width: Float, height: Float): List<List<Point>> {
-        if(points.size==1) return if(points[0].x in 0f..width && points[0].y in 0f..height) listOf(points) else emptyList()
+    /** Liang-Barsky: the parts of a polyline inside [r]. */
+    private fun clip(points: List<Point>, r: RectF): List<List<Point>> {
+        if(points.size==1) return if(points[0].x in r.left..r.right && points[0].y in r.top..r.bottom) listOf(points) else emptyList()
         val result=mutableListOf<MutableList<Point>>()
         for((a,b) in points.zipWithNext()) {
             var lo=0f;var hi=1f;val dx=b.x-a.x;val dy=b.y-a.y;var visible=true
-            for((p,q) in listOf(-dx to a.x,dx to width-a.x,-dy to a.y,dy to height-a.y)) {
+            for((p,q) in listOf(-dx to a.x-r.left,dx to r.right-a.x,-dy to a.y-r.top,dy to r.bottom-a.y)) {
                 if(p==0f) { if(q<0f) visible=false }
                 else { val t=q/p;if(p<0f) lo=maxOf(lo,t) else hi=minOf(hi,t) }
             }

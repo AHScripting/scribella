@@ -22,6 +22,8 @@ internal class PageHoldBar(private val activity: MainActivity, private val night
     /** The page the bar is showing actions for, or null when hidden (tests read it). */
     var pageId: String? = null; private set
     val showing get() = popup?.isShowing == true
+    /** The bar and its hint while shown, for tests. */
+    internal val shownView: View? get() = popup?.contentView
 
     enum class Action(val label: String, val icon: String) {
         DUPLICATE("Duplicate", MenuIcons.DUPLICATE), SETTINGS("Settings", MenuIcons.SLIDERS), PEEK("Peek", MenuIcons.PEEK), DELETE("Delete", MenuIcons.TRASH)
@@ -29,9 +31,10 @@ internal class PageHoldBar(private val activity: MainActivity, private val night
 
     /**
      * Shows the bar beside [bounds], given relative to [anchor]: to its left when there is room, else right, else below.
-     * With [besideAnchor] (the Pages card) it clears the whole card, not just the page, as on the board.
+     * With [besideAnchor] (the Pages card) it clears the whole card, not just the page, as on the board. With [aboveCard]
+     * (P730, the phone's strip of pages across the screen) it stands just above the card, over the held page.
      */
-    fun show(anchor: View, pageId: String, bounds: RectF, besideAnchor: Boolean = false) {
+    fun show(anchor: View, pageId: String, bounds: RectF, besideAnchor: Boolean = false, aboveCard: Boolean = false) {
         hide()
         val c = anchor.context
         val column = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
@@ -57,7 +60,10 @@ internal class PageHoldBar(private val activity: MainActivity, private val night
         val pageLeft = at[0] + if (besideAnchor) 0f else bounds.left
         val pageRight = at[0] + if (besideAnchor) anchor.width.toFloat() else bounds.right
         var x: Int; var y: Int
+        val card = (anchor.parent as? View) ?: anchor
+        val cardAt = IntArray(2).also { card.getLocationInWindow(it) }
         when {
+            aboveCard -> { x = (at[0] + bounds.centerX() - w / 2f).toInt(); y = cardAt[1] - h }
             pageLeft - w - gap >= 0 -> { x = (pageLeft - w - gap).toInt(); y = (at[1] + bounds.centerY() - h / 2f).toInt() }
             pageRight + w + gap <= root.width -> { x = (pageRight + gap).toInt(); y = (at[1] + bounds.centerY() - h / 2f).toInt() }
             else -> { x = (at[0] + bounds.centerX() - w / 2f).toInt(); y = (at[1] + bounds.bottom).toInt() }

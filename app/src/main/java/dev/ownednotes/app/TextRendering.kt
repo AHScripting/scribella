@@ -18,7 +18,9 @@ import kotlin.math.ceil
 /** Layout copies may normalize line breaks; source text, IDs and styles are never changed. */
 internal object TextRendering {
     data class Key(val text: String, val style: TextStyle, val width: Int)
-    fun key(box: TextBox) = Key(if(box.sticky?.collapsed==true) "" else box.text, box.style, ceil(box.placement.width.toDouble()).toInt().coerceIn(1,100000))
+    fun key(box: TextBox) = Key(if(box.sticky?.collapsed==true) "" else box.text, box.style, width(box.placement.width, box.sticky?.ink == true))
+    /** A handwritten note's words are inset from its sides (P681). */
+    fun width(boxWidth: Float, inkNote: Boolean) = ceil((if (inkNote) boxWidth - 2 * InkNoteLook.TEXT_INSET else boxWidth).toDouble()).toInt().coerceIn(1,100000)
     fun build(key: Key): StaticLayout {
         val style = key.style
         val paint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
@@ -41,7 +43,9 @@ internal object TextRendering {
             .build()
     }
     /** No layout creation on the live draw path; the caller supplies a pre-shaped immutable layout. */
-    fun draw(canvas: Canvas, box: TextBox, layout: StaticLayout) {
+    /** [text] false leaves the words out (P681: they are being typed in place, in a field over the page). */
+    fun draw(canvas: Canvas, box: TextBox, layout: StaticLayout, controls: Boolean = false, text: Boolean = true) {
+        if (box.sticky?.ink == true) return InkNoteLook.draw(canvas, box, layout, controls, text)
         val p = box.placement
         val saved = canvas.save()
         try {
@@ -57,7 +61,7 @@ internal object TextRendering {
                     canvas.drawPath(android.graphics.Path().apply {moveTo(p.width-fold,0f);lineTo(p.width-fold,fold);lineTo(p.width,fold)},paint)
                 }
             }
-            if(box.sticky?.collapsed!=true)layout.draw(canvas)
+            if(text && box.sticky?.collapsed!=true)layout.draw(canvas)
         } finally { canvas.restoreToCount(saved) }
     }
     /** IO export/preview path; the cache dies with this page render. */

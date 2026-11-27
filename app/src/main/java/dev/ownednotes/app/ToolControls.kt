@@ -428,7 +428,7 @@ object ToolControls {
     private const val MM_PER_UNIT = 25.4f / 72f
 
     /** P187: a tool popover's title row: the tool's name in bold, with an optional grey chip on the right ("Pen 1 of 3"). */
-    fun title(column: LinearLayout, text: String, chip: String? = null): TextView {
+    fun title(column: LinearLayout, text: String, chip: String? = null, info: View? = null): TextView {
         val c = column.context
         val name = TextView(c).apply {
             this.text = text; textSize = 19f; typeface = Typeface.create(Tokens.SANS, 700, false); setTextColor(Glass.text(c.night))
@@ -441,6 +441,8 @@ object ToolControls {
                 this.text = chip; textSize = 12f; typeface = Tokens.SANS_SEMIBOLD; setTextColor(labelInk(c.night)); maxLines = 1
                 background = rounded(wellFill(c.night), dp(10f)); setPadding(dpi(10f), dpi(5f), dpi(10f), dpi(5f))
             })
+            // P733: the board's (i) at the end of its title row; its card holds what used to be the note under the title.
+            if (info != null) addView(info, LinearLayout.LayoutParams(dpi(44f), dpi(44f)).apply { topMargin = -dpi(6f); bottomMargin = -dpi(6f) })
         })
         return name
     }
@@ -449,6 +451,33 @@ object ToolControls {
         // P592: a long label wraps (large text on a phone cut "When you hold the highlighter still" in half).
         this.text = text; textSize = 13f; typeface = Tokens.SANS_SEMIBOLD; setTextColor(labelInk(context.night)); maxLines = 3
     }
+    /**
+     * P733 (design canvas board 26): an (i) for a tool board. Its card holds what used to be a note under a control, as
+     * picture lines; [label] is what a screen reader says.
+     */
+    internal fun info(context: Context, label: String, title: String, vararg lines: Explain.Line) = Explain.Button(context, label).apply {
+        setOnClickListener { Explain.show(this, title, lines.toList()) }
+    }
+
+    /** P733: [label] with its (i) just after it, 32 dp tall; a long label wraps before the (i) rather than pushing it out. */
+    internal class LabelInfo(context: Context, private val label: View, private val info: View) : ViewGroup(context) {
+        init { addView(label); addView(info) }
+        override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+            val b = dpi(44f); val gap = dpi(2f)
+            info.measure(MeasureSpec.makeMeasureSpec(b, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(b, MeasureSpec.EXACTLY))
+            val room = if (MeasureSpec.getMode(widthSpec) == MeasureSpec.UNSPECIFIED) Int.MAX_VALUE / 4 else maxOf(0, MeasureSpec.getSize(widthSpec) - b - gap)
+            label.measure(MeasureSpec.makeMeasureSpec(room, MeasureSpec.AT_MOST), MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
+            setMeasuredDimension(resolveSize(label.measuredWidth + gap + b, widthSpec), maxOf(label.measuredHeight, dpi(32f)))
+        }
+        override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+            val h = b - t
+            val ly = (h - label.measuredHeight) / 2
+            label.layout(0, ly, label.measuredWidth, ly + label.measuredHeight)
+            val s = info.measuredWidth; val x = label.measuredWidth + dpi(2f); val y = (h - s) / 2
+            info.layout(x, y, x + s, y + s)
+        }
+    }
+
     /** P187: a short explanation under a tool popover control. */
     fun note(context: Context, text: String) = TextView(context).apply {
         this.text = text; textSize = 12.5f; typeface = Tokens.SANS; setTextColor(labelInk(context.night)); setLineSpacing(0f, 1.1f); setPadding(0, dpi(6f), 0, 0)
@@ -456,12 +485,13 @@ object ToolControls {
     private fun section(column: LinearLayout, view: View, gap: Float = GAP) =
         column.addView(view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = column.dpi(gap) })
     /** A labelled section: [label] over [view], with the board's 10 dp between them. */
-    private fun group(column: LinearLayout, label: String, view: View) {
+    private fun group(column: LinearLayout, label: String, view: View, info: View? = null) {
         val c = column.context
         section(column, LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
-            addView(label(c, label))
-            addView(view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dpi(8f) })
+            // P733: with an (i) the label row is 32 dp, so the gap under it shrinks to keep the board's spacing.
+            addView(if (info == null) label(c, label) else LabelInfo(c, label(c, label), info))
+            addView(view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = c.dpi(if (info == null) 8f else 2f) })
         })
     }
     fun millimetres(units: Float) = (units * MM_PER_UNIT).let { if (it < 10f) "%.1f mm".format(java.util.Locale.ROOT, it) else "${it.roundToInt()} mm" }
@@ -621,17 +651,21 @@ object ToolControls {
             })
             stateDescription = format(value)
         }
-        if (context.largeText) {
+        val name = label(context, label)
+        // P730: the name and the widest value it can show must fit their 64 dp beside the bar; at 130% text on a 384 dp
+        // phone "Smoothing" split as "Smoothi-ng" and "Standard" lost its "d". Otherwise they go above it, as with large text.
+        val widest = (0..20).maxOf { runCatching { shown.paint.measureText(format(round(min + (max - min) * it / 20f))) }.getOrDefault(0f) }
+        if (context.largeText || name.paint.measureText(label) > dpi(64f) || widest > dpi(64f)) {
             // No room beside the bar: the name and value go above it.
             orientation = LinearLayout.VERTICAL
             addView(LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                addView(label(context, label), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)); addView(shown)
+                addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)); addView(shown)
             })
             addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(40f)))
             return@apply
         }
-        addView(label(context, label), LinearLayout.LayoutParams(dpi(64f), ViewGroup.LayoutParams.WRAP_CONTENT))
+        addView(name, LinearLayout.LayoutParams(dpi(64f), ViewGroup.LayoutParams.WRAP_CONTENT))
         addView(bar, LinearLayout.LayoutParams(0, dpi(40f), 1f))
         // P547: wide enough for "Standard" on one line; a fixed width keeps the bar still while the value changes.
         addView(shown, LinearLayout.LayoutParams(dpi(64f), ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -669,11 +703,9 @@ object ToolControls {
         // P618: the fountain pen's two nibs, beside their label; shown only while a fountain pen is in use.
         nibs = LinearLayout(c).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(LinearLayout(c).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(label(c, "Nib"))
-                addView(note(c, "Soft swells on downstrokes as you press."))
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(LabelInfo(c, label(c, "Nib"), info(c, "About the soft nib", "Soft nib",
+                Explain.Line(SyncPanels.P.PEN, Glass.accent(c.night), "Soft swells on downstrokes as you press."))),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(chips(c, listOf("Everyday", "Soft"), if (ink.penStyle.kind == PenKind.FOUNTAIN_SOFT) 1 else 0) {
                 choose(ink.penStyle.copy(kind = if (it == 1) PenKind.FOUNTAIN_SOFT else PenKind.FOUNTAIN))
             }.apply { contentDescription = "Fountain pen nib" })
@@ -717,19 +749,22 @@ object ToolControls {
     }
     fun writingPreferences(column: LinearLayout) {
         val c = column.context
-        column.addView(heading(c, "Scribble to erase", 12f))
+        val night = c.night
+        column.addView(LabelInfo(c, heading(c, "Scribble to erase", 12f), info(c, "About scribble to erase", "Scribble to erase",
+            Explain.Line(SyncPanels.P.SQUIGGLE, Glass.accent(night), "Scribble back and forth over ink to erase it."),
+            Explain.Line(SyncPanels.P.UNDO, SyncPanels.slate(night), "Undo brings the ink back and keeps the scribble."))))
         column.addView(segmented(c, listOf("Off", "On"), if (ScribbleErase.enabled(c)) 1 else 0) {
             ScribbleErase.setEnabled(c, it == 1)
         }.apply { contentDescription = "Scribble to erase" })
         column.addView(demo(GestureDemo(c, GestureDemo.Kind.SCRIBBLE)))
-        column.addView(caption(c, "Scribble back and forth over ink to erase it. Undo brings the ink back and keeps the scribble."))
-        column.addView(heading(c, "Circle and hold", 12f))
+        column.addView(LabelInfo(c, heading(c, "Circle and hold", 12f), info(c, "About circle and hold", "Circle and hold",
+            Explain.Line(SyncPanels.P.LOOP, Glass.accent(night), "Select: draw a loop around ink and hold the pen still to select it."),
+            Explain.Line(SyncPanels.P.WRENCH, SyncPanels.slate(night), "Needs Hold assist set to Line or Shapes."))))
         val circle = GestureDemo(c, GestureDemo.Kind.CIRCLE, LoopSelect.enabled(c))
         column.addView(segmented(c, listOf("Shape", "Select"), if (LoopSelect.enabled(c)) 1 else 0) {
             LoopSelect.setEnabled(c, it == 1); circle.selects = it == 1
         }.apply { contentDescription = "Circle and hold" })
         column.addView(demo(circle))
-        column.addView(caption(c, "Select: draw a loop around ink and hold the pen still to select it. Needs Hold assist set to Line or Shapes."))
     }
     /** P539: a gesture demonstration under its control. */
     internal fun demo(view: GestureDemo) = view.apply { layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = context.dpi(8f); bottomMargin = context.dpi(4f) } }
@@ -747,11 +782,11 @@ object ToolControls {
         // P617 (board 11): in the colour card, off at first: going over a highlight adds, never darkens.
         section(column, LinearLayout(c).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
-            addView(LinearLayout(c).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(label(c, "Mix colours"))
-                addView(note(c, "Overlaps darken and blend. Off: going over a highlight never darkens it.").apply { setPadding(0, dpi(2f), 0, 0) })
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            // P733 (board 26): what it does is behind its (i).
+            addView(LabelInfo(c, label(c, "Mix colours"), info(c, "About Mix colours", "Mix colours",
+                Explain.Line(SyncPanels.P.DROP, Glass.accent(c.night), "On: overlaps darken and blend."),
+                Explain.Line(SyncPanels.P.MARKER, SyncPanels.slate(c.night), "Off: going over a highlight never darkens it."))),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(Kit.Switch(c, ink.highlighterMix, "Mix highlighter colours") { ink.selectHighlighterMix(it) },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = c.dpi(12f) })
         }, GAP - 6f)
@@ -759,13 +794,14 @@ object ToolControls {
             choose(ink.highlighterStyle.copy(width = it))
         }.apply { tint = ink.highlighterStyle.color.toInt() }
         section(column, size, GAP - 4f)
-        group(column, "Text line assistance", LinearLayout(c).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(VisualOptions.well(c, listOf("Freehand", "Follow text lines"), listOf(Pictograms.freeMark, Pictograms.followLines), if (ink.highlighterFollowsText) 1 else 0) {
+        group(column, "Text line assistance",
+            VisualOptions.well(c, listOf("Freehand", "Follow text lines"), listOf(Pictograms.freeMark, Pictograms.followLines), if (ink.highlighterFollowsText) 1 else 0) {
                 ink.selectHighlighterFollowsText(it == 1)
-            }.apply { contentDescription = "Highlighter PDF and text-box line assistance" })
-            addView(note(c, "Follows PDF, scanned text and text-box lines. Unclear lines stay freehand; Undo restores your mark."))
-        })
+            }.apply { contentDescription = "Highlighter PDF and text-box line assistance" },
+            info(c, "About Follow text lines", "Follow text lines",
+                Explain.Line(SyncPanels.P.TEXTLINES, Glass.accent(c.night), "Follows PDF, scanned and text-box lines."),
+                Explain.Line(SyncPanels.P.SQUIGGLE, SyncPanels.slate(c.night), "Unclear lines stay freehand."),
+                Explain.Line(SyncPanels.P.UNDO, SyncPanels.slate(c.night), "Undo restores your mark.")))
         assist(column, ink, true, assistChanged)
     }
     /**
@@ -838,8 +874,9 @@ object ToolControls {
      */
     fun paint(column: LinearLayout, ink: InkCanvas, changed: () -> Unit, custom: () -> Unit) {
         val c = column.context
-        title(column, "Paint brush")
-        column.addView(note(c, "Brush over ink to give it these settings. Highlights take the highlighter's colour and thickness.").apply { setPadding(0, dpi(2f), 0, 0) })
+        title(column, "Paint brush", info = info(c, "About the paint brush", "Paint brush",
+            Explain.Line(SyncPanels.P.BRUSH, Glass.accent(c.night), "Brush over ink to give it these settings."),
+            Explain.Line(SyncPanels.P.MARKER, SyncPanels.amber(c.night), "Highlights take the highlighter's colour and thickness.")))
         group(column, "Paints", chips(c, InkCanvas.PaintScope.entries.map { it.label }, ink.paintScope.ordinal) {
             ink.selectPaintScope(InkCanvas.PaintScope.entries[it]); changed()
         }.apply { contentDescription = "What the paint brush changes" })
@@ -872,8 +909,8 @@ object ToolControls {
     }
     fun eraser(column: LinearLayout, ink: InkCanvas, changed: () -> Unit) {
         val c = column.context
-        title(column, "Eraser")
-        column.addView(note(c, "Also used while the pen button is held.").apply { setPadding(0, dpi(2f), 0, 0) })
+        title(column, "Eraser", info = info(c, "About the eraser", "Eraser",
+            Explain.Line(SyncPanels.P.PEN, SyncPanels.slate(c.night), "Also used while the pen button is held.")))
         val preview = EraserPreview(c)
         fun show() = preview.apply {
             mode = ink.eraserMode; target = ink.eraserTarget; radius = ink.eraserRadius
@@ -916,12 +953,8 @@ object ToolControls {
                ruler: () -> Unit, insert: (dev.ownednotes.core.ShapeLibrary.Choice) -> Unit) {
         val c = column.context; val night = c.night
         title(column, "Shapes", if (ink.shapePen) "Shape pen on" else null)
-        group(column, "Shape pen", LinearLayout(c).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(Kit.segmented(c, listOf("On", "Off"), if (ink.shapePen) 0 else 1) { shapePen(it == 0) }.apply { contentDescription = "Shape pen" },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(note(c, "Everything you draw becomes a shape."))
-        })
+        group(column, "Shape pen", Kit.segmented(c, listOf("On", "Off"), if (ink.shapePen) 0 else 1) { shapePen(it == 0) }.apply { contentDescription = "Shape pen" },
+            info(c, "About the shape pen", "Shape pen", Explain.Line(SyncPanels.P.SHAPES, Glass.accent(night), "Everything you draw becomes a shape.")))
         val tiles = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
         dev.ownednotes.core.ShapeLibrary.Choice.entries.chunked(SHAPE_COLUMNS).forEachIndexed { r, choices ->
             tiles.addView(LinearLayout(c).apply {
@@ -939,12 +972,9 @@ object ToolControls {
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (r > 0) topMargin = c.dpi(8f) })
         }
         group(column, "Insert a shape", tiles)
-        group(column, "Ruler scale", LinearLayout(c).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(Kit.segmented(c, listOf("Screen", "1:1", "1:10", "1:100"), RulerScale.ratios.indexOf(ink.ruler.scaleRatio)) { rulerScale(RulerScale.ratios[it]) }
-                .apply { contentDescription = "Ruler scale" }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(note(c, "Drawing distances are in cm and follow zoom."))
-        })
+        group(column, "Ruler scale", Kit.segmented(c, listOf("Screen", "1:1", "1:10", "1:100"), RulerScale.ratios.indexOf(ink.ruler.scaleRatio)) { rulerScale(RulerScale.ratios[it]) }
+                .apply { contentDescription = "Ruler scale" },
+            info(c, "About the ruler scale", "Ruler scale", Explain.Line(SyncPanels.P.RULER, SyncPanels.slate(night), "Drawing distances are in cm and follow zoom.")))
         section(column, Kit.button(c, if (ink.rulerShown) "Hide ruler" else "Show ruler", Kit.Button.TINTED, small = true) { ruler() }, GAP - 4f)
     }
 

@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import androidx.ink.brush.BrushBehavior
 import androidx.ink.brush.BrushFamily
 import androidx.ink.brush.BrushPaint
@@ -135,7 +136,24 @@ class PencilWetRenderer(private val fallback: CanvasStrokeRenderer = CanvasStrok
         FountainInk.fill(canvas, outline(stroke), brush.colorIntArgb, brush.size, xs, ys, ts, n, paint)
     }
 
-    override fun draw(canvas: Canvas, inProgressStroke: InProgressStroke, strokeToScreenTransform: Matrix, animationProgress: Float) {
+    /** P682: a handwritten note in page units; live ink that starts in it is cut at its rounded edge, as finished ink is. */
+    class Clip(val rect: RectF, val path: Path)
+    /** Read on the render thread; the canvas swaps in a new immutable list whenever a stroke starts. */
+    @Volatile var clips: List<Clip> = emptyList()
+    private val first = StrokeInput()
+    private inline fun clipped(canvas: Canvas, stroke: InProgressStroke, draw: () -> Unit) {
+        val list = clips
+        if (list.isEmpty() || stroke.getInputCount() == 0) return draw()
+        stroke.populateInput(first, 0)
+        val clip = list.lastOrNull { it.rect.contains(first.x, first.y) } ?: return draw()
+        val saved = canvas.save()
+        try { canvas.clipPath(clip.path); draw() } finally { canvas.restoreToCount(saved) }
+    }
+
+    override fun draw(canvas: Canvas, inProgressStroke: InProgressStroke, strokeToScreenTransform: Matrix, animationProgress: Float) =
+        clipped(canvas, inProgressStroke) { drawUnclipped(canvas, inProgressStroke, strokeToScreenTransform, animationProgress) }
+
+    private fun drawUnclipped(canvas: Canvas, inProgressStroke: InProgressStroke, strokeToScreenTransform: Matrix, animationProgress: Float) {
         if (FountainInk.isFountain(inProgressStroke.brush?.family?.clientBrushFamilyId)) return fountain(canvas, inProgressStroke)
         if (!isPencil(inProgressStroke)) return fallback.draw(canvas, inProgressStroke, strokeToScreenTransform, animationProgress)
         val color = inProgressStroke.brush?.colorIntArgb ?: return
@@ -144,11 +162,12 @@ class PencilWetRenderer(private val fallback: CanvasStrokeRenderer = CanvasStrok
         canvas.drawPath(outline(inProgressStroke), paint)
     }
 
-    override fun draw(canvas: Canvas, inProgressStroke: InProgressStroke, strokeToScreenTransform: AffineTransform, animationProgress: Float) {
-        if (!isPencil(inProgressStroke) && !FountainInk.isFountain(inProgressStroke.brush?.family?.clientBrushFamilyId))
-            return fallback.draw(canvas, inProgressStroke, strokeToScreenTransform, animationProgress)
-        draw(canvas, inProgressStroke, identity, animationProgress)
-    }
+    override fun draw(canvas: Canvas, inProgressStroke: InProgressStroke, strokeToScreenTransform: AffineTransform, animationProgress: Float) =
+        clipped(canvas, inProgressStroke) {
+            if (!isPencil(inProgressStroke) && !FountainInk.isFountain(inProgressStroke.brush?.family?.clientBrushFamilyId))
+                fallback.draw(canvas, inProgressStroke, strokeToScreenTransform, animationProgress)
+            else drawUnclipped(canvas, inProgressStroke, identity, animationProgress)
+        }
 
     override fun draw(canvas: Canvas, stroke: Stroke, strokeToScreenTransform: Matrix, animationProgress: Float) =
         fallback.draw(canvas, stroke, strokeToScreenTransform, animationProgress)

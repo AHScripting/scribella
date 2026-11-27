@@ -26,7 +26,7 @@ internal object AboutNotices {
     val FILES = listOf("THIRD-PARTY-NOTICES.txt", "Apache-2.0.txt", "pdfiumandroid-2.0.3-LICENSE.txt", "GOOGLE-LIBRARY-NOTICES.txt")
 
     /** The notices, split so a list view only lays out what is on screen: the whole text is about 2 MB. */
-    fun read(context: Context): List<String> = FILES.flatMap { name ->
+    fun read(context: Context): List<String> = listOf(ML_KIT, LICENCE, "") + FILES.flatMap { name ->
         context.assets.open("licenses/$name").bufferedReader().use { it.readLines() }.chunked(40).map { it.joinToString("\n") } + ""
     }
 

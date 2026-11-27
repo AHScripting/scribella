@@ -34,7 +34,8 @@ internal class PageChooser(private val activity: MainActivity, title: String, pr
     private inner class Holder(root: LinearLayout) : RecyclerView.ViewHolder(root) {
         val art = ImageView(c).apply { scaleType = ImageView.ScaleType.FIT_CENTER; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
         val bar = View(c).apply { background = rounded(Glass.accent(c.night), c.dp(2f)) }
-        val name = Kit.text(c, "", Kit.Type.CAPTION).apply { gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        // P730: two lines; on a phone's three narrow columns one line showed only "Page 1," and "After" (the rest was hidden, no "…").
+        val name = Kit.text(c, "", Kit.Type.CAPTION).apply { gravity = Gravity.CENTER; maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
         var request: PageThumbnails.Request? = null
         init {
             (itemView as LinearLayout).apply {

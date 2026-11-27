@@ -83,11 +83,15 @@ object LibraryBackup {
         private fun files() = children(treeUri, folderId).filter { it.third != Document.MIME_TYPE_DIR }
         private fun uri(name: String) = files().firstOrNull { it.second == name }?.let { DocumentsContract.buildDocumentUriUsingTree(treeUri, it.first) }
         override fun names() = files().map { it.second }.toSet()
-        override fun write(name: String, from: File): String {
-            val target = uri(name) ?: DocumentsContract.createDocument(resolver, DocumentsContract.buildDocumentUriUsingTree(treeUri, folderId), "application/octet-stream", name)
+        override fun write(name: String, from: File): String = ProviderUpload.retrying {
+            val existing = uri(name)
+            val target = existing ?: DocumentsContract.createDocument(resolver, DocumentsContract.buildDocumentUriUsingTree(treeUri, folderId), "application/octet-stream", name)
                 ?: throw IOException("Cannot create $name")
-            (resolver.openOutputStream(target, "wt") ?: throw IOException("Cannot write $name")).use { out -> from.inputStream().use { it.copyTo(out) } }
-            return resolver.query(target, arrayOf(Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null } ?: name
+            ProviderUpload.settle(existing == null, from.length())
+            // P711: a new file whose upload failed is removed, so the next try starts from a fresh one.
+            try { (resolver.openOutputStream(target, "wt") ?: throw IOException("Cannot write $name")).use { out -> from.inputStream().use { it.copyTo(out) } } }
+            catch (e: IOException) { if (existing == null) runCatching { DocumentsContract.deleteDocument(resolver, target) }; throw e }
+            resolver.query(target, arrayOf(Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null } ?: name
         }
         override fun read(name: String): InputStream = uri(name)?.let { resolver.openInputStream(it) } ?: throw FileNotFoundException(name)
         override fun rename(from:String,to:String):String {

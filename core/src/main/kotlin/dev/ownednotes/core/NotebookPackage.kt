@@ -6,6 +6,7 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.ByteArrayOutputStream
+import java.lang.ref.ReferenceQueue
 import java.lang.ref.WeakReference
 import java.io.File
 import java.io.InputStream
@@ -31,7 +32,7 @@ object NotebookPackage {
     private const val MAX_TOTAL = 32 * 1024 * 1024
     /** B24 (P140): schema 26, the compact form, for notebooks beyond what schemas 1–25 hold. */
     const val COMPACT_SCHEMA = 26
-    const val SUPPORTED_SCHEMA = 37
+    const val SUPPORTED_SCHEMA = 39
     private const val MAX_INK_ENTRY = 64 * 1024 * 1024
     private const val MAX_COMPACT_TOTAL = 768L * 1024 * 1024
     /** Pretty page JSON above about this size is slow to write each time, so such a notebook is saved compact. */
@@ -123,6 +124,14 @@ object NotebookPackage {
      * copied as already-compressed bytes, so a save costs about the changed pages plus copying the rest.
      */
     fun write(notebook: Notebook, destination: OutputStream) {
+        try { writePackage(notebook, destination) } catch (e: OutOfMemoryError) {
+            // B78 (P705): say what happened instead of the runtime's "N bytes out of M bytes available".
+            clearCaches()
+            throw java.io.IOException("Not enough free memory to save this notebook. The last saved copy is kept; close other notebooks and try again.", e)
+        }
+    }
+
+    private fun writePackage(notebook: Notebook, destination: OutputStream) {
         val prepared = preparePages(notebook)
         val pageData = prepared.entries
         val pages = pageData.map { e ->
@@ -144,8 +153,12 @@ object NotebookPackage {
             if (asset.size > PdfAsset.LEGACY_MAX_BYTES) zip.streamEntry(it, asset.size, asset::writeTo)
             else zip.entry(it, file(it, asset::writeTo))
         } }
-        notebook.imageAssets.forEach { asset -> "images/${asset.id}.${asset.extension}".let { zip.entry(it, file(it, asset::writeTo)) } }
-        notebook.attachmentAssets.forEach { asset -> "files/${asset.id}.bin".let { zip.entry(it, file(it, asset::writeTo)) } }
+        // B78 (P705): photos are already compressed; write them straight through, never copied in memory or cached.
+        notebook.imageAssets.forEach { asset -> zip.storedEntry("images/${asset.id}.${asset.extension}", asset.size, asset::writeTo) }
+        notebook.attachmentAssets.forEach { asset -> "files/${asset.id}.bin".let {
+            if (asset.size > AttachmentAsset.LEGACY_MAX_BYTES) zip.streamEntry(it, asset.size, asset::writeTo)
+            else zip.entry(it, file(it, asset::writeTo))
+        } }
         zip.finish()
     }
 
@@ -223,8 +236,13 @@ object NotebookPackage {
         require(seen.add(name)) { "Duplicate package entry" }
     }
 
-    /** Reads one entry, refusing more than its own limit or, with the others read so far ([total]), the package's. */
-    private fun InputStream.entryBytes(name: String, total: AtomicLong): ByteArray {
+    /**
+     * Reads one entry, refusing more than its own limit or, with the others read so far ([total]), the package's.
+     * P715: an entry whose size the zip directory records ([known]) is first read into one array of that size: a photo
+     * of a few MB otherwise passed through a doubling buffer and a final copy, about three times its size at once.
+     * Should the entry hold more than recorded, the rest is read as before, under the same limits.
+     */
+    private fun InputStream.entryBytes(name: String, total: AtomicLong, known: Long = -1L): ByteArray {
         val limit = when {
             name.endsWith(".ink") -> MAX_INK_ENTRY
             name.startsWith("images/") -> ImageAsset.MAX_BYTES
@@ -233,6 +251,16 @@ object NotebookPackage {
             else -> MAX_ENTRY
         }
         val bytes = ByteArrayOutputStream()
+        if (known in 0..limit.toLong() && total.get() + known <= MAX_COMPACT_TOTAL) {
+            val exact = ByteArray(known.toInt())
+            var n = 0
+            while (n < exact.size) { val count = read(exact, n, exact.size - n); if (count < 0) break; n += count }
+            require(total.addAndGet(n.toLong()) <= MAX_COMPACT_TOTAL) { "Package exceeds notebook limits" }
+            val next = if (n < exact.size) -1 else read()
+            if (next < 0) return if (n == exact.size) exact else exact.copyOf(n)
+            require(n + 1 <= limit && total.incrementAndGet() <= MAX_COMPACT_TOTAL) { "Package exceeds notebook limits" }
+            bytes.write(exact, 0, n); bytes.write(next)
+        }
         val buffer = ByteArray(65536)
         while (true) {
             val count = read(buffer)
@@ -253,15 +281,45 @@ object NotebookPackage {
     }
 
     /** Decodes one page from its JSON and, in the compact form, its point data. */
+    /**
+     * P715: pages decoded from a file and still in use, by the checksums of their entries. Reading a notebook again (sync's
+     * copies of the one open in the editor, the other device's copy with its unchanged pages) shares each page already
+     * held instead of decoding one more copy: the Pixel ran out of memory holding several. Pages are immutable; only
+     * decoded pages are kept, and every page entry still passes its file-name, checksum, identity and ink-limit checks.
+     */
+    private class HeldPage(page: Page, val key: String, queue: ReferenceQueue<Page>) : WeakReference<Page>(page, queue)
+    private val heldPageQueue = ReferenceQueue<Page>()
+    private val heldPages = HashMap<String, HeldPage>()
+    private fun heldPage(key: String): Page? = synchronized(heldPages) {
+        while (true) { val gone = heldPageQueue.poll() as HeldPage? ?: break; if (heldPages[gone.key] === gone) heldPages.remove(gone.key) }
+        heldPages[key]?.get()
+    }
+    private fun keepPage(key: String, page: Page): Page = synchronized(heldPages) {
+        heldPages[key]?.get() ?: page.also { heldPages[key] = HeldPage(it, key, heldPageQueue) }
+    }
+    /** Counts a shared page's ink against [budget] exactly as decoding its ink entry would. */
+    private fun charge(page: Page, budget: InkCodec.Budget) = page.strokes.forEach { stroke ->
+        require(budget.samples.addAndGet(stroke.samples.size.toLong()) <= NotebookLimits.SAMPLES) { "Notebook exceeds its limits" }
+        stroke.outlines.forEach { require(budget.vertices.addAndGet(it.size.toLong()) <= NotebookLimits.VERTICES) { "Notebook exceeds its limits" } }
+        stroke.erasures.forEach { require(budget.eraserPoints.addAndGet(it.points.size.toLong()) <= NotebookLimits.ERASER_POINTS) { "Notebook exceeds its limits" } }
+    }
+
     private fun decodePage(manifest: Manifest, reference: PageReference, bytes: ByteArray, ink: ByteArray?, budget: InkCodec.Budget): Page {
         require(reference.file == "pages/${reference.id}.json") { "Invalid page reference" }
         require(hash(bytes) == reference.sha256) { "Page checksum mismatch" }
+        if (ink != null) require(hash(ink) == reference.inkSha256) { "Page checksum mismatch" }
+        val key = reference.sha256 + when { ink != null -> "/ink/" + reference.inkSha256; manifest.schemaVersion >= COMPACT_SCHEMA -> "/compact"; else -> "/packed" }
+        heldPage(key)?.let { held ->
+            require(held.id == reference.id) { "Page identity mismatch" }
+            if (ink != null) charge(held, budget)
+            return held
+        }
         val page = json.decodeFromString<Page>(bytes.toString(Charsets.UTF_8)).also { require(it.id == reference.id) { "Page identity mismatch" } }
-        return when {
-            ink != null -> { require(hash(ink) == reference.inkSha256) { "Page checksum mismatch" }; InkCodec.decode(page, ink, budget) }
+        return keepPage(key, when {
+            ink != null -> InkCodec.decode(page, ink, budget)
             manifest.schemaVersion >= COMPACT_SCHEMA -> page.also { require(it.strokes.isEmpty()) { "Ink without its data" } }
             else -> page.packed()
-        }
+        })
     }
 
     /** Decodes [reference]'s page once its JSON (and ink, if any) has arrived; their bytes are then released. */
@@ -275,7 +333,8 @@ object NotebookPackage {
     }
 
     /** The notebook from its decoded [pages] and the bytes of its other entries, checked against its schema. */
-    private fun assemble(manifest: Manifest, pages: List<Page>, attachment: ((String) -> AttachmentAsset)? = null, pdf: ((String)->PdfAsset)? = null, entry: (String) -> ByteArray?): Notebook {
+    private fun assemble(manifest: Manifest, pages: List<Page>, attachment: ((String) -> AttachmentAsset)? = null, pdf: ((String)->PdfAsset)? = null,
+                         image: ((String, String) -> ImageAsset?)? = null, entry: (String) -> ByteArray?): Notebook {
         val assets = manifest.assets.map { reference ->
             require(reference.file == "assets/${reference.id}.pdf" && reference.id == reference.sha256) { "Invalid PDF reference" }
             val asset = pdf?.invoke(reference.file) ?: PdfAsset.fromBytes(requireNotNull(entry(reference.file)))
@@ -285,7 +344,8 @@ object NotebookPackage {
         require(manifest.schemaVersion>=27 || assets.all { it.size<=PdfAsset.LEGACY_MAX_BYTES }) { "Larger PDF originals require schema 27" }
         require(manifest.schemaVersion >= 28 || assets.all { it.size <= PdfAsset.SCHEMA27_MAX_BYTES }) { "PDF originals above 64 MiB require schema 28" }
         val images = manifest.imageAssets.map { reference ->
-            val asset = ImageAsset.fromBytes(requireNotNull(entry(reference.file)) { "Missing image" })
+            // P715: a picture already in memory with exactly this entry's bytes is shared; its checks below run all the same.
+            val asset = image?.invoke(reference.file, reference.id) ?: ImageAsset.fromBytes(requireNotNull(entry(reference.file)) { "Missing image" })
             require(reference.file == "images/${asset.id}.${asset.extension}" && reference.id == asset.id && reference.sha256 == asset.id) { "Invalid image reference/checksum" }
             asset
         }
@@ -328,6 +388,8 @@ object NotebookPackage {
         require(manifest.schemaVersion >= 24 || notebook.pages.all { page -> page.reviewedInk.all { it.inputMode == ReviewedInkInput.RAW } }) { "Reviewed remaining centerlines require schema 24" }
         require(manifest.schemaVersion >= 23 || notebook.pages.all { it.reviewedInk.isEmpty() }) { "Reviewed handwriting requires schema 23" }
         require(manifest.schemaVersion >= 25 || notebook.pages.all { page -> page.strokes.none { it.isPencil } }) { "Pencil requires schema 25" }
+        require(manifest.schemaVersion >= 39 || notebook.pages.none { it.imageBackground?.isCropped == true }) { "Cropped page pictures require schema 39" }
+        require(manifest.schemaVersion >= 38 || notebook.pages.none { it.hasInkNotes }) { "Handwritten sticky notes require schema 38" }
         require(manifest.schemaVersion >= 37 || notebook.pages.all { page -> page.strokes.none { it.isFountain } }) { "Fountain pen requires schema 37" }
         require(manifest.schemaVersion >= 36 || notebook.pages.all {p->p.strokes.none {it.audio!=null}}) { "Audio links require schema 36" }
         require(manifest.schemaVersion >= 35 || notebook.pages.none { it.hasNotebookLinks }) { "Notebook links require schema 35" }
@@ -403,8 +465,31 @@ object NotebookPackage {
         return manifest
     }
 
-    private fun ZipFile.bytes(name: String, total: AtomicLong): ByteArray =
-        getInputStream(requireNotNull(getEntry(name)) { "Missing or unreferenced entries" }).use { it.entryBytes(name, total) }
+    private fun ZipFile.bytes(name: String, total: AtomicLong): ByteArray {
+        val entry = requireNotNull(getEntry(name)) { "Missing or unreferenced entries" }
+        return getInputStream(entry).use { it.entryBytes(name, total, entry.size) }
+    }
+
+    /**
+     * P715: the picture already in memory as [id] (the editor's, or another copy sync read), when this entry's bytes,
+     * streamed through SHA-256 in small pieces, are exactly that picture; null when none is held, and the entry is then
+     * read as usual. So reading a notebook again never makes one more copy of its photos. The same size limits apply,
+     * and a checksum that differs fails as reading the entry whole would.
+     */
+    private fun ZipFile.heldImage(name: String, id: String, total: AtomicLong): ImageAsset? {
+        val held = ImageAsset.inMemory(id) ?: return null
+        val digest = MessageDigest.getInstance("SHA-256"); val buffer = ByteArray(65536); var size = 0L
+        getInputStream(requireNotNull(getEntry(name)) { "Missing or unreferenced entries" }).use { input ->
+            while (true) {
+                val count = input.read(buffer); if (count < 0) break
+                size += count
+                require(size <= ImageAsset.MAX_BYTES && total.addAndGet(count.toLong()) <= MAX_COMPACT_TOTAL) { "Package exceeds notebook limits" }
+                digest.update(buffer, 0, count)
+            }
+        }
+        require(size == held.size.toLong() && digest.digest().joinToString("") { "%02x".format(it) } == id) { "Invalid image reference/checksum" }
+        return held
+    }
 
     /**
      * Reads a package file with the same checks as [read] of a stream. Its pages are unpacked and decoded on several
@@ -425,7 +510,7 @@ object NotebookPackage {
                 zip.getInputStream(requireNotNull(zip.getEntry(path))).use { store.read(it,total) }
             } },pdf=owned?.let { store -> { path: String ->
                 zip.getInputStream(requireNotNull(zip.getEntry(path))).use { store.readPdf(it,total) }
-            } }) { zip.bytes(it, total) }.also { checkSize(manifest, 0, total.get()) }
+            } }, image = { path, id -> zip.heldImage(path, id, total) }) { zip.bytes(it, total) }.also { checkSize(manifest, 0, total.get()) }
         }
     }
 
@@ -502,6 +587,67 @@ object NotebookPackage {
         return zip.use { zip.manifest().let { Summary(it.id, it.title, it.pages.size) } }
     }
 
+    /**
+     * P715: what sync compares about a notebook file (its pages' record, title and files), read one page at a time, so a
+     * long notebook is never held decoded as a whole: the Pixel ran out of memory holding several whole copies at once.
+     * Every page passes the same checksum and identity checks as [read]; every PDF, picture and attached file its
+     * checksum and file-name rules, streamed rather than held. The notebook-wide schema checks of [read] run where a file
+     * is actually taken in or combined.
+     */
+    class SyncSummary(val id: String, val title: String, val base: NotebookMerge.Base, val assetIds: Set<String>)
+
+    fun syncSummary(file: File): SyncSummary {
+        val zip = open(file) ?: return read(file).let { SyncSummary(it.id, it.title, NotebookMerge.base(it), LiveChanges.assetIds(it)) }
+        return zip.use {
+            val manifest = zip.manifest()
+            require(Regex("[a-zA-Z0-9-]{1,80}").matches(manifest.id) && manifest.title.length <= 500) { "Invalid notebook metadata" }
+            require(manifest.pages.size in 1..NotebookLimits.PAGES && manifest.pages.map { it.id }.distinct().size == manifest.pages.size) { "Invalid page list" }
+            val total = AtomicLong()
+            val budget = InkCodec.Budget()
+            val used = HashSet<String>()
+            val pages = manifest.pages.map { reference ->
+                val page = decodePage(manifest, reference, zip.bytes(reference.file, total), reference.ink?.let { zip.bytes(it, total) }, budget)
+                page.pdfBackground?.let { used += "p:" + it.assetId }
+                page.imageAssetIds.forEach { used += "i:$it" }
+                page.attachmentAssetIds.forEach { used += "a:$it" }
+                NotebookMerge.pageBase(page)
+            }
+            val head = ByteArray(8)
+            /** The entry's SHA-256, streamed in small pieces under the same size limits as [read]; its first bytes land in [head]. */
+            fun streamedSha(name: String, limit: Long): String =
+                zip.getInputStream(requireNotNull(zip.getEntry(name)) { "Missing or unreferenced entries" }).use { input ->
+                    val digest = MessageDigest.getInstance("SHA-256"); val buffer = ByteArray(65536); var size = 0L
+                    head.fill(0)
+                    while (true) {
+                        val count = input.read(buffer); if (count < 0) break
+                        if (size < head.size) System.arraycopy(buffer, 0, head, size.toInt(), minOf(count, head.size - size.toInt()))
+                        size += count
+                        require(size <= limit && total.addAndGet(count.toLong()) <= MAX_COMPACT_TOTAL) { "Package exceeds notebook limits" }
+                        digest.update(buffer, 0, count)
+                    }
+                    digest.digest().joinToString("") { "%02x".format(it) }
+                }
+            manifest.assets.forEach {
+                require(it.file == "assets/${it.id}.pdf" && it.id == it.sha256) { "Invalid PDF reference" }
+                require(streamedSha(it.file, PdfAsset.MAX_BYTES.toLong()) == it.sha256) { "PDF checksum mismatch" }
+            }
+            val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+            manifest.imageAssets.forEach {
+                require(it.id == it.sha256 && streamedSha(it.file, ImageAsset.MAX_BYTES.toLong()) == it.sha256) { "Invalid image reference/checksum" }
+                val extension = when { head.contentEquals(png) -> "png"; head[0] == 0xFF.toByte() && head[1] == 0xD8.toByte() -> "jpg"; else -> "" }
+                require(it.file == "images/${it.id}.$extension") { "Invalid image reference/checksum" }
+            }
+            manifest.attachments.forEach {
+                require(it.file == "files/${it.id}.bin" && it.id == it.sha256) { "Invalid attached file reference/checksum" }
+                require(streamedSha(it.file, AttachmentAsset.MAX_BYTES.toLong()) == it.sha256) { "Invalid attached file reference/checksum" }
+            }
+            val assetIds = (manifest.assets.map { "p:" + it.id } + manifest.imageAssets.map { "i:" + it.id } + manifest.attachments.map { "a:" + it.id })
+            require(assetIds.distinct().size == assetIds.size && assetIds.toSet() == used) { "Missing, duplicate or unreferenced files" }
+            checkSize(manifest, 0, total.get())
+            SyncSummary(manifest.id, manifest.title, NotebookMerge.Base(title = manifest.title, pages = pages), assetIds.toSet())
+        }
+    }
+
     /** The notebook with only its first page and the files that page uses, for a cover; the other pages are not read. */
     fun firstPage(file: File): Notebook = firstPageFile(file,null)
     fun firstPage(file: File,ownedDirectory: File): Notebook = withOwnedAttachments(ownedDirectory) { firstPageFile(file,it) }
@@ -530,11 +676,16 @@ fun Notebook.firstPage(): Notebook {
         imageAssets = imageAssets.filter { it.id in page.imageAssetIds }, attachmentAssets = attachmentAssets.filter { it.id in page.attachmentAssetIds })
 }
 
+/** P680: a handwritten sticky note, or ink belonging to one, is on this page. */
+internal val Page.hasInkNotes get() = strokes.any { it.note != null } || textBoxes.any { it.sticky?.ink == true }
+
 /** P101: anything on any page is locked. */
 internal val Notebook.hasLocks get() = pages.any { page -> page.layers.any { it.locked } || page.strokes.any { it.locked } || page.images.any { it.locked } || page.textBoxes.any { it.locked } }
 
 /** The schema the notebook's features need (1–25,27–30); the package may be saved compact as [NotebookPackage.COMPACT_SCHEMA]. */
 fun Notebook.schemaVersion(): Int = when {
+    pages.any { it.imageBackground?.isCropped == true } -> 39
+    pages.any { it.hasInkNotes } -> 38
     pages.any { page -> page.strokes.any { it.isFountain } } -> 37
     pages.any {p->p.strokes.any {it.audio!=null}} -> 36
     pages.any {it.hasNotebookLinks} -> 35

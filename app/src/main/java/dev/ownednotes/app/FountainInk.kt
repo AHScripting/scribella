@@ -107,12 +107,15 @@ object FountainInk {
      * draws as one filled outline with that picture as its paint, the same work for the GPU as a ballpoint stroke.
      * Clipping every stroke to its outline and painting its shading on every frame made a full page lag.
      */
-    private class Shaded(val stroke: dev.ownednotes.core.InkStroke, val shader: BitmapShader, val scale: Float, val bytes: Int) {
+    private class Shaded(stroke: dev.ownednotes.core.InkStroke, val shader: BitmapShader, val scale: Float, val bytes: Int) {
+        /** P716: weakly, so a picture never keeps a stroke in memory that no page has any more (a page read again, erased or moved ink). */
+        val stroke = java.lang.ref.WeakReference(stroke)
         var used = 0L
     }
     /** Keyed by the outline Path itself (Path keeps Object identity), most recently drawn last. */
     private val shaded = LinkedHashMap<Path, Shaded>(64, .75f, true)
     private var shadedBytes = 0L
+    private var builds = 0
     /** Pictures not drawn for [IDLE_MS] make room past [BUDGET]; when the page itself needs more, the rest draw clipped. */
     private const val BUDGET = 64L * 1024 * 1024
     private const val IDLE_MS = 1500L
@@ -245,7 +248,7 @@ object FountainInk {
         val now = android.os.SystemClock.uptimeMillis()
         val held: Shaded?
         synchronized(shaded) {
-            held = shaded[outline]?.takeIf { it.stroke === stroke }
+            held = shaded[outline]?.takeIf { it.stroke.get() === stroke }
             if (held != null && held.scale >= scale) { held.used = now; return held }
         }
         // Room first, so a full budget never paints a picture only to throw it away; then a softer picture is better than none.
@@ -273,6 +276,11 @@ object FountainInk {
         synchronized(shaded) {
             shaded.remove(outline)?.let { shadedBytes -= it.bytes }
             built.used = now; shaded[outline] = built; shadedBytes += built.bytes
+            // P716: now and then the pictures of strokes that are gone make room at once, before idle ones.
+            if (++builds % 64 == 0) {
+                val all = shaded.values.iterator()
+                while (all.hasNext()) { val old = all.next(); if (old.stroke.get() == null) { shadedBytes -= old.bytes; all.remove() } }
+            }
         }
         return built
     }

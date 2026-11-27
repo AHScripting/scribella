@@ -8,8 +8,7 @@ import java.util.zip.CRC32
 
 /** Immutable original static PNG/JPEG. Decoders still probe pixels before user import. */
 class ImageAsset private constructor(private val payload: ByteArray, val width: Int, val height: Int,
-                                     val extension: String, private val exifRanges: List<IntRange>) {
-    val id = sha256(payload)
+                                     val extension: String, private val exifRanges: List<IntRange>, val id: String) {
     val size get() = payload.size
     val mimeType get() = if (extension == "png") "image/png" else "image/jpeg"
     fun openStream(): InputStream = ByteArrayInputStream(payload)
@@ -29,19 +28,47 @@ class ImageAsset private constructor(private val payload: ByteArray, val width: 
         const val MAX_PIXELS = 40_000_000L
         private val pngSignature = byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10)
         private data class Header(val width: Int, val height: Int, val extension: String, val exif: List<IntRange>)
+        /**
+         * P714: assets still in use, by checksum. Reading a notebook again (sync's copies, a reopen) shares each picture
+         * already held instead of keeping one more copy of its bytes; the payload is private and never changed.
+         */
+        private class Held(asset: ImageAsset, val key: String, queue: java.lang.ref.ReferenceQueue<ImageAsset>) : java.lang.ref.WeakReference<ImageAsset>(asset, queue)
+        private val heldQueue = java.lang.ref.ReferenceQueue<ImageAsset>()
+        private val held = HashMap<String, Held>()
+        private fun inUse(id: String, bytes: ByteArray): ImageAsset? = synchronized(held) {
+            while (true) { val gone = heldQueue.poll() as Held? ?: break; if (held[gone.key] === gone) held.remove(gone.key) }
+            held[id]?.get()?.takeIf { it.payload.size == bytes.size && it.payload.contentEquals(bytes) }
+        }
+        private fun keep(asset: ImageAsset): ImageAsset = synchronized(held) {
+            held[asset.id]?.get()?.takeIf { it.payload.contentEquals(asset.payload) }
+                ?: asset.also { held[it.id] = Held(it, it.id, heldQueue) }
+        }
+        /**
+         * P715: the picture with checksum [id] while one is still in use, for a reader that has streamed a package entry
+         * to exactly this checksum and size: it shares the picture instead of reading its bytes into memory again.
+         */
+        internal fun inMemory(id: String): ImageAsset? = synchronized(held) {
+            while (true) { val gone = heldQueue.poll() as Held? ?: break; if (held[gone.key] === gone) held.remove(gone.key) }
+            held[id]?.get()
+        }
         fun fromBytes(bytes: ByteArray): ImageAsset {
             require(bytes.size in 12..MAX_BYTES) { "Image must be at most ${MAX_BYTES / (1024 * 1024)} MiB" }
+            val id = sha256(bytes)
+            inUse(id, bytes)?.let { return it }
             val owned = bytes.copyOf()
             val header = when {
                 owned.take(8).toByteArray().contentEquals(pngSignature) -> png(owned)
                 u8(owned, 0) == 255 && u8(owned, 1) == 216 -> jpeg(owned)
                 else -> throw IllegalArgumentException("Choose a static PNG or JPEG image")
             }
-            require(header.width in 1..100_000 && header.height in 1..100_000 && header.width.toLong() * header.height <= MAX_PIXELS) {
-                "Image dimensions must be positive and at most 40 megapixels"
+            require(header.width >= 1 && header.height >= 1) { "Image has no width or height" }
+            // B75 (P703): a picture that is simply too big says so, with its size (the app scales such photos down first).
+            require(header.width <= 100_000 && header.height <= 100_000 && header.width.toLong() * header.height <= MAX_PIXELS) {
+                "Image is too large: ${header.width}×${header.height} is ${megapixels(header.width, header.height)} megapixels; at most ${MAX_PIXELS / 1_000_000} megapixels"
             }
-            return ImageAsset(owned, header.width, header.height, header.extension, header.exif)
+            return keep(ImageAsset(owned, header.width, header.height, header.extension, header.exif, id))
         }
+        private fun megapixels(width: Int, height: Int) = "%.1f".format(java.util.Locale.ROOT, width.toLong() * height / 1_000_000.0)
         private fun u8(bytes: ByteArray, index: Int) = bytes[index].toInt() and 255
         private fun u16(bytes: ByteArray, index: Int) = u8(bytes, index) * 256 + u8(bytes, index + 1)
         private fun u32(bytes: ByteArray, index: Int): Long = (0..3).fold(0L) { value, i -> value * 256 + u8(bytes, index + i) }

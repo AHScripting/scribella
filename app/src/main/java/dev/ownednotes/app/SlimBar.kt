@@ -82,7 +82,8 @@ class SlimBar(context: Context, private val night: Boolean) : ViewGroup(context)
         internal fun natural(): Int = when (kind) {
             Kind.NAME -> (namePaint.measureText(text.orEmpty()) + context.dp(12f)).toInt().coerceAtMost(context.dpi(NAME_MAX))
             Kind.DIVIDER, Kind.GAP -> 0
-            Kind.PAGE -> context.dpi(widthDp.takeIf { it > 0f } ?: PAGE_W)
+            // B66: the page pill grows to fit its whole number ("20 / 200"), never shorter than PAGE_W.
+            Kind.PAGE -> maxOf(context.dpi(widthDp.takeIf { it > 0f } ?: PAGE_W), (pagePaint.measureText(text.orEmpty()) + context.dp(14f)).toInt())
             else -> context.dpi(widthDp)
         }
 

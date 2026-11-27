@@ -29,19 +29,16 @@ internal class StudyCardControls(private val activity:MainActivity,private val i
             if(note==null) "Open a notebook" else "${due.size} due · ${all.size} cards"))
         note ?: return
         val pending=cards.pending?.takeIf {it.first==note.id}
-        val stacked=context.largeText
         fun small(label:String,description:String,onClick:()->Unit)=Kit.button(context,label,Kit.Button.TINTED,small=true,onClick=onClick).apply {
             contentDescription=description;textSize=13.5f;context.dpi(10f).let {setPadding(it,0,it,0)}
         }
-        addView(LinearLayout(context).apply {
-            orientation=if(stacked) VERTICAL else HORIZONTAL
+        // P730: the two buttons stack whenever a label would not fit beside the other, not only past 130% text.
+        addView(FitRow(context,context.dpi(8f)).apply {
             context.dpi(12f).let {setPadding(it,0,it,it)}
             addView(small(if(pending==null)"Mark question" else "Redo question","Mark selection as flashcard question") {attempt {
                 cards.question(repo.session!!.notebook,repo.selectedPageId!!,ink.selectedObjectIds);render()
-            }},if(stacked) LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.WRAP_CONTENT) else LayoutParams(0,LayoutParams.WRAP_CONTENT,1f))
-            addView(small("Review due","Review due cards") {frame.startFlashcards()}.apply {isEnabled=due.isNotEmpty()},
-                if(stacked) LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.WRAP_CONTENT).apply {topMargin=context.dpi(8f)}
-                else LayoutParams(0,LayoutParams.WRAP_CONTENT,1f).apply {marginStart=context.dpi(8f)})
+            }})
+            addView(small("Review due","Review due cards") {frame.startFlashcards()}.apply {isEnabled=due.isNotEmpty()})
         })
         if(pending!=null) addView(LinearLayout(context).apply {
             orientation=VERTICAL;context.dpi(12f).let {setPadding(it,0,it,it)}

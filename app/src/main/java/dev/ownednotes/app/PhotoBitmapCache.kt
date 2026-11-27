@@ -4,7 +4,7 @@ import android.graphics.Bitmap
 import dev.ownednotes.core.Notebook
 import dev.ownednotes.core.Page
 
-/** Main-thread live-page cache: at most four raw 2048-edge images, decoded on the serial IO executor. */
+/** Main-thread live-page cache: at most four raw 2048-edge images, decoded on the page-rendering executor (P704 B76: not behind sync on app.io). */
 internal class PhotoBitmapCache(private val app: NotesApplication, private val changed: () -> Unit) {
     private var attached = false
     private var wanted = emptySet<String>()
@@ -31,7 +31,7 @@ internal class PhotoBitmapCache(private val app: NotesApplication, private val c
             val asset = note.imageAssets.firstOrNull { it.id == id }
             if (asset == null) { failures[id] = "Image object asset missing"; return@forEach }
             pending.add(id)
-            app.io.execute {
+            app.pageRendering.execute {
                 val result = runCatching { ImageSupport.decodeRaw(asset) }
                 app.main.post {
                     pending.remove(id)

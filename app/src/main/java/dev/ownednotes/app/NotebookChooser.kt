@@ -23,7 +23,9 @@ import java.util.concurrent.Future
  * P532: chooses a notebook by its first page, for Open alongside, Copy or Move page to notebook, and Merge. Covers are read and
  * drawn on demand as tiles scroll into view. Choosing only reports the entry; each caller keeps its own stale and read-only guards.
  */
-internal class NotebookChooser(private val activity: MainActivity, title: String, private val entries: List<LibraryEntry>, private val choose: (LibraryEntry) -> Unit) {
+internal class NotebookChooser(private val activity: MainActivity, internal val title: String, private val entries: List<LibraryEntry>,
+    /** P686: runs once the sheet has closed, after [choose] when a notebook was chosen. */
+    private val closedThen: (() -> Unit)? = null, private val choose: (LibraryEntry) -> Unit) {
     private val c get() = activity
     private val readCover = LibraryScreen.defaultCoverLoader(c)
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "notebook-chooser-covers").apply { isDaemon = true } }
@@ -111,7 +113,7 @@ internal class NotebookChooser(private val activity: MainActivity, title: String
         sheet.body.addView(grid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, c.dpi(214f) * rows.coerceIn(1, 2) + c.dpi(8f)).apply { topMargin = c.dpi(10f) })
         val observer = object : DefaultLifecycleObserver { override fun onDestroy(owner: LifecycleOwner) { dismiss() } }
         activity.lifecycle.addObserver(observer)
-        sheet.dialog.setOnDismissListener { closed = true; worker.shutdownNow(); covers.evictAll(); activity.lifecycle.removeObserver(observer) }
+        sheet.dialog.setOnDismissListener { closed = true; worker.shutdownNow(); covers.evictAll(); activity.lifecycle.removeObserver(observer); closedThen?.invoke() }
         sheet.show()
         return this
     }

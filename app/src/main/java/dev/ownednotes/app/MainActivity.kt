@@ -4,6 +4,8 @@ import android.app.AlertDialog
 import android.content.res.Configuration
 import android.os.Bundle
 import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Toast
@@ -26,6 +28,10 @@ internal const val QUICK_NOTE = "dev.ownednotes.app.QUICK_NOTE"
 
 /** P530: a finger this soon after the pen was near is the resting hand, not a request to change panes. */
 private const val PANE_PALM_MS = 500L
+/** P699: while a notebook is open, sync again this long after the last sync ended. */
+private const val AUTO_SYNC_MS = 30_000L
+/** While instant sync is connected, folder sync only needs to run now and then (LIVE-SYNC-PLAN step 3b). */
+private const val LIVE_AUTO_SYNC_MS = 600_000L
 class MainActivity : ComponentActivity() {
     private val app get() = application as NotesApplication
     /** P530 (F081/F082): the active pane's document. Library-wide work uses [NotesApplication.repository]. */
@@ -54,6 +60,8 @@ class MainActivity : ComponentActivity() {
             libraryScreen?.let { if (!it.leaveTrash()) finish() }
                 // P201 step 10: Back cancels a scan, as it dismissed the scan dialog before.
                 ?: if (scanScreen != null) scanScreen!!.cancel()
+                // P689: Back leaves the picture crop without changing the picture.
+                else if (pictureCrop != null) pictureCrop!!.back()
                 else if (frame.settingsOpen) frame.closeSettings()
                 // P201 step 6: the page organizer stops choosing, then closes, like Settings.
                 else if (frame.organizerOpen) frame.organizer!!.back()
@@ -69,7 +77,7 @@ class MainActivity : ComponentActivity() {
     override fun onKeyDown(keyCode:Int,event:android.view.KeyEvent):Boolean {
         if(appLockGate.locked)return true
         if(!::primaryInk.isInitialized || !::frame.isInitialized || currentFocus is EditText || textEditor!=null || photoCropEditor!=null ||
-            libraryScreen!=null || frame.settingsOpen || frame.organizerOpen || frame.choosingPages || scanScreen!=null || !ink.inputEnabled)
+            libraryScreen!=null || frame.settingsOpen || frame.organizerOpen || frame.choosingPages || scanScreen!=null || pictureCrop!=null || !ink.inputEnabled)
             return super.onKeyDown(keyCode,event)
         val ctrl=event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed
         val pageKey=!event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed && !event.isShiftPressed &&
@@ -108,6 +116,8 @@ class MainActivity : ComponentActivity() {
         canvas.onAttachmentTap = { attachmentMenu(it) }
         canvas.onPdfLinkTap = { id, point -> followPdfLink(id, point) }
         canvas.tapTarget = { id, point -> tapTarget(id, point) }
+        canvas.onNoteAction = { pageId, id, part, x, y -> frame.noteAction(canvas, document, pageId, id, part, x, y) }
+        canvas.onTextTap = { id, point -> frame.inPlaceText.openExisting(canvas, document, id, point) }
         canvas.onFingerDown = { id -> readTapTargets(id) }
         canvas.onPdfPasswordRequired = { asset ->
             if(libraryScreen==null)requestPdfPassword(asset,unlocked={
@@ -150,6 +160,7 @@ class MainActivity : ComponentActivity() {
             val created = InkCanvas(this, document, { refresh() }, { message(it) })
             companionInk = created
             wireCanvas(created, document)
+            thumbnails.panes = 2 // B63: room for both panes' page-turn previews
             frame.attachCompanion(created, document)
             if (companionOpening || app.activeDocument === document) {
                 app.focusDocument(document)
@@ -160,6 +171,7 @@ class MainActivity : ComponentActivity() {
             if (ink === canvas) app.focusDocument(app.repository)
             frame.detachCompanion()
             canvas.disposePageCurl()
+            thumbnails.panes = 1
             companionInk = null
         } else if (companionOpening && document.session == null && !document.busy) {
             companionOpening = false
@@ -268,12 +280,29 @@ class MainActivity : ComponentActivity() {
         val snapshot = app.exportSnapshot
         app.exportSnapshot = null
         if (uri != null && snapshot != null) {
-            repository.setFileBusy(true)
-            app.io.execute {
+            repository.exportStarted()
+            app.exporting.execute {
                 val result = runCatching { app.contentResolver.openOutputStream(uri, "wt")?.use { NotebookPackage.write(snapshot, it) } ?: error("Cannot open export destination") }
-                app.main.post { repository.setFileBusy(false); message(result.fold({ "Notebook exported" }, { "Export failed: ${it.message}" })) }
+                app.main.post { repository.exportFinished(); message(result.fold({ "Notebook exported" }, { "Export failed: ${it.message}" })) }
             }
         } else if (uri != null) message("Export was interrupted; please try again")
+    }
+    /** P716/P717: a compressed copy of the memory report goes where the user chooses; the report stays here until deleted. */
+    private val saveMemoryReport = registerForActivityResult(ActivityResultContracts.CreateDocument("application/gzip")) { uri ->
+        if (uri == null) return@registerForActivityResult
+        message("Saving the memory report…")
+        app.exporting.execute {
+            val result = runCatching { MemoryReport.save(app, uri) }
+            app.main.post {
+                if (isDestroyed) return@post
+                val mb = { bytes: Long -> String.format(java.util.Locale.US, "%.1f", bytes / 1048576.0) }
+                message(result.fold({ saved ->
+                    val shown = saved.reported
+                    if (shown != null && shown < saved.written) "Wrote ${mb(saved.written)} MB, but the chosen place shows ${mb(shown)} MB so far. The report stays on this device."
+                    else "Memory report saved (${mb(saved.written)} MB, compressed). It stays on this device until deleted in Library sync."
+                }, { "The memory report could not be saved: ${it.message ?: it.javaClass.simpleName}" }))
+            }
+        }
     }
     /** P123 (F196): several notebooks at once; ones already in the library are skipped and the outcome is reported. */
     private val import = registerForActivityResult(ImportChooser.Many()) { uris ->
@@ -305,6 +334,27 @@ class MainActivity : ComponentActivity() {
     private val importPdf = registerForActivityResult(ImportChooser.One()) { uri ->
         if (uri != null) preparePdfSelection(uri, null)
     }
+    /** Instant sync: the user's own Cloudflare server, saved as a zip from the app's assets (server/sync-server in the source). */
+    private val serverFiles = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri == null) return@registerForActivityResult
+        app.io.execute {
+            val result = runCatching {
+                val names = assets.list("sync-server").orEmpty().sorted()
+                check(names.isNotEmpty()) { "the server files are missing from this build" }
+                (contentResolver.openOutputStream(uri, "wt") ?: error("the file could not be opened")).use { raw ->
+                    java.util.zip.ZipOutputStream(raw).use { zip ->
+                        for (name in names) {
+                            zip.putNextEntry(java.util.zip.ZipEntry("scribella-sync-server/$name"))
+                            assets.open("sync-server/$name").use { it.copyTo(zip) }
+                            zip.closeEntry()
+                        }
+                    }
+                }
+            }
+            app.main.post { message(result.fold({ "Server files saved. Copy the zip to a computer, unzip it and follow README.md." }, { "Could not save the server files: ${it.message}" })) }
+        }
+    }
+    fun saveSyncServerFiles() { runCatching { serverFiles.launch("scribella-sync-server.zip") }.onFailure { message("Cannot save the server files: ${it.message}") } }
     private val exportPdf = registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         val snapshot = app.pdfExportSnapshot
         val includeReviewed = app.pdfExportReviewedHandwriting
@@ -312,8 +362,8 @@ class MainActivity : ComponentActivity() {
         val smallerFile = app.pdfExportSmallerFile
         app.pdfExportSnapshot = null
         if (uri != null && snapshot != null) {
-            repository.setFileBusy(true)
-            app.io.execute {
+            repository.exportStarted()
+            app.exporting.execute {
                 val result = runCatching {
                     // P094 (F127): PDF and image pages keep their printed text as an invisible, searchable layer.
                     val staged = PdfExport.create(snapshot, app.cacheDir, includeReviewedHandwriting = includeReviewed, editableInk = editableInk, smallerFile=smallerFile) { page -> runCatching { PageText.read(app, snapshot, page) }.getOrNull() }
@@ -322,7 +372,7 @@ class MainActivity : ComponentActivity() {
                             ?: error("Cannot open PDF destination")
                     } finally { staged.delete() }
                 }
-                app.main.post { repository.setFileBusy(false); message(result.fold({ "PDF exported" }, { "PDF export failed: ${it.message}" })) }
+                app.main.post { repository.exportFinished(); message(result.fold({ "PDF exported" }, { "PDF export failed: ${it.message}" })) }
             }
         } else if (uri != null) message("PDF export was interrupted; please try again")
     }
@@ -338,8 +388,8 @@ class MainActivity : ComponentActivity() {
         val snapshot = app.pngExportSnapshot
         app.pngExportSnapshot = null
         if (uri != null && snapshot != null) {
-            repository.setFileBusy(true)
-            app.io.execute {
+            repository.exportStarted()
+            app.exporting.execute {
                 val result = runCatching {
                     val staged = PageImageExport.create(snapshot.notebook, snapshot.pageId, app.cacheDir, snapshot.smallerFile)
                     try {
@@ -347,7 +397,7 @@ class MainActivity : ComponentActivity() {
                             ?: error("Cannot open PNG destination")
                     } finally { staged.delete() }
                 }
-                app.main.post { repository.setFileBusy(false); message(result.fold({ "PNG exported" }, { "PNG export failed: ${it.message}" })) }
+                app.main.post { repository.exportFinished(); message(result.fold({ "PNG exported" }, { "PNG export failed: ${it.message}" })) }
             }
         } else if (uri != null) message("PNG export was interrupted; please try again")
     }
@@ -359,21 +409,14 @@ class MainActivity : ComponentActivity() {
             if (!repository.canInsertImage(target)) message("The notebook or page changed. Choose Insert image page again.")
             else {
                 repository.setFileBusy(true)
-                app.io.execute {
+                app.importing.execute {
                     val parsed = runCatching {
                         app.contentResolver.openInputStream(uri)?.use { ImageSupport.import(it) } ?: error("Cannot open image")
                     }
                     app.main.post {
                         repository.setFileBusy(false)
-                        parsed.fold(onSuccess = { source ->
-                            runCatching { repository.insertImagePages(target, source) }.onSuccess { ids ->
-                                if (ids.isEmpty()) message("The notebook or page changed. Insert image page again.")
-                                else {
-                                    if (!isDestroyed && ::frame.isInitialized) frame.revealPage(ids.first())
-                                    message("Inserted image page")
-                                }
-                            }.onFailure { message("Image insertion failed: ${it.message}") }
-                        }, onFailure = { message("Image insertion failed: ${it.message}") })
+                        parsed.fold(onSuccess = { source -> placeImportedPages(target, source) },
+                            onFailure = { message("Image insertion failed: ${it.message}") })
                     }
                 }
             }
@@ -387,21 +430,14 @@ class MainActivity : ComponentActivity() {
             if (!repository.canInsertImage(target)) message("The notebook or page changed. Choose Insert photo again.")
             else {
                 repository.setFileBusy(true)
-                app.io.execute {
+                app.importing.execute {
                     val parsed = runCatching {
                         app.contentResolver.openInputStream(uri)?.use { ImageSupport.importPhoto(it) } ?: error("Cannot open image")
                     }
                     app.main.post {
                         repository.setFileBusy(false)
-                        parsed.fold(onSuccess = { photo ->
-                            runCatching { repository.insertPhoto(target, photo) }.onSuccess { id ->
-                                if (id == null) message("The notebook or page changed. Choose Insert photo again.")
-                                else {
-                                    if (!isDestroyed && ::primaryInk.isInitialized) ink.selectPhoto(id)
-                                    message("Inserted photo")
-                                }
-                            }.onFailure { message("Photo insertion failed: ${it.message}") }
-                        }, onFailure = { message("Photo insertion failed: ${it.message}") })
+                        parsed.fold(onSuccess = { photo -> placeImportedPhoto(target, photo) },
+                            onFailure = { message("Photo insertion failed: ${it.message}") })
                     }
                 }
             }
@@ -423,7 +459,7 @@ class MainActivity : ComponentActivity() {
             if (!repository.canInsertImage(target)) message("The notebook or page changed. Choose Attach file again.")
             else {
                 repository.setFileBusy(true)
-                app.io.execute {
+                app.importing.execute {
                     val read = runCatching {
                         val name = app.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
                             if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
@@ -465,8 +501,8 @@ class MainActivity : ComponentActivity() {
         val snapshot = app.studyInkExportSnapshot
         app.studyInkExportSnapshot = null
         if (uri != null && snapshot != null) {
-            repository.setFileBusy(true)
-            app.io.execute {
+            repository.exportStarted()
+            app.exporting.execute {
                 val result = runCatching {
                     val staged = StudyInkExport.create(snapshot, app.cacheDir)
                     try {
@@ -474,7 +510,7 @@ class MainActivity : ComponentActivity() {
                             ?: error("Cannot open export destination")
                     } finally { staged.delete() }
                 }
-                app.main.post { repository.setFileBusy(false); message(result.fold(
+                app.main.post { repository.exportFinished(); message(result.fold(
                     { "Handwriting-only ZIP exported; PDFs, images and attachments excluded" },
                     { "Handwriting export failed: ${it.message}" })) }
             }
@@ -495,7 +531,7 @@ class MainActivity : ComponentActivity() {
         if (ScanProcessing.target == null) return@registerForActivityResult
         if (uri == null) { scanResumed(); return@registerForActivityResult }
         val file = ScanProcessing.captureFile(app).also { it.delete() }
-        app.io.execute {
+        app.importing.execute { // B80 (P707): scan pages are cache files, not behind folder sync
             val copied = runCatching {
                 app.contentResolver.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } } ?: error("Cannot open image")
             }
@@ -505,6 +541,12 @@ class MainActivity : ComponentActivity() {
         }
     }
     // P247: Android's camera question the first time Scan is used; appended last so earlier launcher keys stay stable.
+    /** P702: asked when "Keep receiving in the background" is turned on; the switch works either way (the notification is hidden without it). */
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    internal fun askForNotifications() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            runCatching { notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS) }
+    }
     private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (ScanProcessing.target == null) return@registerForActivityResult
         if (granted) { ScanProcessing.live = true; openScan(null); return@registerForActivityResult }
@@ -547,24 +589,6 @@ class MainActivity : ComponentActivity() {
         runCatching {if(restore)restoreEncryptedBackupFolder.launch(null)else newEncryptedBackupFolder.launch(null)}
             .onFailure {message("Cannot choose a folder")}
     }
-
-    private fun encryptedSyncControls(sheet: Kit.Sheet,context: android.content.Context) {
-        sheet.add(Kit.section(context,"Additional encrypted destination"))
-        if(EncryptedSync.folderUri(app)==null) {
-            sheet.add(Kit.button(context,"Add encrypted destination…",Kit.Button.PLAIN) {
-                sheet.dismiss();runCatching {encryptedSyncFolder.launch(null)}.onFailure {message("Cannot choose a folder")}
-            })
-        } else {
-            sheet.add(Kit.text(context,EncryptedSync.status(app),secondary=true))
-            sheet.add(Kit.button(context,"Sync encrypted destination",Kit.Button.TINTED) {
-                sheet.dismiss();EncryptedSync.sync(app) {it?.let(::message)}
-            })
-            sheet.add(Kit.button(context,"Disconnect encrypted destination",Kit.Button.PLAIN) {
-                EncryptedSync.disconnect(app);sheet.dismiss();message("Encrypted destination disconnected; its copies and primary sync are kept.")
-            })
-        }
-    }
-
 
     internal fun chooseBatchPdfFolder(ids: List<String>, includeNative: Boolean = false): Boolean {
         if (batchPdfIds != null || !repository.canChangeNotebook || ids.isEmpty() ||
@@ -665,11 +689,11 @@ class MainActivity : ComponentActivity() {
         val snapshot = repository.session?.notebook ?: return
         val external = app.getExternalFilesDir(null)
         if (external == null) { message("Study storage is unavailable; use Export handwriting only instead"); return }
-        repository.setFileBusy(true)
-        app.io.execute {
+        repository.exportStarted()
+        app.exporting.execute {
             val result = runCatching { StudyOutbox.publish(snapshot, app.cacheDir, java.io.File(external, "study-outbox")) }
             app.main.post {
-                repository.setFileBusy(false)
+                repository.exportFinished()
                 message(result.fold({ "Handwriting-only study copy ready for PC over USB. Nothing sent to an AI." },
                     { "Study copy failed: ${it.message}" }))
             }
@@ -680,10 +704,10 @@ class MainActivity : ComponentActivity() {
         val snapshot = app.textExportSnapshot
         app.textExportSnapshot = null
         if (uri != null && snapshot != null) {
-            repository.setFileBusy(true)
-            app.io.execute {
+            repository.exportStarted()
+            app.exporting.execute {
                 val result = runCatching { writeTextExport(app, uri, snapshot, markdown) }
-                app.main.post { repository.setFileBusy(false); message(result.fold({ "Text exported" }, { "Text export failed: ${it.message}" })) }
+                app.main.post { repository.exportFinished(); message(result.fold({ "Text exported" }, { "Text export failed: ${it.message}" })) }
             }
         } else if (uri != null) message("Text export was interrupted; please try again")
     }
@@ -691,13 +715,13 @@ class MainActivity : ComponentActivity() {
     private val exportSvg = registerForActivityResult(ActivityResultContracts.CreateDocument("image/svg+xml")) { uri ->
         val snapshot=app.svgExportSnapshot;app.svgExportSnapshot=null
         if(uri!=null && snapshot!=null) {
-            repository.setFileBusy(true)
-            app.io.execute {
+            repository.exportStarted()
+            app.exporting.execute {
                 val result=runCatching {
                     val staged=SvgExport.create(snapshot.notebook,snapshot.pageId,app.cacheDir)
                     try {app.contentResolver.openOutputStream(uri,"wt")?.use {out -> staged.inputStream().use {it.copyTo(out)}} ?: error("Cannot open SVG destination")}finally {staged.delete()}
                 }
-                app.main.post {repository.setFileBusy(false);message(result.fold({"SVG exported"},{"SVG export failed: ${it.message}"}))}
+                app.main.post {repository.exportFinished();message(result.fold({"SVG exported"},{"SVG export failed: ${it.message}"}))}
             }
         }else if(uri!=null)message("SVG export was interrupted; please try again")
     }
@@ -711,7 +735,7 @@ class MainActivity : ComponentActivity() {
         val notebookId = highlightsTarget; highlightsTarget = null
         if (uri == null || notebookId == null) return@registerForActivityResult
         repository.setFileBusy(true)
-        app.io.execute {
+        app.importing.execute {
             val copied = runCatching {
                 val file = java.io.File.createTempFile("add-highlights-", ".pdf", app.cacheDir)
                 (app.contentResolver.openInputStream(uri) ?: error("Cannot open the PDF")).use { input -> file.outputStream().use { input.copyTo(it) } }
@@ -725,6 +749,12 @@ class MainActivity : ComponentActivity() {
     }
     private var highlightsTarget: String? = null
     private var highlightsRunning = false
+    // P689 (B1): Google's document scanner; appended after addHighlights so the earlier launcher keys stay stable.
+    private val googleScan = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (ScanProcessing.target == null) return@registerForActivityResult
+        val pages = if (result.resultCode == RESULT_OK) GoogleScanner.pages(result.data) else emptyList()
+        if (pages.isEmpty()) scanResumed() else keepGooglePages(pages)
+    }
 
     /** P662: Study → "Add highlights from PDF…": a marked-up copy of this notebook's PDF puts its highlights into the notebook. */
     fun launchAddHighlights(): Boolean {
@@ -750,7 +780,7 @@ class MainActivity : ComponentActivity() {
         if (note?.id != notebookId || highlightsRunning) { if (!keep) file.delete(); done(HighlightsReport("closed", 0, 0, 0, 0, "The notebook was closed, so nothing was added")); return }
         highlightsRunning = true
         repository.setFileBusy(true)
-        app.io.execute {
+        app.importing.execute {
             val read = runCatching {
                 val source = PdfHighlights.sourceOf(file, app.cacheDir)
                 PdfHighlights.match(app.cacheDir, note, source)?.let { PdfHighlights.fromFile(app.cacheDir, note, file, it) }
@@ -828,8 +858,11 @@ class MainActivity : ComponentActivity() {
             audioPermissionNotebook=repository.session?.notebook?.id;recordPermission.launch(android.Manifest.permission.RECORD_AUDIO)
         }else if(!app.audio.start())message(app.audio.status)
     }
+    /** P698: sync brought another device's Library organisation; the open Library shows it. */
+    private val layoutChanged: () -> Unit = { if (!isDestroyed) libraryScreen?.reloadOrganization() }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        LibraryLayoutSync.onChanged = layoutChanged
         savedInstanceState?.let { state ->
             batchPdfIds = state.getStringArrayList("batchPdfIds")?.toList()
             batchExportNative = state.getBoolean("batchExportNative", false)
@@ -859,7 +892,10 @@ class MainActivity : ComponentActivity() {
             showLibrary(allowLoading = true)
         }
         app.repository.listen(observer)
+        app.repository.listen(dropOpened)
+        app.repository.listen(savedWatch)
         quickNotePending = savedInstanceState == null && intent?.action == QUICK_NOTE
+        frame.root.post { showCrashNote() }
         shareRequestId=savedInstanceState?.getString("shareRequestId") ?: java.util.UUID.randomUUID().toString()
         app.sharedNotebookImport.offer(intent,shareRequestId!!)
         refresh()
@@ -957,7 +993,7 @@ class MainActivity : ComponentActivity() {
             message("The notebook or page changed. Choose Insert PDF pages again."); return
         }
         repository.setFileBusy(true)
-        app.io.execute {
+        app.importing.execute {
             var sourceTitle="Imported PDF"
             val result = runCatching {
                 runCatching {app.contentResolver.query(uri,arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),null,null,null)?.use {cursor->
@@ -984,7 +1020,7 @@ class MainActivity : ComponentActivity() {
                 message("The notebook changed. Choose Insert PDF pages again.")
             } else {
                 repository.setFileBusy(true)
-                app.io.execute {
+                app.importing.execute {
                     val result=runCatching {PdfSupport.importSelected(app.cacheDir,prepared,sourceTitle,indices)}
                     app.main.post {
                         repository.setFileBusy(false)
@@ -1026,7 +1062,7 @@ class MainActivity : ComponentActivity() {
         fun place(choice: PdfFit.Choice) {
             if (choice == PdfFit.Choice.KEEP) { done(source, null); return }
             repository.setFileBusy(true)
-            app.io.execute {
+            app.importing.execute {
                 val fitted = runCatching { PdfFit.fitted(app, source, paper) }
                 app.main.post {
                     repository.setFileBusy(false)
@@ -1090,6 +1126,31 @@ class MainActivity : ComponentActivity() {
             app.imageInsertTarget = null; message("Cannot choose image: ${it.message}"); false
         }
     }
+    /**
+     * P720: imported image pages go in after the chosen page; a single one then opens on the crop screen by itself, where
+     * Add page keeps it (cropped, straightened or in a look, as one Undo step with the import) and the cross takes it out.
+     */
+    internal fun placeImportedPages(target: ImageInsertTarget, source: dev.ownednotes.core.Notebook) {
+        runCatching { repository.insertImagePages(target, source) }.onSuccess { ids ->
+            if (ids.isEmpty()) message("The notebook or page changed. Insert image page again.")
+            else {
+                if (!isDestroyed && ::frame.isInitialized) frame.revealPage(ids.first())
+                val mark = repository.session?.localSteps
+                if (ids.size == 1 && mark != null && !isDestroyed) cropImported(null, mark) else message("Inserted image page")
+            }
+        }.onFailure { message("Image insertion failed: ${it.message}") }
+    }
+    /** P720: an imported photo goes on the page, selected, and opens on the crop screen by itself, as an image page does. */
+    internal fun placeImportedPhoto(target: ImageInsertTarget, photo: ImageSupport.ImportedPhoto) {
+        runCatching { repository.insertPhoto(target, photo) }.onSuccess { id ->
+            if (id == null) message("The notebook or page changed. Choose Insert photo again.")
+            else {
+                if (!isDestroyed && ::primaryInk.isInitialized) ink.selectPhoto(id)
+                val mark = repository.session?.localSteps
+                if (mark != null && !isDestroyed) cropImported(id, mark) else message("Inserted photo")
+            }
+        }.onFailure { message("Photo insertion failed: ${it.message}") }
+    }
     fun launchInsertPhoto(): Boolean {
         if (ink.isEditing || app.photoInsertTarget != null || app.imageInsertTarget != null || app.pdfInsertTarget != null) return false
         val target = repository.captureImageInsertTarget() ?: return false
@@ -1106,6 +1167,15 @@ class MainActivity : ComponentActivity() {
         if (ink.isEditing || ScanProcessing.target != null || app.photoInsertTarget != null || app.imageInsertTarget != null || app.pdfInsertTarget != null) return false
         val target = repository.captureImageInsertTarget() ?: return false
         ScanProcessing.target = target
+        // P689 (B1): Google's scanner when it is the remembered choice and Play services has it.
+        if (GoogleScanner.chosen(scanPreferences) && GoogleScanner.available(this)) { startGoogleScan(); return true }
+        return openOwnCamera()
+    }
+    private val scanPreferences get() = getSharedPreferences(app.preferencesName, 0)
+    /** Scribella's own camera for this scan: the live view, asking for the camera the first time; Photos without a camera. */
+    internal fun openOwnCamera(): Boolean {
+        ScanProcessing.target ?: return false
+        ScanProcessing.google = false
         if (!ScanProcessing.liveAllowed) {
             val file = ScanProcessing.captureFile(app).also { it.delete() }
             return runCatching {
@@ -1140,18 +1210,46 @@ class MainActivity : ComponentActivity() {
             review?.corners ?: photo?.let { ScanProcessing.detect(it) }, review.takeIf { photo != null })
         scanScreen = screen
         frame.root.addView(screen, android.widget.FrameLayout.LayoutParams(-1, -1))
+        SafeArea.keep(screen)
+        systemBars()
         refresh()
+    }
+    /** P689: the picture crop screen, while open ([openPictureCrop]). */
+    internal var pictureCrop: PictureCropScreen? = null; private set
+    internal fun showPictureCrop(screen: PictureCropScreen) {
+        closePictureCrop(refresh = false); ink.clearSelection()
+        pictureCrop = screen; frame.root.addView(screen, android.widget.FrameLayout.LayoutParams(-1, -1)); refresh()
+        darkBars(PictureCropScreen.BACK)
+    }
+    internal fun closePictureCrop(refresh: Boolean = true) {
+        val open = pictureCrop ?: return
+        pictureCrop = null; frame.root.removeView(open); open.dispose()
+        systemBars()
+        if (refresh) refresh()
+    }
+    /** P722: the colour at the edge of the scan screen's background. */
+    private val SCAN_EDGE = 0xff1a1715.toInt()
+    /** P720: a dark full screen (the crop screen) takes the system bars into its own colour, with light icons. */
+    internal fun darkBars(colour: Int) {
+        window.statusBarColor = colour; window.navigationBarColor = colour
+        runCatching {
+            val c = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+            val n = android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            window.insetsController?.setSystemBarsAppearance(0, c or n)
+        }
     }
     /** Closes the Scan screen; [clear] also ends the scan (Add, Cancel), otherwise the kept pages wait for the next photo. */
     internal fun closeScan(clear: Boolean = true, refresh: Boolean = true) {
         val open = scanScreen ?: return
         scanScreen = null; frame.root.removeView(open); open.dispose()
+        systemBars()
         if (clear) ScanProcessing.clear()
         if (refresh) refresh()
     }
     /** The shutter on a photo: the camera again for the next page (live, the scan screen's own), keeping the pages so far. */
     internal fun captureNextScan() {
         if (ScanProcessing.target == null) return
+        if (ScanProcessing.google) { startGoogleScan(); return }
         if (ScanProcessing.live) { openScan(null); return }
         val file = ScanProcessing.captureFile(app).also { it.delete() }
         runCatching { scanCapture.launch(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.scans", file)) }
@@ -1162,6 +1260,146 @@ class MainActivity : ComponentActivity() {
         if (ScanProcessing.target == null) return
         runCatching { chooseSource(scanPhoto, "Scan a photo from", "photo", arrayOf("image/*")) { scanResumed() } }
             .onFailure { message("Cannot choose photo: ${it.message}"); scanResumed() }
+    }
+    /** P686: photos shared into Scribella, waiting for the notebook the user chose ([first]) to open. */
+    private var sharedPhotos: Pair<String, List<java.io.File>>? = null
+    internal val sharedPhotosWaiting get() = sharedPhotos != null || sharedPhotoChoice != null
+    /**
+     * P686: shared photos go into notebook [id]: it opens (from the Library), then the photos become this scan's pages,
+     * each with its page found and straightened, and the first opens on its corners so every page can be checked,
+     * cropped, turned or removed before Add puts them after the open page as one Undo step.
+     */
+    internal fun scanSharedPhotos(id: String, files: List<java.io.File>) {
+        val library = libraryScreen
+        if (library == null && repository.session?.notebook?.id == id) { askHowToAddShared(files); return }
+        sharedPhotos = id to files
+        if (library == null || !library.open(id)) {
+            sharedPhotos = null; files.forEach { it.delete() }
+            message("Cannot open that notebook now. Share the photos again.")
+        }
+    }
+    /** P688: the sheet asking whether shared photos become new pages or pictures on the open page; null when not shown. */
+    internal var sharedPhotoChoice: SharedPhotoChoice? = null; private set
+    private fun askHowToAddShared(files: List<java.io.File>) {
+        val note = repository.session?.notebook
+        if (note == null || sharedPhotoChoice != null || isDestroyed) { files.forEach { it.delete() }; message("Share the photos again."); return }
+        val number = note.pages.indexOfFirst { it.id == repository.selectedPageId } + 1
+        sharedPhotoChoice = SharedPhotoChoice(this, note.title, number, files,
+            choose = { asPages -> if (asPages) startSharedScan(files) else placeSharedPhotos(files) },
+            closedThen = { chosen -> sharedPhotoChoice = null; if (!chosen) files.forEach { it.delete() }; repository.mediaChanged() }).show()
+    }
+    /**
+     * P688: shared photos placed on the open page as pictures (one centred as Import photo does, more in a grid), all in
+     * one Undo step. Each can then be moved, resized or cropped like any picture.
+     */
+    private fun placeSharedPhotos(files: List<java.io.File>) {
+        val drop = { text: String -> files.forEach { it.delete() }; message(text) }
+        if (ink.isEditing || ScanProcessing.target != null || app.photoInsertTarget != null || app.imageInsertTarget != null || app.pdfInsertTarget != null)
+            return drop("Finish what is open, then share the photos again.")
+        val target = repository.captureImageInsertTarget() ?: return drop("This page cannot take pictures now. Share the photos again.")
+        val number = target.notebook.pages.indexOfFirst { it.id == target.pageId } + 1
+        repository.setFileBusy(true)
+        message(if (files.size == 1) "Placing the photo…" else "Placing ${files.size} photos…")
+        app.importing.execute {
+            val photos = mutableListOf<ImageSupport.ImportedPhoto>(); var failed = 0
+            for (file in files) { runCatching { file.inputStream().use { ImageSupport.importPhoto(it) } }.onSuccess { photos += it }.onFailure { failed++ }; file.delete() }
+            // P697: on a phone with sending on, the pictures go to the other device as one drop instead.
+            // B80 (P707): the sync state file is read in turn with sync, after the slow decode.
+            val send = photos.isNotEmpty() && app.inLibraryOrder { PageDrops.canSend(app, target.notebook.id) }
+            val jpegs = if (send) runCatching { photos.map(PageDrops::pictureJpeg) }.getOrNull() else null
+            app.main.post {
+                repository.setFileBusy(false)
+                if (photos.isEmpty()) { message("The photos could not be read. Share them again."); return@post }
+                val left = when (failed) { 0 -> ""; 1 -> " One photo could not be read."; else -> " $failed photos could not be read." }
+                if (jpegs != null) return@post sendSharedPictures(target, number, photos, jpegs, left)
+                placeSharedHere(target, number, photos, left, null)
+            }
+        }
+    }
+    private fun sendSharedPictures(target: ImageInsertTarget, number: Int, photos: List<ImageSupport.ImportedPhoto>, jpegs: List<ByteArray>, left: String) {
+        repository.setFileBusy(true)
+        PageDrops.send(app, target.notebook.id, target.pageId, number, jpegs, kind = dev.ownednotes.core.PageDrop.PICTURES) { sent ->
+            repository.setFileBusy(false)
+            sent.onSuccess { drop ->
+                val what = PageDrops.items(jpegs.size, dev.ownednotes.core.PageDrop.PICTURES)
+                message((if (drop.uploaded) "$what for page $number on the way to your other device. They show above the page list until it adds them."
+                    else "$what for page $number kept to send: the sync folder can't be reached now. They go to your other device as soon as it can.") + left)
+                if (!isDestroyed && ::primaryInk.isInitialized) frame.showDrops(force = true)
+            }.onFailure { placeSharedHere(target, number, photos, left, "Could not send (${it.message}); placed here.") }
+        }
+    }
+    /** P688: the shared photos on the open page as pictures, one Undo; [note] says why they were not sent. */
+    private fun placeSharedHere(target: ImageInsertTarget, number: Int, photos: List<ImageSupport.ImportedPhoto>, left: String, note: String?) {
+        val ids = runCatching { repository.insertPhotos(target, photos) }.getOrElse { message("Placing the photos failed: ${it.message}"); return }
+        if (ids.isEmpty()) { message("The notebook or page changed. Share the photos again."); return }
+        if (!isDestroyed && ::primaryInk.isInitialized && ids.size == 1) ink.selectPhoto(ids.first())
+        message((note?.let { "$it " } ?: "") + (if (ids.size == 1) "Placed the photo on page $number." else "Placed ${ids.size} photos on page $number.") + left)
+    }
+    private fun startSharedScan(files: List<java.io.File>) {
+        val drop = { text: String -> files.forEach { it.delete() }; message(text) }
+        if (ink.isEditing || ScanProcessing.target != null || app.photoInsertTarget != null || app.imageInsertTarget != null || app.pdfInsertTarget != null)
+            return drop("Finish what is open, then share the photos again.")
+        val target = repository.captureImageInsertTarget() ?: return drop("This notebook cannot take new pages now. Share the photos again.")
+        ScanProcessing.target = target; ScanProcessing.live = false
+        ScanProcessing.photoFile(app) // clears pages left behind by an earlier scan
+        val look = ScanProcessing.look
+        message(if (files.size == 1) "Preparing the photo…" else "Preparing ${files.size} photos…")
+        app.importing.execute { // B80 (P707): scan pages are cache files, not behind folder sync
+            val kept = mutableListOf<ScanProcessing.KeptPage>(); var failed = 0
+            for (file in files) runCatching { ScanProcessing.keepShared(app, file, look) }.onSuccess { kept += it }.onFailure { failed++; file.delete() }
+            app.main.post {
+                if (ScanProcessing.target !== target || isDestroyed) { kept.forEach { it.photo.delete(); it.preview.recycle() }; return@post }
+                ScanProcessing.pages += kept
+                if (failed > 0) message(if (failed == 1) "One photo could not be read and was left out." else "$failed photos could not be read and were left out.")
+                val first = kept.firstOrNull() ?: run { ScanProcessing.clear(); return@post }
+                openScan(first.photo, first)
+            }
+        }
+    }
+    /**
+     * P689 (B1): opens Google's document scanner for this scan's next pages (it remembers the choice). If it cannot open,
+     * Scribella's camera takes over with a short note, so Scan always works.
+     */
+    internal fun startGoogleScan() {
+        if (ScanProcessing.target == null) return
+        GoogleScanner.choose(scanPreferences, true)
+        ScanProcessing.google = true; ScanProcessing.live = false
+        val left = dev.ownednotes.core.NotebookLimits.PAGES - (repository.session?.notebook?.pages?.size ?: 0) - ScanProcessing.pages.size
+        GoogleScanner.start(this, left, { sender ->
+            if (ScanProcessing.target == null || isDestroyed) return@start
+            runCatching { googleScan.launch(androidx.activity.result.IntentSenderRequest.Builder(sender).build()) }.onFailure { googleScanFailed() }
+        }, { googleScanFailed() })
+    }
+    private fun googleScanFailed() {
+        if (ScanProcessing.target == null || isDestroyed) return
+        message("Google's scanner is not ready on this device, so Scribella's camera opened.")
+        openOwnCamera()
+    }
+    /** Scribella's own camera instead of Google's, remembered for the next scan. */
+    internal fun useOwnCamera() {
+        GoogleScanner.choose(scanPreferences, false)
+        closeScan(clear = false)
+        openOwnCamera()
+    }
+    /** P689 (B1): Google's finished pages join the scan's row; the first opens so each can still be cropped, turned or removed. */
+    private fun keepGooglePages(uris: List<android.net.Uri>) {
+        val target = ScanProcessing.target ?: return
+        message(if (uris.size == 1) "Preparing the page…" else "Preparing ${uris.size} pages…")
+        app.importing.execute { // B80 (P707): scan pages are cache files, not behind folder sync
+            val kept = mutableListOf<ScanProcessing.KeptPage>(); var failed = 0
+            for (uri in uris) runCatching {
+                val file = ScanProcessing.captureFile(app).also { it.delete() }
+                (app.contentResolver.openInputStream(uri) ?: error("Cannot open the page")).use { input -> file.outputStream().use { input.copyTo(it) } }
+                ScanProcessing.keepShared(app, file, ScanProcessing.Look.ORIGINAL, find = false)
+            }.onSuccess { kept += it }.onFailure { failed++ }
+            app.main.post {
+                if (ScanProcessing.target !== target || isDestroyed) { kept.forEach { it.photo.delete(); it.preview.recycle() }; return@post }
+                ScanProcessing.pages += kept
+                if (failed > 0) message(if (failed == 1) "One page could not be read and was left out." else "$failed pages could not be read and were left out.")
+                val first = kept.firstOrNull() ?: run { scanResumed(); return@post }
+                openScan(first.photo, first)
+            }
+        }
     }
     /** Back from the camera or a picker with nothing new: the pages kept so far, or the end of the scan. */
     private fun scanResumed() { if (ScanProcessing.pages.isEmpty() && !ScanProcessing.live) ScanProcessing.clear() else openScan(null) }
@@ -1480,15 +1718,15 @@ class MainActivity : ComponentActivity() {
     }
     /** P201 step 8: writes [name] in the background, then offers it to other apps; earlier shared exports are removed first. */
     private fun shareExport(name: String, mime: String, write: (java.io.File) -> Unit): Boolean {
-        repository.setFileBusy(true)
-        app.io.execute {
+        repository.exportStarted()
+        app.exporting.execute {
             val file = runCatching {
                 val root = java.io.File(cacheDir, "attachments")
                 root.listFiles { f -> f.name.startsWith("export-") }?.forEach { it.deleteRecursively() }
                 java.io.File(java.io.File(root, "export-${System.nanoTime()}").apply { mkdirs() }, name).also(write)
             }
             app.main.post {
-                repository.setFileBusy(false)
+                repository.exportFinished()
                 if (isDestroyed) return@post
                 file.fold(onSuccess = { f ->
                     runCatching {
@@ -1692,25 +1930,29 @@ class MainActivity : ComponentActivity() {
         }
         return true
     }
-    fun navigationHistoryDialog(): AlertDialog? {
+    /** P733 (board 26): Back and Forward as tiles; what is remembered is behind the (i). */
+    internal fun navigationHistoryDialog(): PageSheets.History? {
         if (ink.isEditing || !repository.canChangeNotebook) return null
         val session = repository.session ?: return null
-        return AlertDialog.Builder(this).setTitle("Navigation history")
-            .setMessage("Return to pages and notebooks visited through links or page jumps. Scrolling does not add history.")
-            .setNegativeButton("Close", null).setNeutralButton("Back", null).setPositiveButton("Forward", null)
-            .create().apply {
-                show()
-                getButton(AlertDialog.BUTTON_NEUTRAL).isEnabled = repository.canNavigateBack
-                getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = repository.canNavigateForward
-                fun travel(forward: Boolean) {
-                    if (repository.session !== session || !navigateHistory(forward)) {
-                        message("Navigation is unavailable. Reopen Navigation history.")
-                    }
-                    dismiss()
-                }
-                getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { travel(false) }
-                getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { travel(true) }
+        val sheet = Kit.Sheet(this, "Navigation history", cancel = "Close")
+        sheet.add(SyncPanels.sectionRow(this, "Links and page jumps", PageSheets.info(this, "About navigation history", "Navigation history", listOf(
+            Explain.Line(SyncPanels.P.LINK, Glass.accent(night), "Links and page jumps are remembered."),
+            Explain.Line(SyncPanels.P.SCROLL, SyncPanels.slate(night), "Scrolling is not.")))))
+        fun travel(forward: Boolean) {
+            if (repository.session !== session || !navigateHistory(forward)) {
+                message("Navigation is unavailable. Reopen Navigation history.")
             }
+            sheet.dismiss()
+        }
+        fun tile(path: String, title: String, on: Boolean, yes: String, no: String, forward: Boolean) = SyncPanels.PlaceTile(this, path, Glass.accent(night), title).apply {
+            state(if (on) yes else no, Glass.secondary(night)); isEnabled = on; alpha = if (on) 1f else .45f
+            setOnClickListener { travel(forward) }
+        }
+        val back = tile(SyncPanels.P.BACK, "Back", repository.canNavigateBack, "Where you were before", "Nothing before", false)
+        val forward = tile(SyncPanels.P.ARROW, "Forward", repository.canNavigateForward, "Where you went next", "Nothing ahead", true)
+        sheet.add(SyncPanels.TileGrid(this, 220f).apply { addView(back); addView(forward) }, gap = 2f)
+        sheet.show()
+        return PageSheets.History(sheet, back, forward)
     }
     fun bookmarkDialog(): AlertDialog? {
         if (ink.isEditing || repository.readOnly || !repository.canChangeNotebook) return null
@@ -1751,22 +1993,37 @@ class MainActivity : ComponentActivity() {
     /** P091: one Bookmarks row, indented by its outline level. */
     internal fun outlineEntry(index: Int, page: Page): String =
         "\u2003\u2003".repeat(page.outlineLevel - 1) + (if (page.outlineLevel > 1) "\u203a " else "") + "Page ${index + 1} \u00b7 ${page.bookmark}"
-    fun bookmarksDialog(): AlertDialog? {
+    /** P733 (board 26): a row per bookmark, indented by its outline level; a picture and where to add one when there are none. */
+    internal fun bookmarksDialog(): PageSheets.Bookmarks? {
         if (ink.isEditing || !repository.canChangeNotebook) return null
         val snapshot = repository.session?.notebook ?: return null
         val entries = snapshot.pages.withIndex().filter { it.value.bookmark != null }
-        val builder = AlertDialog.Builder(this).setTitle("Bookmarks").setNegativeButton("Close", null)
-        if (entries.isEmpty()) builder.setMessage("No bookmarked pages yet. Use Bookmark page from the page menu.")
-        else builder.setItems(entries.map { outlineEntry(it.index, it.value) }.toTypedArray()) { _, index ->
-            if (repository.session?.notebook !== snapshot || !repository.canChangeNotebook)
-                message("The notebook changed. Reopen Bookmarks.")
-            else {
-                val id = entries[index].value.id
-                repository.selectPage(id)
-                frame.revealPage(id)
+        val sheet = Kit.Sheet(this, "Bookmarks", cancel = "Close")
+        if (entries.isEmpty()) sheet.add(PageSheets.Empty(this, SyncPanels.P.BOOKMARK, Glass.accent(night), "No bookmarks yet",
+            hint = PageSheets.menuPath(this, "Page menu", "Bookmark page", SyncPanels.P.BOOKMARK)))
+        val rows = entries.map { (index, page) ->
+            SyncPanels.RowCard(this, SyncPanels.P.BOOKMARK, Glass.accent(night), page.bookmark!!).apply {
+                state("Page ${index + 1}", null)
+                setOnClickListener {
+                    if (repository.session?.notebook !== snapshot || !repository.canChangeNotebook)
+                        message("The notebook changed. Reopen Bookmarks.")
+                    else {
+                        repository.selectPage(page.id)
+                        frame.revealPage(page.id)
+                    }
+                    sheet.dismiss()
+                }
             }
         }
-        return builder.show()
+        val levels = entries.map { it.value.outlineLevel.coerceAtLeast(1) }
+        rows.forEachIndexed { i, row ->
+            sheet.body.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                if (i > 0) topMargin = dpi(10f)
+                marginStart = dpi(24f) * (levels[i] - 1)
+            })
+        }
+        sheet.show()
+        return PageSheets.Bookmarks(sheet, rows, levels)
     }
     fun pageSizeDialog(): AlertDialog? {
         if (ink.isEditing || repository.readOnly || repository.busy || repository.fileBusy) return null
@@ -1867,82 +2124,79 @@ class MainActivity : ComponentActivity() {
      * P100 (F071, F072, F073, F076): this page's ink layers, top first. Tap a name to draw on that layer; each row can
      * be hidden, moved, renamed or deleted. Every change except choosing the active layer is one Undo step.
      */
-    fun layersDialog(): AlertDialog? {
+    fun layersDialog(): Kit.Sheet? {
         if (ink.isEditing || repository.readOnly || !repository.canChangeNotebook) return null
         val pageId = repository.selectedPageId ?: return null
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(20f), dpi(8f), dpi(12f), 0) }
-        val dialog = AlertDialog.Builder(this).setTitle("Layers").setView(android.widget.ScrollView(this).apply { addView(list) })
-            .setNegativeButton("Close", null).setNeutralButton("Add layer", null).create()
+        lateinit var sheet: Kit.Sheet
         lateinit var refresh: () -> Unit
         fun change(operation: (DocumentSession) -> Boolean) {
             val snapshot = repository.session?.notebook
-            if (snapshot == null || repository.selectedPageId != pageId) { dialog.dismiss(); message("Page changed; reopen Layers"); return }
+            if (snapshot == null || repository.selectedPageId != pageId) { sheet.dismiss(); message("Page changed; reopen Layers"); return }
             runCatching { repository.editLayers(snapshot, pageId, operation) }.onFailure { message(it.message ?: "Cannot change layers") }
             ink.clearSelection(); refresh()
         }
-        fun button(label: String, description: String, enabled: Boolean = true, action: () -> Unit) = android.widget.Button(this).apply {
-            text = label; contentDescription = description; isEnabled = enabled; minWidth = 0; minimumWidth = dpi(44f)
-            isAllCaps = false; setOnClickListener { action() }
-        }
+        // P733 (board 26): a sheet with Add layer in its header; what layers do is behind the (i).
+        sheet = Kit.Sheet(this, "Layers", "Add layer", cancel = "Close", onAction = { change { it.addLayer(pageId); true }; false })
+        sheet.add(SyncPanels.sectionRow(this, "This page · top first", PageSheets.info(this, "About layers", "Layers", listOf(
+            Explain.Line(SyncPanels.P.PLUS, Glass.accent(night), "Add a layer to draw above your ink."),
+            Explain.Line(SyncPanels.P.CHECK, SyncPanels.green(night), "Tap a layer to draw on it."),
+            Explain.Line(SyncPanels.P.LOCK, SyncPanels.slate(night), "A locked layer can’t be selected or erased.")))))
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sheet.add(list, gap = 2f)
         fun rename(layer: Layer) {
             val input = EditText(this).apply { setText(layer.name); setSingleLine(); selectAll(); contentDescription = "Layer name"
                 filters = arrayOf(android.text.InputFilter.LengthFilter(40)) }
             AlertDialog.Builder(this).setTitle("Rename layer").setView(input).setNegativeButton("Cancel", null)
                 .setPositiveButton("Rename") { _, _ -> change { it.renameLayer(pageId, layer.id, input.text.toString()) } }.show()
         }
+        fun add(row: View) = list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            if (list.childCount > 0) topMargin = dpi(10f)
+        })
         refresh = refresh@{
             list.removeAllViews()
             val page = repository.currentPage?.takeIf { it.id == pageId } ?: return@refresh
-            if (page.layers.isEmpty()) {
-                list.addView(android.widget.TextView(this).apply {
-                    text = "This page has one layer. Add a layer to draw above your ink, then tap a layer to draw on it."
-                    setPadding(0, dpi(8f), 0, dpi(8f))
-                })
-            }
+            // One layer: a single row; the (i) says how to add another.
+            if (page.layers.isEmpty()) add(PageSheets.LayerRow(this, "Layer 1", "Drawing here · the only layer", active = true, hidden = false, controls = emptyList(), onPick = null))
             val active = repository.session?.activeLayer(pageId)
             page.layers.withIndex().reversed().forEach { (index, layer) ->
-                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
-                row.addView(android.widget.TextView(this).apply {
-                    text = (if (layer.id == active) "✓ " else " ") + layer.name + (if (layer.hidden) " (hidden)" else "") + if (layer.locked) " (locked)" else ""
-                    contentDescription = "Layer ${layer.name}"; textSize = 16f; setPadding(0, dpi(12f), dpi(8f), dpi(12f))
-                    setOnClickListener {
-                        if (layer.locked) { message("Unlock ${layer.name} to draw on it"); return@setOnClickListener }
-                        if (layer.hidden) change { it.setLayerHidden(pageId, layer.id, false) }
-                        repository.session?.takeIf { repository.selectedPageId == pageId }?.selectLayer(pageId, layer.id)
-                        ink.clearSelection(); refresh()
-                    }
-                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                row.addView(button(if (layer.hidden) "Show" else "Hide", "${if (layer.hidden) "Show" else "Hide"} ${layer.name}") {
-                    change { it.setLayerHidden(pageId, layer.id, !layer.hidden) }
-                })
-                // P101 (F075): a locked layer's ink stays drawn but can't be selected or erased.
-                row.addView(button(if (layer.locked) "Unlock" else "Lock", "${if (layer.locked) "Unlock" else "Lock"} ${layer.name}") {
-                    change { it.setLayerLocked(pageId, layer.id, !layer.locked) }
-                })
-                // P102 (F078): see-through layers for tracing.
                 val percent = Math.round(layer.opacity * 100)
-                row.addView(button("$percent%", "Opacity of ${layer.name}, $percent percent") {
-                    val choices = intArrayOf(100, 75, 50, 25, 10)
-                    AlertDialog.Builder(this).setTitle("Opacity of “${layer.name}”")
-                        .setSingleChoiceItems(choices.map { "$it %" }.toTypedArray(), choices.indexOf(percent)) { picker, which ->
-                            picker.dismiss(); change { it.setLayerOpacity(pageId, layer.id, choices[which] / 100f) }
-                        }.setNegativeButton("Cancel", null).show()
+                val controls = listOf(
+                    PageSheets.well(this, if (layer.hidden) SyncPanels.P.EYE_OFF else SyncPanels.P.EYE, null, "${if (layer.hidden) "Show" else "Hide"} ${layer.name}") {
+                        change { it.setLayerHidden(pageId, layer.id, !layer.hidden) }
+                    },
+                    // P101 (F075): a locked layer's ink stays drawn but can't be selected or erased.
+                    PageSheets.well(this, if (layer.locked) SyncPanels.P.LOCK else SyncPanels.P.UNLOCK, null, "${if (layer.locked) "Unlock" else "Lock"} ${layer.name}") {
+                        change { it.setLayerLocked(pageId, layer.id, !layer.locked) }
+                    },
+                    // P102 (F078): see-through layers for tracing.
+                    PageSheets.well(this, null, "$percent%", "Opacity of ${layer.name}, $percent percent") {
+                        val choices = intArrayOf(100, 75, 50, 25, 10)
+                        AlertDialog.Builder(this).setTitle("Opacity of “${layer.name}”")
+                            .setSingleChoiceItems(choices.map { "$it %" }.toTypedArray(), choices.indexOf(percent)) { picker, which ->
+                                picker.dismiss(); change { it.setLayerOpacity(pageId, layer.id, choices[which] / 100f) }
+                            }.setNegativeButton("Cancel", null).show()
+                    },
+                    PageSheets.well(this, SyncPanels.P.UP, null, "Move ${layer.name} up", enabled = index < page.layers.lastIndex) { change { it.moveLayer(pageId, layer.id, index + 1) } },
+                    PageSheets.well(this, SyncPanels.P.DOWN, null, "Move ${layer.name} down", enabled = index > 0) { change { it.moveLayer(pageId, layer.id, index - 1) } },
+                    PageSheets.well(this, SyncPanels.P.PEN, null, "Rename ${layer.name}") { rename(layer) },
+                    PageSheets.well(this, SyncPanels.P.TRASH, null, "Delete ${layer.name}", danger = true, enabled = page.layers.size > 1) {
+                        AlertDialog.Builder(this).setTitle("Delete “${layer.name}”?").setMessage("Removes this layer and its ink, photos and text. Undo brings them back.")
+                            .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ -> change { it.deleteLayer(pageId, layer.id) } }.show()
+                    },
+                )
+                val state = listOfNotNull("Drawing here".takeIf { layer.id == active }, "Hidden".takeIf { layer.hidden }, "Locked".takeIf { layer.locked })
+                    .joinToString(" · ").ifEmpty { "Tap to draw on it" }
+                add(PageSheets.LayerRow(this, layer.name, state, layer.id == active, layer.hidden, controls) {
+                    if (layer.locked) { message("Unlock ${layer.name} to draw on it"); return@LayerRow }
+                    if (layer.hidden) change { it.setLayerHidden(pageId, layer.id, false) }
+                    repository.session?.takeIf { repository.selectedPageId == pageId }?.selectLayer(pageId, layer.id)
+                    ink.clearSelection(); refresh()
                 })
-                row.addView(button("↑", "Move ${layer.name} up", index < page.layers.lastIndex) { change { it.moveLayer(pageId, layer.id, index + 1) } })
-                row.addView(button("↓", "Move ${layer.name} down", index > 0) { change { it.moveLayer(pageId, layer.id, index - 1) } })
-                row.addView(button("Rename", "Rename ${layer.name}") { rename(layer) })
-                row.addView(button("Delete", "Delete ${layer.name}", page.layers.size > 1) {
-                    AlertDialog.Builder(this).setTitle("Delete “${layer.name}”?").setMessage("Removes this layer and its ink, photos and text. Undo brings them back.")
-                        .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ -> change { it.deleteLayer(pageId, layer.id) } }.show()
-                })
-                list.addView(row)
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.isEnabled = page.layers.size < Page.MAX_LAYERS
+            sheet.actionButton?.apply { val room = page.layers.size < Page.MAX_LAYERS; isEnabled = room; alpha = if (room) 1f else .45f }
         }
-        dialog.show()
         refresh()
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { change { it.addLayer(pageId); true } }
-        return dialog
+        return sheet.show()
     }
     fun pageSettingsDialog(pageId: String? = repository.selectedPageId): Kit.Sheet? {
         if (!repository.canChangeNotebook || repository.readOnly) return null
@@ -1968,22 +2222,28 @@ class MainActivity : ComponentActivity() {
                 if (which == 0) pageSettingsDialog(pageId) else deletePageDialog(pageId)
             }.show()
     }
-    fun deletePageDialog(pageId: String? = repository.selectedPageId): AlertDialog? {
+    /** P733 (board 26): what goes, in one line, and a red Delete page button; Cancel in the header. */
+    internal fun deletePageDialog(pageId: String? = repository.selectedPageId): PageSheets.DeletePage? {
         if (repository.readOnly || !repository.canChangeNotebook) return null
         val snapshot = repository.session?.notebook ?: return null
         val number = snapshot.pages.indexOfFirst { it.id == pageId } + 1
         if (number == 0) return null
         if (snapshot.pages.size <= 1) { message("Keep at least one page in the notebook"); return null }
-        return AlertDialog.Builder(this).setTitle("Delete page $number?")
-            .setMessage("Removes this page and its contents. Undo is available in this open notebook until its history is cleared. There is no persistent page trash yet.")
-            .setPositiveButton("Delete") { _, _ ->
-                if (repository.session?.notebook !== snapshot || !repository.canChangeNotebook || repository.readOnly) {
-                    message("Page changed; reopen Delete page")
-                } else {
-                    repository.selectPage(pageId!!)
-                    if (!repository.deletePage(snapshot, pageId)) message("Page changed; reopen Delete page")
-                }
-            }.setNegativeButton("Cancel", null).show()
+        val sheet = Kit.Sheet(this, "Delete page $number?", cancel = "Cancel")
+        sheet.add(PageSheets.consequence(this, SyncPanels.P.TRASH, SyncPanels.fault(night), "Page $number and everything on it",
+            "Undo brings it back while this notebook is open."))
+        val delete = LiveSyncLook.pill(this, "Delete page", Kit.Button.DANGER, SyncPanels.P.TRASH, height = 44f) {
+            if (repository.session?.notebook !== snapshot || !repository.canChangeNotebook || repository.readOnly) {
+                message("Page changed; reopen Delete page")
+            } else {
+                repository.selectPage(pageId!!)
+                if (!repository.deletePage(snapshot, pageId)) message("Page changed; reopen Delete page")
+            }
+            sheet.dismiss()
+        }
+        sheet.add(delete)
+        sheet.show()
+        return PageSheets.DeletePage(sheet, delete)
     }
     /** P178 (G3): deletes the pages chosen in the strip after a count confirmation; one Undo brings them all back. */
     fun deletePagesDialog(pageIds: Set<String>): AlertDialog? {
@@ -2122,6 +2382,10 @@ class MainActivity : ComponentActivity() {
      * P175 (G1): the Glass editor's status bar is desk, with dark icons by day.
      */
     internal fun systemBars() {
+        // P720: the crop screen keeps the bars in its own dark colour while it shows.
+        if (pictureCrop != null) { Kit.fullScreen(window); darkBars(PictureCropScreen.BACK); return }
+        // P722: the scan screen too, in the colour at the edge of its own background.
+        if (scanScreen != null) { Kit.fullScreen(window); darkBars(SCAN_EDGE); return }
         val desk = if (dark) Tokens.DESK_DARK else Tokens.DESK
         val lightDesk = !dark
         // P567: Settings over the Library looks as it does over the editor.
@@ -2162,7 +2426,7 @@ class MainActivity : ComponentActivity() {
         if (openingLibrary || libraryScreen != null || (!allowLoading && !repository.canChangeNotebook) || ink.isEditing) return
         openingLibrary = true
         try {
-        frame.closeSettings(); frame.closeOrganizer(); closeScan()
+        frame.closeSettings(); frame.closeOrganizer(); closeScan(); closePictureCrop()
         // P530: the Library belongs to the first document; opening a book replaces only that pane.
         focusPane(primaryInk)
         val screen = LibraryScreen(this, app.repository, thumbnails, onOpened = { id ->
@@ -2170,13 +2434,21 @@ class MainActivity : ComponentActivity() {
             val found = libraryScreen?.foundInside(id)?.takeIf { app.repository.session?.notebook?.id == id }
             closeLibrary()
             if (found != null) frame.root.post { notebookSearchDialog(found) }
+            // P686, P688: photos shared into this notebook ask how they go in once it is on screen.
+            sharedPhotos?.let { (wanted, files) ->
+                sharedPhotos = null
+                if (wanted == id && app.repository.session?.notebook?.id == id) frame.root.post { askHowToAddShared(files) } else files.forEach { it.delete() }
+            }
+            // P699: a notebook changed on two devices asks what to keep when it is opened.
+            if (id in LibrarySync.bothChanged(app)) frame.root.post { askBothChanged(id) }
         },
             onImport = { launchImport() }, onBackup = { backupDialog() },
             onExportSelected = { chooseBatchPdfFolder(it) }, onExportAll = { chooseAllExportFolder() },
-            onSync = { syncDialog() }, syncStatus = { LibrarySync.status(this) },
+            onSync = { syncDialog() }, syncStatus = { LibrarySync.status(this) }, syncProgress = { if (LibrarySync.running) LibrarySync.progressText else null },
             onSourceRecovery = { recoverNotebookSource(it) }, storageActions = libraryStorageActions ?: NotebookStorageActions(app.repository))
         libraryScreen = screen
         frame.root.addView(screen, android.widget.FrameLayout.LayoutParams(-1, -1))
+        SafeArea.keep(screen)
         systemBars()
         refresh()
         // B50: back in the folder, tag and scroll position the notebook was opened from.
@@ -2211,7 +2483,7 @@ class MainActivity : ComponentActivity() {
         // Posted, so the notebook change never runs inside the refresh that noticed it.
         frame.root.post {
             if (appLockGate.locked || ink.isEditing || !repository.canChangeNotebook) { quickNotePending = true; return@post }
-            frame.closeSettings(); frame.closeOrganizer(); closeScan()
+            frame.closeSettings(); frame.closeOrganizer(); closeScan(); closePictureCrop()
             repository.openQuickNote { if (libraryScreen != null) closeLibrary() }
         }
     }
@@ -2229,7 +2501,7 @@ class MainActivity : ComponentActivity() {
         }
         syncCompanionPane()
         checkHighlightsInbox()
-        val enabled = repository.session != null && !repository.fileBusy && !repository.busy && libraryScreen == null && !frame.settingsOpen && !frame.organizerOpen && scanScreen == null
+        val enabled = repository.session != null && !repository.fileBusy && !repository.busy && libraryScreen == null && !frame.settingsOpen && !frame.organizerOpen && scanScreen == null && pictureCrop == null
         val active = ink
         primaryInk.inputEnabled = enabled && active === primaryInk
         companionInk?.inputEnabled = enabled && active === companionInk
@@ -2242,37 +2514,20 @@ class MainActivity : ComponentActivity() {
     internal var lastMessage: String? = null
     fun message(text: String) { lastMessage = text; Toast.makeText(app, text, Toast.LENGTH_LONG).show() }
     /** P088: the backup sheet; the first time it goes straight to the folder picker. */
-    fun backupDialog(): AlertDialog? {
+    /**
+     * Library backup. P732: board 25's Look A sheet ([StoragePanels.backup]): the card, Back up now, the Folder and Restore
+     * tiles, the owner's readable recovery copies, Stop backing up. Every button of the old dialog is kept.
+     */
+    fun backupDialog(context: android.content.Context = this): Kit.Sheet? {
         if (isDestroyed) return null
-        val hasBackupFolder = LibraryBackup.folderUri(this) != null
-        val last = LibraryBackup.lastBackup(this)
-        val when_ = if (last == 0L) "No backup has finished yet." else "Last backup: " +
-            EnglishTime.ago(last) +
-            " (${LibraryBackup.lastCount(this)} notebooks)."
-        // P124 (F220): the text and a Restore action share a custom view, since the three dialog buttons are taken.
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(24f), dpi(12f), dpi(24f), 0) }
-        body.addView(android.widget.TextView(this).apply {
-            text = (if(hasBackupFolder) "Notebooks are copied to “${LibraryBackup.folderName(this@MainActivity)}” in ${LibraryBackup.folderLabel(this@MainActivity)}. $when_\n\n" else if(personalTools) "Choose an additional folder for native backups. Readable recovery copies below are automatic.\n\n" else "Choose a folder for your backups.\n\n") +
-                "Only changed notebooks are copied, each copy is checked, and the library is also backed up when you leave the app."
-            textSize = 16f
-        })
-        if (personalTools) {
-            body.addView(Kit.section(this, "Readable recovery copies"))
-            body.addView(Kit.text(this, app.safetyCopies.status()+"\n\nThese ordinary files work outside Scribella and its app lock. The latest two verified local generations are retained. Folder-provider delivery may follow later.", secondary = true))
-            body.addView(Kit.button(this, "Open recovery PDFs in Files", Kit.Button.TINTED) {app.safetyCopies.openFiles(this)})
-            body.addView(Kit.button(this, "Update recovery copies", Kit.Button.PLAIN) {app.safetyCopies.requestAll(repository.entries);message("Recovery refresh requested. Completed copies remain in Downloads / ${getString(R.string.safety_folder)}.")})
-        }
-        val restore = android.widget.Button(this, null, android.R.attr.borderlessButtonStyle).apply { text = "Restore missing notebooks…"; isAllCaps = false }
-        restore.isEnabled = hasBackupFolder
-        body.addView(restore, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dpi(8f) })
-        val dialog = AlertDialog.Builder(this).setTitle("Library backup").setView(body)
-            .setPositiveButton(if(hasBackupFolder) "Back up now" else "Choose backup folder…") { _, _ -> if(hasBackupFolder) backUpLibrary(announce = true) else chooseBackupFolder() }
-            .setNeutralButton("Change folder…") { _, _ -> chooseBackupFolder() }
-            .setNegativeButton("Stop backing up") { _, _ -> LibraryBackup.stop(this); message("Backups stopped. Files already in the folder stay there.") }
-            .show()
-        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = hasBackupFolder
-        restore.setOnClickListener { dialog.dismiss(); restoreDialog() }
-        return dialog
+        return StoragePanels.backup(this, context, StoragePanels.BackupActions(
+            choose = { chooseBackupFolder() },
+            backUp = { backUpLibrary(announce = true) },
+            restore = { restoreDialog() },
+            stop = { LibraryBackup.stop(this); message("Backups stopped. Files already in the folder stay there.") },
+            openRecovery = { app.safetyCopies.openFiles(this) },
+            updateRecovery = { app.safetyCopies.requestAll(repository.entries); message("Recovery refresh requested. Completed copies remain in Downloads / ${getString(R.string.safety_folder)}.") },
+        ))
     }
     /** P124 (F220): the restore confirmation last shown, for checking it. */
     var restorePrompt: AlertDialog? = null; private set
@@ -2293,67 +2548,25 @@ class MainActivity : ComponentActivity() {
     private fun chooseBackupFolder() {
         runCatching { backupFolder.launch(LibraryBackup.folderUri(this)) }.onFailure { message("Cannot choose a folder: ${it.message}") }
     }
-    /** P203: library transfer controls use the shared Glass kit. No provider account is needed. */
+    /** P203: library transfer controls use the shared Glass kit. No provider account is needed. P729: board 21's Look A ([SyncPanels]). */
     fun syncDialog(context: android.content.Context = this): Kit.Sheet? {
         if (isDestroyed) return null
-        if (!LibrarySync.hasSource(this)) {
-            return Kit.Sheet(context, "Library sync", cancel = "Done").apply {
-                add(Kit.text(context, "Choose where to sync your notebooks. Every notebook stays saved on this device until you explicitly free its local copy.", secondary = true))
-                add(Kit.button(context, "Choose sync folder…", Kit.Button.TINTED) { dismiss(); chooseSyncFolder() })
-                if (personalTools) {
-                    add(Kit.button(context, "Try smaller uploads in a new folder…", Kit.Button.PLAIN) { dismiss(); chooseChangedSyncFolder() })
-                    add(Kit.text(context, "Test folders reuse PDF and photo data after the first upload. They do not replace files in an existing sync folder. Recovery data is retained; the nightly reader does not use this test format.", secondary = true))
-                }
-                add(Kit.button(context, "WebDAV server…", Kit.Button.TINTED) { dismiss(); webDavSyncDialog(context) })
-                encryptedSyncControls(this,context)
-            }.show()
-        }
-        val paused = LibrarySync.paused(this)
-        lateinit var sheet: Kit.Sheet
-        sheet = Kit.Sheet(context, "Library sync", "Sync now", cancel = "Done") {
-            syncLibrary(announce = true)
-            true
-        }
-        sheet.add(Kit.text(context, "${LibrarySync.status(this)} · ${LibrarySync.folderLabel(this)}", Kit.Type.HEADLINE))
-        sheet.add(Kit.text(context, if (LibrarySync.webDavSelected(this)) "Notebooks sync with the configured WebDAV server folder. Every copy is checked; conflicting edits keep both versions. Replaced versions are kept and remote deletions go to the trash here." else "Notebooks sync with “${LibrarySync.folderName(this@MainActivity)}”. Every copy is checked; a notebook changed on two devices keeps both versions. Replaced versions are kept and remote deletions go to the trash here.", secondary = true))
-        if (!LibrarySync.webDavSelected(this) && personalTools) {
-            sheet.add(Kit.text(context, if (LibrarySync.changedPages(this)) "Smaller uploads test: unchanged PDFs and photos are reused. Recovery data is retained in this folder. The nightly reader does not use this test format." else "Complete-notebook uploads are active. The smaller-uploads test uses a separate empty folder.", secondary = true))
-            sheet.add(Kit.button(context, "Try smaller uploads in a new folder…", Kit.Button.PLAIN) { sheet.dismiss(); chooseChangedSyncFolder() })
-        }
-        LibrarySync.lastResult(this)?.let { sheet.add(Kit.text(context, "Last sync: $it", Kit.Type.CAPTION, secondary = true)) }
-        sheet.add(Kit.section(context, "Transfers"))
-        val wifiSwitch = Kit.Switch(context, LibrarySync.wifiOnly(this), "Wi-Fi-only sync") {
-            LibrarySync.setWifiOnly(this, it)
-        }
-        val backgroundSwitch = Kit.Switch(context, BackgroundSync.enabled(app), "Background sync") {
-            if (!BackgroundSync.setEnabled(app, it)) {
-                message("Android could not schedule background sync. Sync now still works.")
-                error("Background sync scheduling refused")
-            }
-        }
-        sheet.add(Kit.Group(context).apply {
-            addView(Kit.row(context, "Background sync", "Let Android sync while the app is closed.", trailing = backgroundSwitch) { backgroundSwitch.performClick() })
-            addView(Kit.row(context, "Wi-Fi-only sync", "Wait for Wi-Fi before starting folder transfers.", trailing = wifiSwitch) { wifiSwitch.performClick() })
-        })
-        sheet.add(Kit.text(context, app.backgroundHistory.summary(LibrarySync.sourceIdentity(app)), Kit.Type.CAPTION, secondary = true))
-        sheet.add(Kit.text(context, if (LibrarySync.webDavSelected(this)) "Android schedules background attempts about every 15 minutes or later when battery and network conditions allow. Pause prevents new background attempts. Wi-Fi-only also applies to Sync now. Interrupted native transfers keep recovery records; use Inspect interrupted transfer if sync needs attention." else "Android schedules background attempts about every 15 minutes or later, when battery and network conditions allow. Pause stops them. Wi-Fi-only controls Scribella’s folder access, including Sync now. A transfer already in progress can finish. Your cloud app controls when its cached files upload. Connect to Wi-Fi and choose Sync now to retry.", Kit.Type.CAPTION, secondary = true))
-        sheet.add(Kit.text(context, if (paused) "Sync is paused. Sync now still works." else "The library syncs each time you open it.", secondary = true))
-        sheet.add(Kit.button(context, if (paused) "Resume" else "Pause", Kit.Button.TINTED) {
-            LibrarySync.setPaused(this, !paused)
-            sheet.dismiss()
-            message(if (paused) "Sync resumed." else "Sync paused. Your notebooks stay saved on this device; Sync now still works.")
-        })
-        sheet.add(Kit.button(context, "Change folder…", Kit.Button.PLAIN) { sheet.dismiss(); chooseSyncFolder() })
-        sheet.add(Kit.button(context, "WebDAV server…", Kit.Button.PLAIN) { sheet.dismiss(); webDavSyncDialog(context) })
-        if (LibrarySync.webDavSelected(this)) sheet.add(Kit.button(context, "Inspect interrupted transfer…", Kit.Button.TINTED) {
-            sheet.dismiss(); webDavRecoveryDialog(context)
-        })
-        sheet.add(Kit.button(context, "Stop syncing", Kit.Button.DANGER) {
-            LibrarySync.stop(app); sheet.dismiss()
-            message("Sync stopped. Notebook copies, saved account and transfer recovery data were kept.")
-        })
-        encryptedSyncControls(sheet,context)
-        return sheet.show()
+        return SyncPanels.show(this, context, SyncPanels.Actions(
+            chooseFolder = { chooseSyncFolder() },
+            webDav = { webDavSyncDialog(context) },
+            webDavRecovery = { webDavRecoveryDialog(context) },
+            addEncrypted = { runCatching { encryptedSyncFolder.launch(null) }.onFailure { message("Cannot choose a folder") } },
+            syncEncrypted = { EncryptedSync.sync(app) { it?.let(::message) } },
+            disconnectEncrypted = { EncryptedSync.disconnect(app); message("Encrypted copy disconnected; its copies and primary sync are kept.") },
+            instantSync = { LiveSyncPanels.open(this, context) },
+            syncNow = { syncLibrary(announce = true) },
+            stop = { LibrarySync.stop(app); message("Sync stopped. Notebook copies, saved account and transfer recovery data were kept.") },
+            smallerUploads = { chooseChangedSyncFolder() },
+            memorySummary = { showMemorySummary() },
+            saveMemoryReport = { saveMemoryReport.launch(MemoryReport.fileName()) },
+            deleteMemoryReport = { MemoryReport.delete(this); message("Memory report deleted") },
+            lastExits = { showExits() },
+        ))
     }
     fun webDavSyncDialog(context: android.content.Context = this): Kit.Sheet = WebDavPanels.setup(context, app) {
         message("WebDAV connected."); syncLibrary(announce = true)
@@ -2365,11 +2578,144 @@ class MainActivity : ComponentActivity() {
         runCatching { syncFolder.launch(LibrarySync.folderUri(this)) }.onFailure { message("Cannot choose a folder: ${it.message}") }
     }
     /** Syncs after any queued save; [announce] shows the outcome, otherwise only problems are shown. */
-    fun syncLibrary(announce: Boolean) {
+    fun syncLibrary(announce: Boolean, after: () -> Unit = {}) {
+        // P721: the Library's sync chip turns to the running sync at once, and back as soon as it ends.
+        frame.root.post { libraryScreen?.syncChanged() }
         LibrarySync.sync(app, app.repository) { text ->
-            if (text != null && (announce || text.startsWith("Sync failed") || text.contains("could not sync") || text.contains("both versions kept"))) message(text)
+            libraryScreen?.syncChanged()
+            if (text != null && (announce || text.startsWith("Sync failed") || text.contains("could not sync") || text.contains("both versions kept") || text.contains("scanned page") || text.contains(LibraryLayoutSync.UPDATED))) message(text)
+            // P699: notebooks changed on both devices wait for the user's choice, one at a time.
+            if (text != null && LibrarySync.bothChanged(app).isNotEmpty()) askBothChanged()
+            if (text != null) takeNewerOpen()
+            if (text != null) combineHeld()
+            if (text != null && !text.startsWith("Sync failed")) app.liveSync.folderSynced()
+            after()
             EncryptedSync.sync(app) { extra -> if(extra!=null && (announce || extra.startsWith("Encrypted sync failed"))) message(extra) }
         }
+    }
+    /** P713: notebooks being combined by [combineHeld] now. */
+    private val combining = mutableSetOf<String>()
+    /**
+     * P713: a notebook changed on both devices with nothing clashing, held because it was open here (even behind the
+     * Library), is combined as soon as the app can change it, then sent. A clash on the way asks the user instead.
+     * One at a time; the sync that sends it looks for the next one.
+     */
+    private fun combineHeld() {
+        if (isDestroyed) return
+        val pid = android.os.Process.myPid().toString()
+        stoppedCombines(pid)
+        val id = LibrarySync.combineReady(app).firstOrNull { it !in combining && runCatching { combineMarker(it).readText() }.getOrNull() != pid } ?: return
+        val title = repository.entries.firstOrNull { it.id == id }?.title ?: "A notebook"
+        combining += id
+        runCatching { combineMarker(id).writeText(pid) }
+        val started = repository.resolveBothChanged(id, { LibrarySync.resolveBothChanged(app, id, dev.ownednotes.core.FolderSync.Choice.COMBINE, onlyClean = true) }) { result ->
+            combining -= id
+            combineMarker(id).delete()
+            if (isDestroyed) return@resolveBothChanged
+            result.onSuccess {
+                message("Combined both devices' changes to “$title”. Sending it to your other device.")
+                syncLibrary(announce = false) { app.liveSync.folderChanged(listOf(id)) }
+            }.onFailure {
+                // P714: not tried by itself again (it may have run out of memory): the user is asked.
+                app.io.execute { runCatching { LibrarySync.cancelCombine(app, id) }; app.main.post { if (!isDestroyed) askBothChanged(id) } }
+            }
+        }
+        // Busy now (a save or another change): the next sync tries again.
+        if (!started) { combining -= id; combineMarker(id).delete() }
+    }
+    /** P714: why the app stopped last time, shown once, with a copy button. */
+    private fun showCrashNote() {
+        if (isDestroyed) return
+        val text = CrashNote.takeShown(this) ?: return
+        AlertDialog.Builder(this).setTitle("The app stopped last time")
+            .setMessage("This note says why. Copy it and pass it on if it happens again.\n\n$text")
+            .setPositiveButton("Copy") { _, _ ->
+                getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("Crash note", text))
+                message("Copied")
+            }
+            .setNegativeButton("Close", null)
+            .apply { if (personalTools && MemoryReport.available(this@MainActivity)) setNeutralButton("Memory summary") { _, _ -> showMemorySummary() } }
+            .show()
+    }
+    /** P726: Android's own record of why the app ended lately (ExitHistory), read off the main thread, with Copy. */
+    internal var exitsSheet: Kit.Sheet? = null; private set
+    internal fun showExits() {
+        if (isDestroyed) return
+        // Its own thread: the app's file thread may be busy with a save or a sync when this is needed.
+        Thread({
+            val text = ExitHistory.describe(this)
+            app.main.post {
+                if (isDestroyed) return@post
+                exitsSheet = Kit.Sheet(this, "Last exits", "Copy", cancel = "Close") {
+                    getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("Last exits", text))
+                    message("Copied")
+                    false
+                }.apply {
+                    add(Kit.text(this@MainActivity, "Why Android ended the app lately, newest first. Copy it and pass it on.", secondary = true))
+                    add(Kit.text(this@MainActivity, text, Kit.Type.CAPTION).apply { setTextIsSelectable(true); typeface = android.graphics.Typeface.MONOSPACE; textSize = 11f })
+                    dialog.setOnDismissListener { exitsSheet = null }
+                    show()
+                }
+            }
+        }, "exit-history").start()
+    }
+    /** P717/P718: the memory summary opens on a screen of its own (MemoryReportActivity), which reads the report in a
+     *  process of its own: this process, when its memory is full, only asks for the screen. */
+    private fun showMemorySummary() {
+        if (!MemoryReport.open(this)) message("The memory summary could not be opened")
+    }
+    /** P714: marks a combine running in this app process, so one cut off by the app stopping is not tried again by itself. */
+    private fun combineMarker(id: String) = java.io.File(app.filesDir, "combining-$id")
+    private fun stoppedCombines(pid: String) {
+        app.filesDir.listFiles { f -> f.name.startsWith("combining-") }.orEmpty().forEach { f ->
+            if (runCatching { f.readText() }.getOrNull() != pid) {
+                runCatching { LibrarySync.cancelCombine(app, f.name.removePrefix("combining-")) }
+                f.delete()
+            }
+        }
+    }
+    internal var bothChangedChoice: BothChangedChoice? = null; private set
+    private var bothChangedAsking = false
+    /** P699: notebooks the user put off with "Not now"; asked again at the next sync or when opened. */
+    private val bothChangedLater = mutableSetOf<String>()
+    /**
+     * P699: asks what to keep for a notebook changed here and on another device ([only], or the first one waiting that was
+     * not put off). The choice runs with edits waiting, then sync sends the result.
+     */
+    fun askBothChanged(only: String? = null) {
+        if (bothChangedAsking || bothChangedChoice != null || isDestroyed) return
+        val waiting = LibrarySync.bothChanged(app)
+        val id = only?.takeIf { it in waiting } ?: waiting.firstOrNull { it !in bothChangedLater } ?: return
+        bothChangedAsking = true
+        app.io.execute {
+            val details = runCatching { LibrarySync.bothChangedDetails(app, id) }
+            app.main.post {
+                bothChangedAsking = false
+                if (isDestroyed) return@post
+                val found = details.getOrElse { message("“${repository.entries.firstOrNull { e -> e.id == id }?.title ?: "A notebook"}” changed on both devices, but its versions could not be read. Sync again later."); return@post }
+                bothChangedChoice = BothChangedChoice(this, found, choose = { choice -> keepBothChangedChoice(id, found.title, choice) },
+                    closedThen = { chosen -> bothChangedChoice = null; if (!chosen) bothChangedLater += id }).show()
+            }
+        }
+    }
+    private fun keepBothChangedChoice(id: String, title: String, choice: dev.ownednotes.core.FolderSync.Choice, retry: Boolean = true) {
+        bothChangedLater -= id
+        val started = repository.resolveBothChanged(id, { LibrarySync.resolveBothChanged(app, id, choice) }) { result ->
+            result.onSuccess {
+                message(when (choice) {
+                    dev.ownednotes.core.FolderSync.Choice.COMBINE -> "Combined both devices' changes to “$title”. Sending it to your other device."
+                    dev.ownednotes.core.FolderSync.Choice.KEEP_HERE -> "Kept this device's “$title”. The other version is in Earlier versions."
+                    dev.ownednotes.core.FolderSync.Choice.KEEP_THERE -> "Took the other device's “$title”. This device's version is in Earlier versions."
+                    dev.ownednotes.core.FolderSync.Choice.KEEP_BOTH -> "Kept both: the other device's version is now “$title (other device)”."
+                    dev.ownednotes.core.FolderSync.Choice.TAKE_NEWER -> "“$title” updated from your other device."
+                })
+                syncLibrary(announce = false)
+            }.onFailure { message("Nothing was changed: ${it.message ?: "the choice could not be kept"}. Sync again, then choose.") }
+        }
+        if (started) return
+        // The open notebook is still saving: save it, then try once more.
+        if (retry && repository.session?.notebook?.id == id) { repository.flushSave(); frame.root.postDelayed({ keepBothChangedChoice(id, title, choice, retry = false) }, 1500) }
+        else message("Nothing was changed yet. Close the second pane or wait for the save to finish, then sync again to choose.")
     }
     /** Backs up after any queued save; [announce] shows the outcome, otherwise only failures are shown. */
     fun backUpLibrary(announce: Boolean) {
@@ -2433,12 +2779,75 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    override fun onResume() {super.onResume();appLockGate.resumed()}
-    override fun onPause() { appLockGate.paused();frame.zoomWriting?.canvas?.prepareForPause();primaryInk.prepareForPause();companionInk?.prepareForPause(); app.openDocuments.forEach { it.flushSave() }; super.onPause() }
+    override fun onResume() {super.onResume();appLockGate.resumed();dropTick.run();app.main.postDelayed(autoSync, 3_000)}
+    /**
+     * P699 (SYNC-MERGE-PLAN step 4): while a notebook is open and sync is set, sync a few seconds after each save and
+     * about every 30 s, so a change made here reaches the other device soon and a newer version from there is taken in.
+     */
+    private var autoSyncing = false
+    private var lastAutoSync = 0L
+    private var savesSeen = -1L
+    private val autoSync = Runnable { runAutoSync() }
+    private fun runAutoSync() {
+        app.main.removeCallbacks(autoSync)
+        if (isFinishing || isDestroyed || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
+        if (repository.session == null || !LibrarySync.hasSource(this) || LibrarySync.paused(this)) return
+        if (autoSyncing || !repository.canChangeNotebook) { app.main.postDelayed(autoSync, 5_000); return }
+        autoSyncing = true; lastAutoSync = android.os.SystemClock.elapsedRealtime()
+        syncLibrary(announce = false) { autoSyncing = false; app.main.removeCallbacks(autoSync); app.main.postDelayed(autoSync, if (app.liveSync.live) LIVE_AUTO_SYNC_MS else AUTO_SYNC_MS) }
+    }
+    private val savedWatch: () -> Unit = {
+        val saves = repository.saves
+        if (saves != savesSeen) {
+            val first = savesSeen < 0; savesSeen = saves
+            if (!first && !autoSyncing) {
+                // A few seconds after a save, but not more often than every 15 s while writing goes on.
+                val wait = maxOf(5_000L, lastAutoSync + (if (app.liveSync.live) LIVE_AUTO_SYNC_MS else 15_000L) - android.os.SystemClock.elapsedRealtime())
+                app.main.removeCallbacks(autoSync); app.main.postDelayed(autoSync, wait)
+            }
+        }
+    }
+    /** P699: the open notebook is unchanged here and the other device has a newer version: take it in (once saved). */
+    internal fun takeNewerOpen() {
+        val note = repository.session?.notebook ?: return
+        if (note.id !in LibrarySync.newer(app)) return
+        repository.resolveBothChanged(note.id, { LibrarySync.resolveBothChanged(app, note.id, dev.ownednotes.core.FolderSync.Choice.TAKE_NEWER) }) { result ->
+            if (result.isSuccess) message("“${note.title}” updated from your other device.")
+        }
+    }
+    /** P695 (C2): page drops from another device are looked for while the app is in front, about once a minute, and when a notebook opens. */
+    private var dropNotebook: String? = null
+    private val dropTick = object : Runnable {
+        override fun run() {
+            app.main.removeCallbacks(this)
+            if (isFinishing || isDestroyed) return
+            checkDrops()
+            app.main.postDelayed(this, 60_000)
+        }
+    }
+    private val dropOpened: () -> Unit = {
+        val id = app.repository.session?.notebook?.id
+        if (id != null && id != dropNotebook && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) app.main.post { checkDrops() }
+        dropNotebook = id
+    }
+    internal fun checkDrops(done: () -> Unit = {}) {
+        if (!PageDrops.eligible(app) || !app.documentsReady) return done()
+        PageDrops.check(app, app.repository, notice = { message(it) }) { if (::frame.isInitialized && !isDestroyed) frame.showDrops(force = true); done() }
+    }
+    override fun onPause() { app.main.removeCallbacks(dropTick); app.main.removeCallbacks(autoSync); if (::frame.isInitialized) frame.inPlaceText.done(); appLockGate.paused();frame.zoomWriting?.canvas?.prepareForPause();primaryInk.prepareForPause();companionInk?.prepareForPause(); app.openDocuments.forEach { it.flushSave() }; super.onPause() }
     // P103: Paste follows what other apps copied while Scribella was in the background.
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) { Kit.fullScreen(window); refresh() } }
     // P088: leaving the app backs the library up when a backup folder is set (queued behind the save onPause started).
-    override fun onStop() {if(!isChangingConfigurations){if(app.audio.active)app.audio.stop();app.audioPlayback.stop()};appLockGate.stopped(); if (!isChangingConfigurations && LibraryBackup.folderUri(this) != null) backUpLibrary(announce = false); super.onStop() }
+    /** Instant sync connects while Scribella is on screen; it asks for folder sync when new files or missed changes need it. */
+    override fun onStart() { super.onStart(); app.liveSync.folderSync = { app.main.removeCallbacks(liveFolderSync); app.main.postDelayed(liveFolderSync, 3_000) }; app.liveSync.shown(true); LiveSyncBackground.update(app) }
+    private val liveFolderSync = Runnable { runLiveFolderSync() }
+    private fun runLiveFolderSync() {
+        if (isFinishing || isDestroyed || !LibrarySync.hasSource(this) || LibrarySync.paused(this)) return
+        if (autoSyncing || !repository.canChangeNotebook) { app.main.postDelayed(liveFolderSync, 5_000); return }
+        autoSyncing = true; lastAutoSync = android.os.SystemClock.elapsedRealtime()
+        syncLibrary(announce = false) { autoSyncing = false }
+    }
+    override fun onStop() {if(!isChangingConfigurations){app.liveSync.shown(false);if(app.audio.active)app.audio.stop();app.audioPlayback.stop()};appLockGate.stopped(); if (!isChangingConfigurations && LibraryBackup.folderUri(this) != null) backUpLibrary(announce = false); super.onStop() }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("libraryVisible", libraryScreen != null)
         (libraryScreen?.place() ?: libraryPlace)?.let { place ->
@@ -2453,7 +2862,7 @@ class MainActivity : ComponentActivity() {
         }
         saveTextEditorDraft(); savePhotoCropDraft(); super.onSaveInstanceState(outState)
     }
-    override fun onDestroy() {if (::frame.isInitialized) runCatching { frame.openPopover?.dismiss() } /* P642: a tool popover open while the activity ends would leak its window */;encryptedBackupPrompt?.sheet?.dismiss();appLockGate.dispose();appLockSetup?.sheet?.dismiss(); encryptedSyncPrompt?.sheet?.dismiss(); pdfPasswordPrompt?.sheet?.dismiss(); pdfLinkSheet?.dialog?.dismiss(); closeScan(refresh = false);closeTextEditorForDestroy(); closePhotoCropForDestroy(); app.openDocuments.forEach { it.unlisten(observer) }; primaryInk.disposePageCurl();companionInk?.disposePageCurl(); thumbnails.close(); super.onDestroy() }
+    override fun onDestroy() {if (::frame.isInitialized) runCatching { frame.openPopover?.dismiss() } /* P642: a tool popover open while the activity ends would leak its window */;encryptedBackupPrompt?.sheet?.dismiss();appLockGate.dispose();appLockSetup?.sheet?.dismiss(); encryptedSyncPrompt?.sheet?.dismiss(); pdfPasswordPrompt?.sheet?.dismiss(); pdfLinkSheet?.dialog?.dismiss(); closeScan(refresh = false);closePictureCrop(refresh = false);closeTextEditorForDestroy(); closePhotoCropForDestroy(); app.openDocuments.forEach { it.unlisten(observer) }; app.repository.unlisten(dropOpened); app.repository.unlisten(savedWatch); app.main.removeCallbacks(dropTick); app.main.removeCallbacks(autoSync); app.main.removeCallbacks(liveFolderSync); app.liveSync.folderSync = null; if (LibraryLayoutSync.onChanged === layoutChanged) LibraryLayoutSync.onChanged = null; primaryInk.disposePageCurl();companionInk?.disposePageCurl(); thumbnails.close(); super.onDestroy() }
 }
 
 /** A file name from a notebook title, without characters file pickers reject. */

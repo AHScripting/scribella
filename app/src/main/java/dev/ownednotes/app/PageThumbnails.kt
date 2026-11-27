@@ -18,8 +18,8 @@ import dev.ownednotes.core.ImageAsset
 import dev.ownednotes.core.hasBackground
 import dev.ownednotes.core.Page
 import dev.ownednotes.core.PdfAsset
+import dev.ownednotes.core.WeakIdentityCache
 import java.io.File
-import java.util.IdentityHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -54,30 +54,44 @@ class PageThumbnails(
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private val cache = object : LruCache<Key, Bitmap>(maxBytes.coerceAtLeast(1)) {
+    private class Pool(bytes: Int) : LruCache<Key, Bitmap>(bytes.coerceAtLeast(1)) {
         override fun sizeOf(key: Key, value: Bitmap) = value.allocationByteCount
     }
+    private val cache = Pool(maxBytes)
+    /**
+     * B63: the page turn's full-size previews (this page and its neighbours, about 6 MB each) have a pool of their own, so
+     * the Pages panel's small tiles never push them out, and side by side it holds both panes' (see [panes]). Sharing one
+     * pool, a turn in one pane pushed the other pane's previews out and its next turn had no pictures to curl.
+     */
+    private val turns = Pool(maxBytes)
+    private fun poolFor(key: Key) = if (key.width >= TURN_WIDTH) turns else cache
+    private fun pools() = listOf(cache, turns)
+    /** B63: how many editor panes keep page-turn previews warm; side by side, two. */
+    var panes = 1
+        set(value) { checkMain(); field = value.coerceIn(1, 2); turns.resize(turnBudget(field).coerceAtLeast(cache.maxSize())) }
+    /** What one pane's page turn may keep warm. */
+    val turnBytesPerPane get() = turns.maxSize() / panes
     private val running = hashMapOf<Key, Job>()
     private var closed = false
     // Snapshots share unchanged Page instances, so hashing each instance once keeps repeated lookups cheap.
-    private val signatures = IdentityHashMap<Page, Int>()
+    // P716: weakly, so a replaced page version and its strokes are not kept in memory by this cache; the strong
+    // IdentityHashMap kept up to 256 page versions and 50,000 strokes, which on a notebook like German is hundreds of MB.
+    private val signatures = WeakIdentityCache<Page, Int>(limit = 4096)
     var hits = 0; private set
     var misses = 0; private set
-    val sizeBytes get() = cache.size()
+    val sizeBytes get() = cache.size() + turns.size()
     val maxBytes get() = cache.maxSize()
     val pendingCount get() = running.size
 
     // B23 (P137): strokes are immutable too, so after a pen lift only the new stroke is hashed, not every sample on the page.
-    private val strokeHashes = IdentityHashMap<dev.ownednotes.core.InkStroke, Int>()
+    private val strokeHashes = WeakIdentityCache<dev.ownednotes.core.InkStroke, Int>(limit = 200_000)
 
     fun key(notebook: Notebook, page: Page, width: Int): Key {
-        if (signatures.size > 256) signatures.clear()
         return Key(notebook.id, page.id, outputSize(page, width).first, signatures.getOrPut(page) { signature(page) })
     }
 
     /** The page's content hash: the same for equal pages, as [Page.hashCode] is. */
     private fun signature(page: Page): Int {
-        if (strokeHashes.size > 50_000) strokeHashes.clear()
         return page.strokes.fold(page.copy(strokes = emptyList()).hashCode()) { hash, stroke -> 31 * hash + strokeHashes.getOrPut(stroke) { stroke.hashCode() } }
     }
 
@@ -86,7 +100,8 @@ class PageThumbnails(
         checkMain()
         if (closed) return null
         val page = notebook.pages.firstOrNull { it.id == pageId } ?: return null
-        return cache.get(key(notebook, page, width))?.also { hits++ }
+        val key = key(notebook, page, width)
+        return poolFor(key).get(key)?.also { hits++ }
     }
 
     /**
@@ -100,7 +115,7 @@ class PageThumbnails(
         val page = notebook.pages.firstOrNull { it.id == pageId } ?: throw IllegalArgumentException("Page not found")
         val key = key(notebook, page, width)
         val request = Request { cancelled -> running[key]?.let { job -> if (job.waiting.remove(cancelled) != null && job.waiting.isEmpty()) abandon(job) } }
-        cache.get(key)?.let { hits++; callback(Result.success(it)); return request }
+        poolFor(key).get(key)?.let { hits++; callback(Result.success(it)); return request }
         misses++
         val job = running.getOrPut(key) { start(Job(key), page, notebook.assets.firstOrNull { it.id == page.pdfBackground?.assetId }, notebook.imageAssets.firstOrNull { it.id == page.imageBackground?.assetId }, notebook.imageAssets.filter { it.id in page.imageAssetIds }, notebook.attachmentAssets.filter { it.id in page.attachmentAssetIds }) }
         job.waiting[request] = callback
@@ -112,7 +127,7 @@ class PageThumbnails(
         checkMain()
         if (closed) return
         running.values.filter { it.key.notebookId == notebookId && (pageId == null || it.key.pageId == pageId) }.forEach { abandon(it) }
-        cache.snapshot().keys.filter { it.notebookId == notebookId && (pageId == null || it.pageId == pageId) }.forEach { cache.remove(it) }
+        pools().forEach { pool -> pool.snapshot().keys.filter { it.notebookId == notebookId && (pageId == null || it.pageId == pageId) }.forEach { pool.remove(it) } }
         if (pageId == null) { signatures.clear(); strokeHashes.clear() }
         queueDecodedPurge(DecodedScope(notebookId, pageId))
     }
@@ -121,7 +136,7 @@ class PageThumbnails(
         checkMain()
         if (closed) return
         running.values.toList().forEach { abandon(it) }
-        cache.evictAll(); signatures.clear(); strokeHashes.clear()
+        pools().forEach { it.evictAll() }; signatures.clear(); strokeHashes.clear()
         queueDecodedPurge(DecodedScope(null, null))
     }
 
@@ -129,6 +144,7 @@ class PageThumbnails(
         checkMain()
         if (closed) return
         clear(); closed = true
+        executor.execute { closePdf() }
         // Cancelled renders finish before the final purge, so their private pixels cannot be recycled mid-draw.
         // Never wait on PDF/bitmap work from the UI thread; already-delivered composites belong to their callers.
         executor.shutdown()
@@ -156,8 +172,9 @@ class PageThumbnails(
         }
         if (bitmap != null) {
             // A newer signature for the same page and width supersedes the old preview.
-            cache.snapshot().keys.filter { it.notebookId == job.key.notebookId && it.pageId == job.key.pageId && it.width == job.key.width }.forEach { cache.remove(it) }
-            cache.put(job.key, bitmap)
+            val pool = poolFor(job.key)
+            pool.snapshot().keys.filter { it.notebookId == job.key.notebookId && it.pageId == job.key.pageId && it.width == job.key.width }.forEach { pool.remove(it) }
+            pool.put(job.key, bitmap)
         }
         val outcome = if (bitmap != null) Result.success(bitmap) else Result.failure(result.exceptionOrNull()!!)
         try {
@@ -204,6 +221,8 @@ class PageThumbnails(
         if (!enqueue) return
         executor.execute {
             val scopes = synchronized(purgeLock) { pendingPurges.toList().also { pendingPurges.clear(); purgeQueued = false } }
+            // A notebook dropped or replaced closes its PDF; a page written on keeps it open.
+            if (scopes.any { it.pageId == null }) closePdf()
             val iterator = decoded.entries.iterator()
             while (iterator.hasNext()) {
                 val (key, bitmap) = iterator.next()
@@ -252,10 +271,10 @@ class PageThumbnails(
             TextRendering.drawPage(canvas, slice)
             AttachmentRendering.drawPage(canvas, slice, files)
             val flat = InkGeometry.flatHighlights(slice.drawnStrokes)
-            slice.drawnStrokes.forEachIndexed { index, stroke ->
+            InkNoteLook.clipInk(canvas, slice, null) { slice.drawnStrokes.forEachIndexed { index, stroke ->
                 if (index % 32 == 0 && cancelled()) { bitmap.recycle(); return null }
                 InkGeometry.draw(canvas, stroke, paint, slice.opacityOf(stroke), flat[stroke])
-            }
+            } }
             }
             if (cancelled()) { bitmap.recycle(); return null }
             return bitmap
@@ -266,22 +285,45 @@ class PageThumbnails(
         }
     }
 
+    /**
+     * B65: the PDF the last preview came from stays open, render thread only. Each preview of a 200-page book had read and
+     * checked the whole file and opened it again, so the Pages panel took minutes and showed empty tiles meanwhile.
+     */
+    private var openPdf: OpenPdf? = null
+    private class OpenPdf(val assetId: String, val descriptor: ParcelFileDescriptor, val renderer: PdfRenderer) {
+        fun close() { runCatching { renderer.close() }; runCatching { descriptor.close() } }
+    }
+    private fun rendererFor(asset: PdfAsset): PdfRenderer {
+        openPdf?.let { if (it.assetId == asset.id) return it.renderer; it.close(); openPdf = null }
+        // The file is checked once here; the open descriptor keeps reading those same bytes even after a scratch copy is deleted.
+        val descriptor = PdfAccess.withFile(scratch, asset) { file -> ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY) }
+        val renderer = try { PdfRenderer(descriptor) } catch (error: Throwable) { descriptor.close(); throw error }
+        openPdf = OpenPdf(asset.id, descriptor, renderer)
+        return renderer
+    }
+    private fun closePdf() { openPdf?.close(); openPdf = null }
+
     /** Renders straight at preview size, unlike PdfSupport.render's 2048-pixel editor bitmap. */
     private fun renderPdf(asset: PdfAsset, pageIndex: Int, target: Bitmap) {
-        PdfAccess.withFile(scratch, asset) { file ->
-            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                PdfRenderer(descriptor).use { renderer ->
-                    require(pageIndex in 0 until renderer.pageCount) { "PDF page not found" }
-                    renderer.openPage(pageIndex).use { it.render(target, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY) }
-                }
-            }
-        }
+        try {
+            val renderer = rendererFor(asset)
+            require(pageIndex in 0 until renderer.pageCount) { "PDF page not found" }
+            // B64: like the editor (PdfSupport), onto white. On a see-through bitmap PdfRenderer left a black box
+            // behind every letter of a text PDF, which the page turn and the Pages panel showed.
+            target.eraseColor(Color.WHITE)
+            renderer.openPage(pageIndex).use { it.render(target, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY) }
+        } catch (error: Throwable) { closePdf(); throw error }
     }
 
     private fun checkMain() = check(Looper.myLooper() == Looper.getMainLooper()) { "PageThumbnails is main-thread only" }
 
     companion object {
         const val MAX_EDGE = 1024
+        /** B63: previews this wide or wider are page-turn pictures (the curl's 1024, the book flip's 768). */
+        const val TURN_WIDTH = 768
+        /** B63: one pane's page-turn previews, or two panes' side by side (within a quarter of the app's memory, 48 MB). */
+        fun turnBudget(panes: Int): Int = if (panes <= 1) previewBudget()
+            else maxOf(previewBudget().toLong(), minOf(Runtime.getRuntime().maxMemory() / 4, 48L * 1024 * 1024)).toInt()
 
         /** Very tall pages are capped at MAX_EDGE * 4 pixels high, which narrows the result below the requested width. */
         fun outputSize(page: Page, width: Int): Pair<Int, Int> {

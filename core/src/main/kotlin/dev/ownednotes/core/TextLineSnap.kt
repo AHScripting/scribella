@@ -92,7 +92,57 @@ object TextLineSnap {
         while (right - lo < columns.size - 1 && right < x1 + slack && columns[right - lo + 1]) right++
         val covered = (first..last).count { columns[it] }
         if (covered < (x1 - x0 + 1) * .3f) return null
-        return Band(left, top, right, bottom)
+        return wholeLine(Band(left, top, right, bottom), maxLine, width, height, dark)
+    }
+
+    /**
+     * P734: [band]'s rows grown to its whole printed line, so a highlight over "a" or "on" is as tall as one over
+     * "light", and lines of the same type match. The ink under a short stroke is only that word's: x-height letters
+     * give a shorter band than ascenders and descenders. The line's run of words (across word spaces, not a column
+     * gutter) gives its x-height zone, ascenders and descenders; a line with no descenders still gets room for them,
+     * short of the next line's ink. The columns stay [band]'s. Returns [band] when the run does not read as one line.
+     */
+    private fun wholeLine(band: Band, maxLine: Int, width: Int, height: Int, dark: (x: Int, y: Int) -> Boolean): Band {
+        val narrow = band.height
+        val rows = band.top..band.bottom
+        // The printed run around the band: columns inked in its rows, across word spaces but not a gutter.
+        val space = max(4, (narrow * 1.2f).roundToInt())
+        fun printed(x: Int) = rows.any { dark(x, it) }
+        fun reach(from: Int, step: Int): Int {
+            var edge = from; var blank = 0; var x = from + step
+            while (x in 0 until width && blank <= space) { if (printed(x)) { edge = x; blank = 0 } else blank++; x += step }
+            return edge
+        }
+        val left = reach(band.left, -1); val right = reach(band.right, 1)
+        // Ink per row across the run, one band height above and below.
+        val from = max(0, band.top - narrow); val to = min(height - 1, band.bottom + narrow)
+        val counts = IntArray(to - from + 1) { i -> var n = 0; for (x in left..right) if (dark(x, from + i)) n++; n }
+        fun ink(y: Int) = if (y in from..to) counts[y - from] else 0
+        // The x-height zone (the cap height of a run with no lower case): the dense rows around the band's densest,
+        // looking a row or two past the band so "a" finds the same densest row as "Typography".
+        val peak = (band.top - 2..band.bottom + 2).maxBy { ink(it) }
+        if (ink(peak) == 0) return band
+        val dense = ink(peak) * .35f
+        var core = peak; while (ink(core - 1) >= dense) core--
+        var base = peak; while (ink(base + 1) >= dense) base++
+        val xHeight = base - core + 1
+        if (xHeight < 3 || xHeight > narrow * 1.25f + 1) return band
+        // Ascenders and descenders: the rows a few glyphs still reach, up to the first all but empty row.
+        val few = max(2, ((right - left + 1) * .003f).roundToInt())
+        var top = core; while (top > core - xHeight && ink(top - 1) >= few) top--
+        var bottom = base; while (bottom < base + (xHeight * .8f).roundToInt() && ink(bottom + 1) >= few) bottom++
+        // Room for descenders on a line with none (0.4 x-height, as in most text faces), keeping a blank row before the
+        // next line's ink. Faint tails of this line's own descenders run on until the first blank row.
+        val room = base + (xHeight * .4f).roundToInt()
+        if (bottom < room) {
+            var y = bottom + 1
+            while (y <= room && ink(y) > 0) y++
+            val next = (y..room + 1).firstOrNull { ink(it) > 0 }
+            bottom = max(bottom, minOf(room, to, if (next == null) Int.MAX_VALUE else next - 2))
+        }
+        top = min(top, band.top); bottom = max(bottom, band.bottom)
+        if (bottom - top + 1 > maxLine) return band
+        return Band(band.left, top, band.right, bottom)
     }
 
     /** The tallest band still taken for one line of text: a little over the stroke, or 5 % of the page for a thin pen over large print. */
@@ -184,7 +234,7 @@ object TextLineSnap {
             if ((left..right).count(printed) < (last - first + 1) * .3f) return@mapNotNull null
             while (left > 0 && left > first - slack && printed(left - 1)) left--
             while (right < width - 1 && right < last + slack && printed(right + 1)) right++
-            Band(left, rows.first, right, rows.last)
+            wholeLine(Band(left, rows.first, right, rows.last), maxLine, width, height, dark)
         }
     }
 }

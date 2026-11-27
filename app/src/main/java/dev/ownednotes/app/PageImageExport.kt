@@ -8,6 +8,7 @@ import dev.ownednotes.core.Notebook
 import dev.ownednotes.core.Page
 import dev.ownednotes.core.validate
 import dev.ownednotes.core.hasObjectLayers
+import dev.ownednotes.core.inkNote
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -42,10 +43,12 @@ internal object ExportRendering {
         inkPaint: Paint = Paint(Paint.ANTI_ALIAS_FLAG), imagePaint: Paint = Paint(Paint.FILTER_BITMAP_FLAG),
         decodedPhotos: MutableMap<String, Bitmap>? = null, includeInk: Boolean = true, imageEdge:Int=2048) {
         page.paintSlices.forEach { slice ->
-        if (includeInk || !page.hasObjectLayers) PhotoRendering.drawPage(canvas, slice, notebook.imageAssets, longestEdge=imageEdge, paint = imagePaint, decoded = decodedPhotos)
-        if (includeInk || !page.hasObjectLayers) TextRendering.drawPage(canvas, slice)
+        // P680: without ink a handwritten note is left to the PDF export, which adds it over the page ink as its own object.
+        val inBackground = includeInk || (!page.hasObjectLayers && slice.inkNote == null)
+        if (inBackground) PhotoRendering.drawPage(canvas, slice, notebook.imageAssets, longestEdge=imageEdge, paint = imagePaint, decoded = decodedPhotos)
+        if (inBackground) TextRendering.drawPage(canvas, slice)
         AttachmentRendering.drawPage(canvas, slice, notebook.attachmentAssets)
-        if (includeInk) InkGeometry.flatHighlights(slice.drawnStrokes).let { flat -> slice.drawnStrokes.forEach { stroke -> InkGeometry.draw(canvas, stroke, inkPaint, slice.opacityOf(stroke), flat[stroke]) } }
+        if (includeInk) InkNoteLook.clipInk(canvas, slice, null) { InkGeometry.flatHighlights(slice.drawnStrokes).let { flat -> slice.drawnStrokes.forEach { stroke -> InkGeometry.draw(canvas, stroke, inkPaint, slice.opacityOf(stroke), flat[stroke]) } } }
         }
     }
 

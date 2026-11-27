@@ -297,6 +297,8 @@ class ChromeButton(context: Context, label: String, glyph: Glyph? = null, text: 
     private val sideways get() = uprightTip.let { it == 90f || it == 270f }
     /** P560: how tall the slot stands; a rail's are shorter, so its rows of tools fit a landscape screen. */
     var slotLength = SLOT; set(value) { if (field != value) { field = value; requestLayout(); invalidate() } }
+    /** P730 (board 23): how wide a slot or an icon button is; a phone's palette uses 44 dp so its main tools fit. */
+    var slotWidth = 48f; set(value) { if (field != value) { field = value; requestLayout(); invalidate() } }
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = dp(15f); typeface = Tokens.SANS_MEDIUM; fontFeatureSettings = "tnum" }
     private val box = RectF()
@@ -310,9 +312,10 @@ class ChromeButton(context: Context, label: String, glyph: Glyph? = null, text: 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         // P186: a palette slot is tall enough for a tool to stand in it (P614: 58 dp, from the board's 112 and then 76 dp,
         // so the page gets the room); 48 dp keeps the touch target.
-        if (slot) { if (sideways) setMeasuredDimension(dpi(slotLength), dpi(48f)) else setMeasuredDimension(dpi(48f), dpi(slotLength)); return }
+        if (slot) { if (sideways) setMeasuredDimension(dpi(slotLength), dpi(slotWidth)) else setMeasuredDimension(dpi(slotWidth), dpi(slotLength)); return }
         val label = text
         val lead = if (emphasis) dp(10f) + dp(26f) else dp(12f) + dp(30f)
+        if (label == null && slotWidth != 48f) { setMeasuredDimension(dpi(slotWidth), dpi(48f)); return }
         val width = if (label == null) dpi(48f) else ((if (leads) lead else dp(12f)) + textPaint.measureText(label) + dp(if (emphasis) 18f else 14f)).toInt()
         setMeasuredDimension(max(width, dpi(48f)), dpi(48f))
     }
@@ -397,6 +400,19 @@ class ChromeButton(context: Context, label: String, glyph: Glyph? = null, text: 
             paint.pathEffect = if (suspended) suspendedDash else null
             box.inset(dp(1f), dp(1f)); canvas.drawRoundRect(box, dp(Glass.CHIP - 1f), dp(Glass.CHIP - 1f), paint); paint.pathEffect = null
         }
+        if (badge) drawBadge(canvas, accent)
+    }
+    /** P730 (board 23): an add button drawn as its tool, with an 18 dp accent disc and a white plus at its top right. */
+    var badge = false; set(value) { if (field != value) { field = value; invalidate() } }
+    private fun drawBadge(canvas: Canvas, accent: Int) {
+        val r = dp(9f); val cx = width / 2f + dp(12f); val cy = dp(18f)
+        paint.style = Paint.Style.FILL; paint.pathEffect = null
+        paint.color = if (night) Glass.PANE_NIGHT else android.graphics.Color.WHITE; canvas.drawCircle(cx, cy, r + dp(2f), paint)
+        paint.color = accent; if (!visuallyEnabled) paint.alpha = 90; canvas.drawCircle(cx, cy, r, paint); paint.alpha = 255
+        paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2.2f); paint.strokeCap = Paint.Cap.ROUND; paint.color = android.graphics.Color.WHITE
+        val arm = dp(4.2f)
+        canvas.drawLine(cx - arm, cy, cx + arm, cy, paint); canvas.drawLine(cx, cy - arm, cx, cy + arm, paint)
+        paint.strokeCap = Paint.Cap.BUTT
     }
 
     /**
@@ -537,6 +553,11 @@ class InkDot(context: Context, color: Int?, label: String) : View(context) {
     var color = color; set(value) { if (field != value) { field = value; invalidate() } }
     var chosen = false; set(value) { if (field != value) { field = value; invalidate() } }
     var night = false; set(value) { if (field != value) { field = value; invalidate() } }
+    /**
+     * P730 (board 23): on a phone a dot is a 22 dp disc; chosen, it has a 2 dp gap and a 1.5 dp ring in its own colour
+     * (the accent for a colour too light to show on the pane).
+     */
+    var compact = false; set(value) { if (field != value) { field = value; invalidate() } }
     // B30: as on [ChromeButton], the guards held while a stroke is written and saved must not flash the dots.
     private var heldEnabledAppearance: Boolean? = null
     /** Whether the dot is drawn enabled, for tests. */
@@ -558,11 +579,16 @@ class InkDot(context: Context, color: Int?, label: String) : View(context) {
     override fun setEnabled(enabled: Boolean) { if (enabled != isEnabled) { super.setEnabled(enabled); invalidate() } }
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val x = width / 2f; val y = height / 2f; val r = dp(16f)
+        val x = width / 2f; val y = height / 2f; val r = dp(if (compact) 11f else 16f)
         val dim = !visuallyEnabled
         if (dim) canvas.saveLayerAlpha(0f, 0f, width.toFloat(), height.toFloat(), 90)
         paint.style = Paint.Style.FILL; paint.shader = null
-        if (chosen) {
+        if (chosen && compact) {
+            val own = color?.let { it or 0xff000000.toInt() }
+            paint.color = if (own == null || androidx.core.graphics.ColorUtils.calculateLuminance(own) > .8) Glass.accent(night) else own
+            canvas.drawCircle(x, y, r + dp(3.5f), paint)
+            paint.color = if (night) 0xff2c303a.toInt() else -1; canvas.drawCircle(x, y, r + dp(2f), paint)
+        } else if (chosen) {
             paint.color = Glass.accent(night); canvas.drawCircle(x, y, r + dp(5f), paint)
             paint.color = if (night) 0xff2c303a.toInt() else -1; canvas.drawCircle(x, y, r + dp(2.5f), paint)
         }
@@ -572,7 +598,7 @@ class InkDot(context: Context, color: Int?, label: String) : View(context) {
                 s.setLocalMatrix(android.graphics.Matrix().apply { setRotate(-90f, x, y) })
             }
             canvas.drawCircle(x, y, r, paint); paint.shader = null
-            paint.color = if (night) 0xff2c303a.toInt() else -1; canvas.drawCircle(x, y, dp(10f), paint)
+            paint.color = if (night) 0xff2c303a.toInt() else -1; canvas.drawCircle(x, y, dp(if (compact) 5f else 10f), paint)
         } else {
             paint.color = ink or 0xff000000.toInt(); canvas.drawCircle(x, y, r, paint)
             // A hairline keeps white and near-desk colours visible on the pane.

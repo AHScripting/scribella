@@ -163,7 +163,7 @@ class PageCurlView(
         // once instead of waiting for that page's preview; only when the cache holds all four (about 6 MB each).
         val ahead = lastDirection?.let { notebook.pages.getOrNull(index + if (it == TurnDirection.NEXT) 2 else -2) }
         fun bytes(page: Page) = PREVIEW_WIDTH * (PREVIEW_WIDTH * page.height / page.width) * 4f
-        val pages = if (ahead != null && (near + ahead).sumOf { bytes(it).toDouble() } * 1.15 <= thumbnails.maxBytes) near + ahead else near
+        val pages = if (ahead != null && (near + ahead).sumOf { bytes(it).toDouble() } * 1.15 <= thumbnails.turnBytesPerPane) near + ahead else near
         val keys = pages.map { thumbnails.key(notebook, it, PREVIEW_WIDTH) }
         if (keys == warmed && pages.all { thumbnails.cached(notebook, it.id, PREVIEW_WIDTH) != null }) return
         // In-flight requests already correspond to this snapshot; don't cancel/restart on every refresh.

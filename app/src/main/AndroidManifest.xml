@@ -12,6 +12,10 @@
     <!-- P247: the scan screen's live camera (user approved 23 October 2026); the picture stays on the tablet. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- P702: instant sync keeps receiving in the background (opt-in switch, quiet notification; docs/LIVE-SYNC-PLAN.md step 9). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <!-- P197 (B34): lists the apps an import can come from (file managers, photo apps), so the user picks one. -->
     <queries>
@@ -28,7 +32,7 @@
             <category android:name="android.intent.category.APP_GALLERY" />
         </intent>
     </queries>
-    <application android:name=".NotesApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@style/Theme.Scribella" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="false">
+    <application android:name=".NotesApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@style/Theme.Scribella" android:allowBackup="false" android:largeHeap="true" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="false">
         <service android:name=".BackgroundSyncService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" />
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation">
             <intent-filter>
@@ -41,6 +45,13 @@
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/*" />
+            </intent-filter>
+            <!-- P686: photos and scans shared from Photos, Drive or Files go into a notebook the user chooses, through the scan review. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
             </intent-filter>
             <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
             <intent-filter>
@@ -60,5 +71,17 @@
         </provider>
         <service android:name=".SafetyRecoveryService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" android:process=":recovery" />
         <service android:name=".FolderService" android:exported="false" android:process=":folder" />
+        <!-- P717/P718: reads and shows a memory report with a heap of its own (personal tools); a task of its own, so it stays when the app's process stops. -->
+        <activity android:name=".MemoryReportActivity" android:exported="false" android:process=":report" android:label="Memory summary" android:taskAffinity="${applicationId}.report" android:launchMode="singleTask" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation" />
+        <!-- P702: main process, as it uses the open notebook and the library. -->
+        <service android:name=".LiveSyncService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Receives the user's own notebook changes from their other devices" />
+        </service>
+        <receiver android:name=".LiveSyncBootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

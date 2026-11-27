@@ -3,8 +3,6 @@ package dev.ownednotes.app
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
-import android.widget.TextView
-import kotlin.math.abs
 
 /*
  * P569 feature record: the gesture guide. Task: learn what fingers and pens do on the page, with or without an S Pen.
@@ -17,156 +15,144 @@ internal object GestureGuide {
     private val WRITE_TINT get() = Glass.ACCENT
     private const val MOVE_TINT = 0xff168f84.toInt()
     private const val SHORTCUT_TINT = 0xffd9821c.toInt()
+    private val P = SyncPanels.P
 
-    /** Marks for the row squares, on a 24-unit grid. Fingertips are small rings, so one finger or two reads at a glance. */
+    /** Marks the boards have no icon for, on a 24-unit grid. Fingertips are small rings. */
     private object Mark {
         private fun tip(x: Float, y: Float, r: Float = 1.6f) = "M${x - r} ${y}a$r $r 0 1 0 ${2 * r} 0a$r $r 0 1 0 ${-2 * r} 0z"
         val WRITE = "M3 20c2.5-5.5 4.5-8.5 6.5-8s-.5 6.5 1.5 7 3.5-3.5 5-7.5" + tip(18.5f, 6.5f)
-        val ONE_MOVE = tip(12f, 5f) + "M12 10.5V21M8 17l4 4 4-4"
-        val ONE_SWIPE = tip(19f, 12f) + "M14 12H3M7 8l-4 4 4 4"
-        val TWO_MOVE = tip(7.5f, 5f) + tip(16.5f, 5f) + "M12 9.5V21M8 17l4 4 4-4"
-        val TWO_SWIPE = tip(19f, 6.5f) + tip(19f, 17.5f) + "M14 12H3M7 8l-4 4 4 4"
-        const val PINCH = "M10 14l-6 6M4 15v5h5M14 10l6-6M15 4h5v5"
-        val TAP = tip(12f, 12f) + tip(12f, 12f, 8f)
-        val TWO_TAP = tip(7f, 12f, 1f) + tip(17f, 12f, 1f) + tip(7f, 12f, 4.4f) + tip(17f, 12f, 4.4f)
-        val HOLD = tip(12f, 12f, 9f) + "M12 7v5l3.5 2.2"
-        const val BUTTON = "M8.5 3.5h7v17h-7zM12 7v5"
-        const val SHAPE = "M12 4l9 16H3z"
-        const val SCRIBBLE = "M3 16l4-9 3 11 4-13 3 12 4-7"
         val LOOP = "M18 6.5A8.5 8.5 0 1 0 20.5 12" + tip(12f, 12f)
     }
 
+    /**
+     * P735 (board 27): each gesture is a tile, what you do over what it does in a word or two; a part's longer lines
+     * ([notes]) wait behind the (i) after its title.
+     */
     internal data class Line(val mark: String, val tint: Int, val title: String, val detail: String)
-    internal data class Part(val title: String, val lines: List<Line>)
+    internal data class Part(val title: String, val lines: List<Line>, val notes: List<Explain.Line> = emptyList())
     /** The guide on screen. */
     internal class Open(val sheet: Kit.Sheet, val tab: () -> Int, val choose: (Int) -> Unit)
     internal var open: Open? = null
         private set
 
-    private fun shortcuts(ink: InkCanvas, tapDetail: String) = listOfNotNull(
-        Line(Mark.TAP, SHORTCUT_TINT, "Tap", tapDetail),
-        if (ink.twoFingerUndo) Line(Mark.TWO_TAP, SHORTCUT_TINT, "Tap with two fingers", "Undoes the last step.") else null,
-        Line(Mark.HOLD, SHORTCUT_TINT, "Hold one finger still", "Opens the quick ring for tools and colours. On a picture, text box or attached file, it picks that up to move."),
-    )
+    private fun slate(ink: InkCanvas) = SyncPanels.slate(ink.context.night)
+
+    private fun shortcuts(ink: InkCanvas, tapNote: Explain.Line?) = Part("Shortcuts", listOfNotNull(
+        Line(P.TAP, SHORTCUT_TINT, "Tap", "Opens a link or file"),
+        if (ink.twoFingerUndo) Line(P.TWO_TAP, SHORTCUT_TINT, "Two-finger tap", "Undo") else null,
+        Line(P.CLOCK, SHORTCUT_TINT, "Hold one finger", "Quick ring"),
+    ), listOfNotNull(
+        tapNote,
+        Explain.Line(P.CLOCK, SHORTCUT_TINT, "Hold on a picture, text box or file to pick it up and move it."),
+        if (ink.twoFingerUndo) Explain.Line(P.TWO_TAP, slate(ink), "Two-finger tap can be turned off in Palm & touch.") else null,
+    ))
 
     /** What the page does with Draw with finger on. Pan, pinch and swipe work here whatever the finger setting says. */
     internal fun fingerParts(ink: InkCanvas) = listOf(
-        Part("Writing", listOf(
-            Line(Mark.WRITE, WRITE_TINT, "One finger, drag", "Writes with the chosen pen or tool. The lasso, laser, ruler and zoom box follow your finger too."),
-        )),
+        Part("Writing", listOf(Line(Mark.WRITE, WRITE_TINT, "One finger, drag", "Writes")), listOf(
+            Explain.Line(P.PEN, WRITE_TINT, "The lasso, laser, ruler and zoom box follow your finger too."),
+            Explain.Line(P.HAND, slate(ink), "A soft rubber-tip pen counts as a finger. You can rest your hand while you write."),
+            Explain.Line(P.SIDE_BUTTON, slate(ink), "A pen your device knows takes over the first time it touches the page."))),
         Part("Moving around", listOf(
-            Line(Mark.TWO_MOVE, MOVE_TINT, "Two fingers, drag", "Moves the page."),
-            Line(Mark.PINCH, MOVE_TINT, "Pinch with two fingers", "Zooms in and out."),
-            Line(Mark.TWO_SWIPE, MOVE_TINT, "Two fingers, quick swipe", "Turns the page."),
+            Line(P.TWO_DRAG, MOVE_TINT, "Two fingers, drag", "Moves the page"),
+            Line(P.PINCH, MOVE_TINT, "Pinch", "Zooms"),
+            Line(P.TWO_SWIPE, MOVE_TINT, "Two fingers, swipe", "Turns the page"),
         )),
-        Part("Shortcuts", shortcuts(ink, "Opens a link or attached file. Anywhere else it leaves a dot.")),
+        shortcuts(ink, Explain.Line(P.TAP, SHORTCUT_TINT, "A tap anywhere else leaves a dot.")),
     )
 
     /** What the page does with Draw with finger off, by the user's pen and finger settings. */
     internal fun penParts(ink: InkCanvas): List<Part> {
         val c = ink.context
         val button = when (ink.buttonAction) {
-            InkCanvas.ButtonAction.ERASER -> "Uses the eraser while you hold it, with the pen near the page."
-            InkCanvas.ButtonAction.PEN -> "Uses the pen while you hold it, with the pen near the page."
+            InkCanvas.ButtonAction.ERASER -> "Eraser while held"
+            InkCanvas.ButtonAction.PEN -> "Pen while held"
             InkCanvas.ButtonAction.SELECTED_TOOL -> null
         }
+        val scribble = ScribbleErase.enabled(c)
+        val loop = LoopSelect.enabled(c)
         val writing = listOfNotNull(
-            Line(Kit.Paths.PEN, WRITE_TINT, "Pen on the page", if (ink.fingerSettings.handLock) "Writes with the chosen tool. Your hand is ignored while the pen is near." else "Writes with the chosen tool."),
-            button?.let { Line(Mark.BUTTON, WRITE_TINT, "Hold the side button", it) },
-            if (ScribbleErase.enabled(c)) Line(Mark.SCRIBBLE, WRITE_TINT, "Scribble over ink", "Erases it. Undo brings the ink back.") else null,
-            if (ink.holdToShape) Line(Mark.SHAPE, WRITE_TINT, "Draw, then hold the pen still", "Turns the line into a clean shape.") else null,
-            if (LoopSelect.enabled(c)) Line(Mark.LOOP, WRITE_TINT, "Draw a loop, then hold still", "Selects the ink inside it. Needs Hold assist set to Line or Shapes.") else null,
+            Line(P.PEN, WRITE_TINT, "Pen on the page", "Writes"),
+            button?.let { Line(P.SIDE_BUTTON, WRITE_TINT, "Side button", it) },
+            if (scribble) Line(P.SQUIGGLE, WRITE_TINT, "Scribble over ink", "Erases") else null,
+            if (ink.holdToShape) Line(P.SHAPE, WRITE_TINT, "Draw, hold still", "Clean shape") else null,
+            if (loop) Line(Mark.LOOP, WRITE_TINT, "Loop, hold still", "Selects ink") else null,
+        )
+        val notes = listOfNotNull(
+            if (ink.fingerSettings.handLock) Explain.Line(P.PEN, WRITE_TINT, "Your hand is ignored while the pen is near.") else null,
+            Explain.Line(P.SIDE_BUTTON, slate(ink), "Not every pen has a side button."),
+            if (scribble) Explain.Line(P.UNDO, slate(ink), "Undo brings scribbled ink back.") else null,
+            if (loop) Explain.Line(P.WRENCH, slate(ink), "Loop select needs Hold assist set to Line or Shapes.") else null,
         )
         val twoFingers = listOf(
-            Line(Mark.TWO_MOVE, MOVE_TINT, "Two fingers, drag", "Moves the page."),
-            Line(Mark.PINCH, MOVE_TINT, "Pinch with two fingers", "Zooms in and out."),
+            Line(P.TWO_DRAG, MOVE_TINT, "Two fingers, drag", "Moves the page"),
+            Line(P.PINCH, MOVE_TINT, "Pinch", "Zooms"),
         )
         val fingers = when (ink.fingerSettings.mode) {
-            InkCanvas.FingerMode.ONE -> listOf(
-                Line(Mark.ONE_MOVE, MOVE_TINT, "One finger, drag", "Moves the page."),
-                Line(Mark.ONE_SWIPE, MOVE_TINT, "One finger, quick swipe", "Turns the page."),
-            ) + twoFingers
-            InkCanvas.FingerMode.TWO -> twoFingers
-            InkCanvas.FingerMode.OFF -> listOf(Line(Kit.Paths.HAND, MOVE_TINT, "Fingers don't move the page", "This is turned off in Settings, under Palm & touch."))
+            InkCanvas.FingerMode.ONE -> Part("Moving around", listOf(
+                Line(P.DRAG, MOVE_TINT, "One finger, drag", "Moves the page"),
+                Line(P.SWIPE, MOVE_TINT, "Quick swipe", "Turns the page"),
+            ) + twoFingers)
+            InkCanvas.FingerMode.TWO -> Part("Moving around", twoFingers)
+            InkCanvas.FingerMode.OFF -> Part("Moving around", listOf(Line(P.HAND, MOVE_TINT, "Fingers don't move the page", "Off in Palm & touch")))
         }
-        return listOf(Part("Writing", writing), Part("Moving around", fingers), Part("Shortcuts", shortcuts(ink, "Opens a link or attached file.")))
+        return listOf(Part("Writing", writing, notes), fingers, shortcuts(ink, null))
     }
 
-    private const val FINGER_NOTE = "A pen with a soft rubber tip counts as a finger, so it follows these gestures too. You can rest your hand on the screen while you write. To move or zoom, put two fingers down together.\n\n" +
-        "A pen your device recognises takes over the first time it touches the page, and fingers go back to moving the page, unless you have set the switch above yourself."
-    private const val PEN_NOTE = "Any pen your device recognises works this way. Not every pen has a side button."
-
-    /** Words wrap here: this is the one place they get to explain themselves in full. */
-    private fun unlimit(view: View) {
-        if (view is TextView) view.maxLines = Int.MAX_VALUE
-        if (view is ViewGroup) for (i in 0 until view.childCount) unlimit(view.getChildAt(i))
-    }
-
-    private fun column(activity: MainActivity, parts: List<Part>) = LinearLayout(activity).apply {
+    private fun section(activity: MainActivity, part: Part) = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
         val c = activity
-        parts.forEach { part ->
-            addView(Kit.section(c, part.title))
-            addView(Kit.Group(c, Kit.group(c.night), 16f).apply {
-                part.lines.forEach { line ->
-                    addView(Kit.row(c, line.title, line.detail, Kit.Icon(line.mark, line.tint, c.dpi(30f), square = true)).also(::unlimit))
-                }
-            })
+        val info = if (part.notes.isEmpty()) null else Explain.Button(c, "About ${part.title.lowercase()}").apply {
+            setOnClickListener { Explain.show(this, part.title, part.notes) }
         }
-    }
-
-    /** Where the parts break into two columns, so the columns come out about even. */
-    private fun split(parts: List<Part>): Int {
-        val sizes = parts.map { it.lines.size + 1 }
-        return (1 until parts.size).minByOrNull { abs(sizes.take(it).sum() - sizes.drop(it).sum()) } ?: parts.size
+        addView(SyncPanels.sectionRow(c, part.title, info), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = c.dpi(16f); bottomMargin = c.dpi(8f)
+        })
+        addView(SyncPanels.TileGrid(c, 150f, stretch = false).apply {
+            part.lines.forEach { line ->
+                addView(SyncPanels.PlaceTile(c, line.mark, line.tint, line.title, chevron = false, discSize = 44f).apply {
+                    state(line.detail, Glass.secondary(c.night))
+                })
+            }
+        })
     }
 
     /** Opens on what the page does right now: fingers while Draw with finger is on, otherwise the pen. */
     fun show(activity: MainActivity): Open {
         val c = activity
         val ink = activity.ink
-        val wide = c.resources.displayMetrics.widthPixels >= c.dpi(720f)
-        val sheet = Kit.Sheet(c, "Gestures", cancel = "Done", maxWidth = if (wide) 900f else 760f)
+        val sheet = Kit.Sheet(c, "Gestures", cancel = "Done")
         var tab = if (ink.drawWithFinger) 0 else 1
         val pages = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
         fun page() {
             pages.removeAllViews()
-            val parts = if (tab == 0) fingerParts(ink) else penParts(ink)
-            val at = split(parts)
-            if (wide && at < parts.size) pages.addView(LinearLayout(c).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(column(c, parts.take(at)), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = c.dpi(10f) })
-                addView(column(c, parts.drop(at)), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = c.dpi(10f) })
-            }) else pages.addView(column(c, parts))
-            pages.addView(Kit.text(c, if (tab == 0) FINGER_NOTE else PEN_NOTE, Kit.Type.CAPTION, secondary = true).apply {
-                textSize = 13f; setPadding(dpi(4f), dpi(16f), dpi(4f), dpi(4f))
-            })
+            (if (tab == 0) fingerParts(ink) else penParts(ink)).forEach { pages.addView(section(c, it)) }
         }
         fun fill() {
             sheet.body.removeAllViews()
             val finger = ink.drawWithFinger
             val seen = (c.applicationContext as NotesApplication).penSeen
             val state = when {
-                finger && !seen -> "On, because no pen has been found yet. One finger writes."
-                finger -> "On. One finger writes."
-                else -> "Off. Only a pen writes, and fingers move the page."
+                finger && !seen -> "On · no pen found yet"
+                finger -> "On · one finger writes"
+                else -> "Off · fingers move the page"
             }
             val switch = Kit.Switch(c, finger, "Draw with finger") { on ->
                 // The switch throws in the middle of a stroke. A sheet is modal, so this is only a guard.
                 if (!ink.isEditing && !ink.navigating) { ink.selectDrawWithFinger(on); tab = if (on) 0 else 1 }
                 sheet.body.post { fill() }
             }
-            sheet.add(Kit.Group(c, Kit.group(c.night), 16f).apply {
-                addView(Kit.row(c, "Draw with finger", state, trailing = switch).also(::unlimit))
+            sheet.add(Kit.Group(c, Kit.group(c.night), 20f).apply {
+                addView(Kit.row(c, "Draw with finger", state, icon = Explain.Disc(SyncPanels.slate(c.night), P.HAND, 22f / 40f), iconSize = 40f, trailing = switch))
             })
             sheet.add(Kit.segmented(c, listOf("Using a finger", "Using a pen"), tab) { tab = it; page() }.apply { contentDescription = "Show gestures for" }, 14f)
             page()
             sheet.add(pages, 0f)
-            if (!activity.frame.settingsOpen) sheet.add(Kit.Group(c, Kit.group(c.night), 16f).apply {
-                addView(Kit.row(c, "Change these in Settings", "Pen gestures, the side button, fingers and palm.", chevron = true) {
+            if (!activity.frame.settingsOpen) sheet.add(Kit.Group(c, Kit.group(c.night), 20f).apply {
+                addView(Kit.row(c, "Change these in Settings", icon = Explain.Disc(SyncPanels.slate(c.night), P.GEAR, 20f / 36f), iconSize = 36f, chevron = true) {
                     sheet.dismiss(); activity.frame.openSettings()
                 })
-            }, 12f)
+            }, 20f)
         }
         fill()
         val shown = Open(sheet, { tab }, { tab = it; fill() })

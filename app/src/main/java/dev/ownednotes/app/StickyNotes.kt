@@ -12,7 +12,7 @@ internal object StickyNotes {
         if(!page.canEdit(box))return false
         var changed=false
         repo.edit {changed=it.updateTextBox(pageId,box.toggleStickyFold());changed}
-        if(changed && repo.selectedPageId==pageId)activity.ink.selectText(id)
+        if(changed && repo.selectedPageId==pageId && box.sticky?.ink!=true)activity.ink.selectText(id)
         return changed
     }
     fun hit(page:Page,point:Point):TextBox? {

@@ -182,17 +182,14 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
         })
         val read = frame.commandEnabled(EditorCommand.HANDWRITING)
         // P595: with large text the two buttons stack, each the panel's width, so neither label splits a word.
-        val stacked = c.largeText
-        body.addView(LinearLayout(c).apply {
-            orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        // P730: also whenever a label would not fit beside the other (130% text on a 384 dp phone).
+        body.addView(FitRow(c, dpi(8f)).apply {
             addView(button("Copy text", Kit.Button.PRIMARY, records.isNotEmpty()) {
                 val text = records.joinToString("\n") { it.text }
                 c.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Handwriting", text))
                 activity.message("Copied ${records.size} line${if (records.size == 1) "" else "s"} of handwriting")
-            }, if (stacked) LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT) else LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            addView(button(if (records.isEmpty()) "Read handwriting" else "Fix a word", Kit.Button.TINTED, read) { frame.runCommand(EditorCommand.HANDWRITING) },
-                if (stacked) LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dpi(8f) }
-                else LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dpi(8f) })
+            })
+            addView(button(if (records.isEmpty()) "Read handwriting" else "Fix a word", Kit.Button.TINTED, read) { frame.runCommand(EditorCommand.HANDWRITING) })
         }, gap(10f))
     }
 
@@ -218,13 +215,11 @@ internal class StudyPanel(context: Context, private val frame: EditorFrame, priv
     private fun tapeTab(page: Page?) {
         body.addView(rows(tapeRow(page, open = false)))
         val any = tapes.isNotEmpty()
-        body.addView(LinearLayout(c).apply {
-            orientation = LinearLayout.HORIZONTAL
+        body.addView(FitRow(c, dpi(8f)).apply {
             addView(button(frame.commandLabel(EditorCommand.TAPE).removeSuffix(" study tape"), Kit.Button.TINTED, frame.commandEnabled(EditorCommand.TAPE)) {
                 frame.runCommand(EditorCommand.TAPE)
-            }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            addView(button("Recall check", Kit.Button.PRIMARY, any && frame.commandEnabled(EditorCommand.TAPE)) { frame.startRecall() },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dpi(8f) })
+            })
+            addView(button("Recall check", Kit.Button.PRIMARY, any && frame.commandEnabled(EditorCommand.TAPE)) { frame.startRecall() })
         }, gap(10f))
         body.addView(Kit.text(c, "Covers every strip, then shows them one at a time.",
             Kit.Type.CAPTION, secondary = true).apply { setPadding(dpi(4f), 0, dpi(4f), 0) }, gap(10f))

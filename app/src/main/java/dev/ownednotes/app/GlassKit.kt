@@ -584,14 +584,14 @@ object Kit {
      */
     fun row(context: Context, title: String, detail: String? = null, icon: Drawable? = null, value: String? = null,
         trailing: View? = null, chevron: Boolean = false, menu: Boolean = false, danger: Boolean = false,
-        onClick: (() -> Unit)? = null) = LinearLayout(context).apply {
+        iconSize: Float = 30f, onClick: (() -> Unit)? = null) = LinearLayout(context).apply {
         val night = context.night
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
         minimumHeight = dpi(if (detail != null) 60f else if (menu) 46f else 52f)
         setPadding(dpi(if (menu) 12f else 16f), dpi(6f), dpi(if (menu) 12f else 14f), dpi(6f))
         var inset = dpi(if (menu) 12f else 16f)
         if (icon != null) {
-            val size = dpi(30f)
+            val size = dpi(iconSize)
             addView(View(context).apply { background = icon; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO },
                 LinearLayout.LayoutParams(size, size).apply { marginEnd = dpi(12f) })
             inset += size + dpi(12f)

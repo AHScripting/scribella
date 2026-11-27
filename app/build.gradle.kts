@@ -6,8 +6,8 @@ android {
         applicationId = "dev.ownednotes.app"
         minSdk = 33
         targetSdk = 35
-        versionCode = 210
-        versionName = "0.3.0-alpha"
+        versionCode = 211
+        versionName = "0.4.0-alpha"
         testInstrumentationRunner = "dev.ownednotes.app.TestRunner"
     }
     // P563: the release key lives outside the repository. Without these variables the release APK comes out unsigned.
@@ -30,6 +30,8 @@ android {
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     // AGP built-in Kotlin inherits JVM 17 from compileOptions above.
+    // Instant sync: the server files the app saves for the user (Library → Sync library → Instant sync → Save server files).
+    sourceSets.getByName("main").assets.srcDir("../server")
 }
 dependencies {
     implementation(project(":core"))
@@ -54,6 +56,12 @@ dependencies {
     implementation("com.google.mlkit:text-recognition:16.0.1")
     // P118: optional language models; download only from the handwriting review dialog.
     implementation("com.google.mlkit:digital-ink-recognition:19.0.0")
+    // P689 (B1, the user's yes of 22 Nov 2026): Google's document scanner, run on the device by Google Play services.
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
+    // Instant sync QR code (LIVE-SYNC-PLAN step 8, the user's yes of 23 Nov 2026): ZXing draws it offline; Google's code
+    // scanner, run by Google Play services, reads it with no camera permission here.
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

@@ -352,10 +352,10 @@ class ContinuousPageView(
             TextRendering.drawPage(canvas, slice)
             AttachmentRendering.drawPage(canvas, slice, files)
             val flat = InkGeometry.flatHighlights(slice.drawnStrokes)
-            slice.drawnStrokes.forEachIndexed { index, stroke ->
+            InkNoteLook.clipInk(canvas, slice, null) { slice.drawnStrokes.forEachIndexed { index, stroke ->
                 if (index % 32 == 0 && cancelled()) { bitmap.recycle(); return null }
                 InkGeometry.draw(canvas, stroke, paint, slice.opacityOf(stroke), flat[stroke])
-            }
+            } }
             }
             if (cancelled()) { bitmap.recycle(); return null }
             return bitmap

@@ -66,6 +66,8 @@ internal class ScanScreen(
     private val app = activity.application as NotesApplication
     /** True while the live camera fills the screen. */
     val live = photo == null && ScanProcessing.live
+    /** The photo file the page is finished from at full size: this capture, or the kept page's own photo. */
+    private val source: File? = file ?: review?.photo
     internal val crop = photo?.let { ScanCropView(c, it, detected ?: ScanProcessing.inset(it)) }
     internal var look = review?.look ?: ScanProcessing.look; private set
     internal val looks: List<TextView> = LOOKS.map { (look, name) -> chip(name, look) }
@@ -74,6 +76,14 @@ internal class ScanScreen(
     /** P567: for a page photographed sideways or upside down. It stays with the page's corners, so a kept page keeps its turn. */
     internal val rotate = roundButton("Rotate page", ROTATE) { crop?.turnClockwise(); status.announceForAccessibility("Page rotated") }
     internal val photos = roundButton("Import from Photos", Kit.Paths.IMAGE) { keepThen { activity.pickScanPhoto() } }
+    /**
+     * P689 (B1): on Scribella's live camera, Google's document scanner; on pages from Google's scanner, back to Scribella's
+     * camera. Either choice is remembered for the next scan (also in Settings, Scanning).
+     */
+    internal val google = if (live && GoogleScanner.available(c)) roundButton("Scan with Google", GOOGLE) {
+        activity.closeScan(clear = false); activity.startGoogleScan()
+    } else null
+    internal val ownCamera = if (!live && ScanProcessing.google) roundButton("Use Scribella's camera", Kit.Paths.CAMERA) { keepThen { activity.useOwnCamera() } } else null
     /** Review only: drops the page opened again and goes back to the camera, or to the pages left. */
     internal val remove = review?.let { page -> roundButton("Remove this page", TRASH) { removePage(page) } }
     internal val status = TextView(c)
@@ -121,13 +131,19 @@ internal class ScanScreen(
         override fun onPause(owner: LifecycleOwner) = stopCamera()
     }
 
+    /** P686/A3: a phone held upright. The title gets its own row under Cancel and the buttons, and the panel stacks its rows. */
+    private val narrow = resources.configuration.screenWidthDp < NARROW_WIDTH
+    /** A small phone on a photo (live, the title pill carries Auto and stays): the title pill gives its row to the page (the screen keeps its name for TalkBack) and the foot is smaller. */
+    private val small = narrow && !live && resources.configuration.screenHeightDp < SHORT_HEIGHT
+    private val statusTop = if (narrow && !small) 148f else 88f
+
     init {
         background = GradientDrawable().apply {
             gradientType = GradientDrawable.RADIAL_GRADIENT; colors = intArrayOf(0xff5b544b.toInt(), 0xff2b2723.toInt(), 0xff1a1715.toInt())
         }
         isClickable = true
         // The page: the live camera filling the screen, the photo with its corners, or the last page kept.
-        val middle = LayoutParams(MATCH_PARENT, MATCH_PARENT).apply { setMargins(dpi(24f), dpi(146f), dpi(24f), dpi(280f)) }
+        val middle = LayoutParams(MATCH_PARENT, MATCH_PARENT).apply { if (small) setMargins(dpi(12f), dpi(142f), dpi(12f), dpi(290f)) else if (narrow) setMargins(dpi(16f), dpi(204f), dpi(16f), dpi(320f)) else setMargins(dpi(24f), dpi(146f), dpi(24f), dpi(280f)) }
         when {
             viewfinder != null -> { addView(viewfinder, LayoutParams(MATCH_PARENT, MATCH_PARENT)); addView(edges, LayoutParams(MATCH_PARENT, MATCH_PARENT)) }
             crop != null -> {
@@ -152,21 +168,26 @@ internal class ScanScreen(
                 contentDescription = "Last page kept"
             }, middle)
         }
-        addView(cancel, LayoutParams(WRAP_CONTENT, dpi(50f), Gravity.START or Gravity.TOP).apply { setMargins(dpi(32f), dpi(24f), 0, 0) })
-        addView(title(), LayoutParams(WRAP_CONTENT, dpi(50f), Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply { topMargin = dpi(24f) })
+        val side = dpi(if (narrow) 16f else 32f)
+        addView(cancel, LayoutParams(WRAP_CONTENT, dpi(50f), Gravity.START or Gravity.TOP).apply { setMargins(side, dpi(24f), 0, 0) })
+        if (small) accessibilityPaneTitle = "Scan document"
+        else addView(title(), LayoutParams(WRAP_CONTENT, dpi(50f), Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply { topMargin = dpi(if (narrow) 86f else 24f) })
         addView(LinearLayout(c).apply {
             background = darkGlass(25f); elevation = dp(8f); gravity = Gravity.CENTER_VERTICAL
             setPadding(dpi(3f), 0, dpi(3f), 0)
-            (if (live) listOfNotNull(flash, photos) else listOfNotNull(rotate, whole, photos, remove)).forEach { addView(it, LinearLayout.LayoutParams(dpi(44f), dpi(44f))) }
-        }, LayoutParams(WRAP_CONTENT, dpi(50f), Gravity.END or Gravity.TOP).apply { setMargins(0, dpi(24f), dpi(32f), 0) })
+            (if (live) listOfNotNull(flash, google, photos) else listOfNotNull(rotate, whole, ownCamera ?: photos, remove)).forEach { addView(it, LinearLayout.LayoutParams(dpi(44f), dpi(44f))) }
+        }, LayoutParams(WRAP_CONTENT, dpi(50f), Gravity.END or Gravity.TOP).apply { setMargins(0, dpi(24f), side, 0) })
         status.apply {
             background = darkGlass(22f); elevation = dp(8f); gravity = Gravity.CENTER_VERTICAL
             textSize = 14f; typeface = Kit.Type.HEADLINE.typeface; setTextColor(Color.WHITE); maxLines = 1; ellipsize = TextUtils.TruncateAt.END
             compoundDrawablePadding = dpi(10f)
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
-        addView(status, LayoutParams(WRAP_CONTENT, dpi(44f), Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply { topMargin = dpi(88f) })
-        addView(panel(), LayoutParams(MATCH_PARENT, dpi(236f), Gravity.BOTTOM).apply { setMargins(dpi(24f), 0, dpi(24f), dpi(28f)) })
+        addView(status, LayoutParams(WRAP_CONTENT, dpi(44f), Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply {
+            topMargin = dpi(statusTop); if (narrow) { leftMargin = dpi(16f); rightMargin = dpi(16f) }
+        })
+        addView(panel(), if (narrow) LayoutParams(MATCH_PARENT, dpi(if (small) 270f else 292f), Gravity.BOTTOM).apply { setMargins(dpi(12f), 0, dpi(12f), dpi(16f)) }
+            else LayoutParams(MATCH_PARENT, dpi(236f), Gravity.BOTTOM).apply { setMargins(dpi(24f), 0, dpi(24f), dpi(28f)) })
         if (live) activity.lifecycle.addObserver(lifecycleWatch)
         updatePreview(); show()
     }
@@ -211,33 +232,51 @@ internal class ScanScreen(
 
     private fun panel() = LinearLayout(c).apply {
         orientation = LinearLayout.VERTICAL; background = darkGlass(40f); elevation = dp(12f)
-        setPadding(dpi(30f), dpi(18f), dpi(30f), dpi(26f))
-        addView(LinearLayout(c).apply {
+        if (narrow) setPadding(dpi(16f), dpi(16f), dpi(16f), dpi(18f)) else setPadding(dpi(30f), dpi(18f), dpi(30f), dpi(26f))
+        val lookRow = LinearLayout(c).apply {
+            background = rounded(0x14ffffff, dp(20f)); dpi(2f).let { setPadding(it, it, it, it) }
+            looks.forEach { addView(it, LinearLayout.LayoutParams(WRAP_CONTENT, dpi(36f))) }
+        }
+        destination.apply {
+            val pages = target.notebook.pages; val at = pages.indexOfFirst { it.id == target.pageId } + 1
+            text = "Adds to ${target.notebook.title.ifBlank { "this notebook" }} · after page $at"
+            textSize = 13f; typeface = Kit.Type.HEADLINE.typeface; setTextColor(0xffbfdbff.toInt()); gravity = Gravity.CENTER_VERTICAL
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.MIDDLE; background = rounded(0x380a84ff, dp(18f))
+            setPadding(dpi(14f), 0, dpi(14f), 0)
+        }
+        if (narrow) {
+            // The looks scroll sideways when they do not fit, and where the pages go has a line of its own.
+            addView(HorizontalScrollView(c).apply {
+                isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+                addView(lookRow, LayoutParams(WRAP_CONTENT, dpi(40f)))
+            }, LinearLayout.LayoutParams(MATCH_PARENT, dpi(40f)))
+            addView(destination, LinearLayout.LayoutParams(WRAP_CONTENT, dpi(34f)).apply { topMargin = dpi(10f); gravity = Gravity.CENTER_HORIZONTAL })
+        } else addView(LinearLayout(c).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(LinearLayout(c).apply {
-                background = rounded(0x14ffffff, dp(20f)); dpi(2f).let { setPadding(it, it, it, it) }
-                looks.forEach { addView(it, LinearLayout.LayoutParams(WRAP_CONTENT, dpi(36f))) }
-            }, LinearLayout.LayoutParams(WRAP_CONTENT, dpi(40f)))
+            addView(lookRow, LinearLayout.LayoutParams(WRAP_CONTENT, dpi(40f)))
             addView(View(c), LinearLayout.LayoutParams(0, 1, 1f))
-            destination.apply {
-                val pages = target.notebook.pages; val at = pages.indexOfFirst { it.id == target.pageId } + 1
-                text = "Adds to ${target.notebook.title.ifBlank { "this notebook" }} · after page $at"
-                textSize = 13f; typeface = Kit.Type.HEADLINE.typeface; setTextColor(0xffbfdbff.toInt()); gravity = Gravity.CENTER_VERTICAL
-                maxLines = 1; ellipsize = TextUtils.TruncateAt.MIDDLE; background = rounded(0x380a84ff, dp(18f))
-                setPadding(dpi(14f), 0, dpi(14f), 0)
-            }
             addView(destination, LinearLayout.LayoutParams(WRAP_CONTENT, dpi(36f)).apply { marginStart = dpi(12f) })
         }, LinearLayout.LayoutParams(MATCH_PARENT, dpi(40f)))
-        addView(FrameLayout(c).apply {
+        add.apply {
+            textSize = 16f; typeface = Kit.Type.HEADLINE.typeface; setTextColor(Color.WHITE); gravity = Gravity.CENTER; maxLines = 1
+            background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x40ffffff),
+                rounded(Glass.ACCENT, dp(28f)), rounded(-1, dp(28f)))
+            elevation = dp(6f); outlineSpotShadowColor = Glass.ACCENT; outlineAmbientShadowColor = Glass.ACCENT
+            isClickable = true; isFocusable = true; setOnClickListener { add() }
+        }
+        if (narrow) addView(LinearLayout(c).apply {
+            // Stack, shutter and Add side by side, Add taking what is left so the three never overlap.
+            gravity = Gravity.CENTER_VERTICAL
+            val tight = resources.configuration.screenWidthDp < 360
+            addView(stack, LinearLayout.LayoutParams(dpi(if (tight) 76f else 92f), dpi(if (tight) 76f else 92f)))
+            addView(shutter, LinearLayout.LayoutParams(dpi(if (tight) 68f else 80f), dpi(if (tight) 68f else 80f)).apply { marginStart = dpi(8f) })
+            // The label shrinks rather than losing words when Add is narrow.
+            addView(add.apply { setPadding(dpi(8f), 0, dpi(8f), 0); setAutoSizeTextTypeUniformWithConfiguration(11, 16, 1, android.util.TypedValue.COMPLEX_UNIT_SP) },
+                LinearLayout.LayoutParams(0, dpi(56f), 1f).apply { marginStart = dpi(10f) })
+        }, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { topMargin = dpi(12f) })
+        else addView(FrameLayout(c).apply {
             addView(stack, LayoutParams(dpi(120f), dpi(120f), Gravity.START or Gravity.CENTER_VERTICAL))
             addView(shutter, LayoutParams(dpi(96f), dpi(96f), Gravity.CENTER))
-            add.apply {
-                textSize = 16f; typeface = Kit.Type.HEADLINE.typeface; setTextColor(Color.WHITE); gravity = Gravity.CENTER; maxLines = 1
-                background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x40ffffff),
-                    rounded(Glass.ACCENT, dp(28f)), rounded(-1, dp(28f)))
-                elevation = dp(6f); outlineSpotShadowColor = Glass.ACCENT; outlineAmbientShadowColor = Glass.ACCENT
-                isClickable = true; isFocusable = true; setOnClickListener { add() }
-            }
             addView(add, LayoutParams(dpi(200f), dpi(56f), Gravity.END or Gravity.CENTER_VERTICAL))
         }, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { topMargin = dpi(20f) })
     }
@@ -293,13 +332,13 @@ internal class ScanScreen(
     private fun keepShot(bytes: ByteArray, chosen: ScanProcessing.Look) {
         if (closed) { busy(false); return }
         val file = ScanProcessing.photoFile(app)
-        app.io.execute {
+        pageWork.execute {
             val kept = runCatching {
                 file.writeBytes(bytes)
                 val photo = ScanProcessing.decode(file)
                 try {
                     val corners = ScanProcessing.detect(photo) ?: ScanProcessing.inset(photo)
-                    val page = ScanProcessing.straighten(photo, corners, chosen)
+                    val page = ScanProcessing.finishPage(file, photo, corners, chosen)
                     try { Triple(ScanProcessing.encode(page), small(page), corners) } finally { page.recycle() }
                 } finally { photo.recycle() }
             }
@@ -328,9 +367,9 @@ internal class ScanScreen(
         val chosen = look; val open = review
         if (open != null && open.look == chosen && open.corners == corners) { activity.closeScan(clear = false); next(); return }
         busy(true)
-        app.io.execute {
+        pageWork.execute {
             val kept = runCatching {
-                val page = ScanProcessing.straighten(photo, corners, chosen)
+                val page = ScanProcessing.finishPage(source, photo, corners, chosen)
                 try { ScanProcessing.encode(page) to small(page) } finally { page.recycle() }
             }
             app.main.post {
@@ -365,28 +404,53 @@ internal class ScanScreen(
         val place = ScanProcessing.pages.indexOf(open)
         val unchanged = open != null && open.look == chosen && open.corners == corners
         busy(true)
-        app.io.execute {
-            val parsed = runCatching {
+        val notebookId = target.notebook.id
+        val pageNumber = target.notebook.pages.indexOfFirst { it.id == target.pageId }.takeIf { it >= 0 }?.plus(1)
+        pageWork.execute {
+            val finished = runCatching {
                 val current = if (photo != null && corners != null && !unchanged)
-                    ScanProcessing.straighten(photo, corners, chosen).let { page -> try { ScanProcessing.encode(page) } finally { page.recycle() } } else null
-                val all = kept.toMutableList().apply { if (current != null) { if (place >= 0) this[place] = current else add(current) } }
-                val pages = all.map { ImageSupport.import(ByteArrayInputStream(it), "Scanned page") }
-                // Identical pages (the same photo twice in one look) share one stored image.
-                Notebook(title = "Scanned pages", pages = pages.flatMap { it.pages }, imageAssets = pages.flatMap { it.imageAssets }.distinctBy { it.id })
+                    ScanProcessing.finishPage(source, photo, corners, chosen).let { page -> try { ScanProcessing.encode(page) } finally { page.recycle() } } else null
+                kept.toMutableList().apply { if (current != null) { if (place >= 0) this[place] = current else add(current) } }.toList()
             }
+            // P695 (C2): on a phone that sends scans, a synced notebook gets its pages through the other device.
+            val send = finished.isSuccess && runCatching { PageDrops.canSend(app, notebookId) }.getOrDefault(false)
+            val parsed = if (send) null else finished.mapCatching(::scannedPages)
             app.main.post {
-                busy(false)
-                if (closed) { photo?.recycle(); return@post }
-                parsed.mapCatching { repository.insertImagePages(target, it) }.onSuccess { ids ->
-                    if (ids.isEmpty()) fail(STALE)
-                    else {
+                if (closed) { busy(false); photo?.recycle(); return@post }
+                if (!send) return@post insertHere(parsed!!, null)
+                val all = finished.getOrThrow()
+                PageDrops.send(app, notebookId, target.pageId, pageNumber, all) { sent ->
+                    if (closed) { busy(false); photo?.recycle(); return@send }
+                    sent.onSuccess { drop ->
+                        busy(false)
                         activity.closeScan()
-                        if (!activity.isDestroyed) activity.frame.revealPage(ids.first())
-                        activity.message(if (ids.size == 1) "Inserted scanned page" else "Inserted ${ids.size} scanned pages")
+                        activity.message(if (drop.uploaded) "${PageDrops.pages(all.size)} on the way to your other device. They show above the page list until it adds them."
+                            else "${PageDrops.pages(all.size)} kept to send: the sync folder can't be reached now. They go to your other device as soon as it can.")
+                    }.onFailure { problem ->
+                        // Not sent: the pages go in here, as before.
+                        pageWork.execute { val local = runCatching { scannedPages(all) }; app.main.post { insertHere(local, "Could not send (${problem.message}); added here") } }
                     }
-                }.onFailure { fail("Scan failed: ${it.message}") }
+                }
             }
         }
+    }
+    private fun scannedPages(all: List<ByteArray>): Notebook {
+        val pages = all.map { ImageSupport.import(ByteArrayInputStream(it), "Scanned page") }
+        // Identical pages (the same photo twice in one look) share one stored image.
+        return Notebook(title = "Scanned pages", pages = pages.flatMap { it.pages }, imageAssets = pages.flatMap { it.imageAssets }.distinctBy { it.id })
+    }
+    private fun insertHere(parsed: Result<Notebook>, note: String?) {
+        busy(false)
+        if (closed) { photo?.recycle(); return }
+        parsed.mapCatching { repository.insertImagePages(target, it) }.onSuccess { ids ->
+            if (ids.isEmpty()) fail(STALE)
+            else {
+                activity.closeScan()
+                if (!activity.isDestroyed) activity.frame.revealPage(ids.first())
+                val inserted = if (ids.size == 1) "Inserted scanned page" else "Inserted ${ids.size} scanned pages"
+                activity.message(if (note == null) inserted else "$note: ${inserted.lowercase()}")
+            }
+        }.onFailure { fail("Scan failed: ${it.message}") }
     }
 
     private fun corners() = crop?.corners?.map { PointF(it.x, it.y) }?.takeIf { ScanProcessing.convex(it) && ScanProcessing.area(it) >= 64f }
@@ -585,6 +649,9 @@ internal class ScanScreen(
             val papers = (ScanProcessing.pages.map { if (it === review) preview ?: it.preview else it.preview } +
                 listOfNotNull(preview?.takeIf { photo != null && review == null })).filterNot { it.isRecycled }.takeLast(3)
             val turns = listOf(-10f, 5f, 0f).takeLast(max(1, papers.size))
+            // Drawn at its 120 dp design size and scaled to fit, so a phone's smaller stack looks the same, not cut.
+            val k0 = min(width, height) / dp(120f); canvas.save(); canvas.scale(k0, k0)
+            val width = this.width / k0; val height = this.height / k0
             val w = dp(64f); val h = dp(86f)
             turns.forEachIndexed { i, turn ->
                 canvas.save(); canvas.rotate(turn, width / 2f, height / 2f)
@@ -598,7 +665,7 @@ internal class ScanScreen(
                 }
                 canvas.restore()
             }
-            if (count == 0) return
+            if (count == 0) { canvas.restore(); return }
             if (opens) {
                 // Says that the stack can be opened, over the foot of the pages.
                 val pw = dp(50f); val ph = dp(24f); val top = height - ph - dp(4f)
@@ -614,6 +681,7 @@ internal class ScanScreen(
             paint.color = Glass.ACCENT; canvas.drawCircle(cx, cy, r, paint)
             paint.color = Color.WHITE; paint.textSize = dp(14f); paint.typeface = Kit.Type.HEADLINE.typeface; paint.textAlign = Paint.Align.CENTER
             canvas.drawText(count.toString(), cx, cy - (paint.descent() + paint.ascent()) / 2, paint)
+            canvas.restore()
         }
     }
 
@@ -632,13 +700,17 @@ internal class ScanScreen(
         override fun setPressed(pressed: Boolean) { super.setPressed(pressed); invalidate() }
         override fun onDraw(canvas: Canvas) {
             val cx = width / 2f; val cy = height / 2f
+            // Drawn at its 96 dp design size and scaled to fit, like the stack.
+            val k0 = min(width, height) / dp(96f); canvas.save(); canvas.scale(k0, k0, cx, cy)
             paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(4f); paint.color = Color.WHITE
-            canvas.drawCircle(cx, cy, min(cx, cy) - dp(2f), paint)
+            canvas.drawCircle(cx, cy, dp(46f), paint)
             paint.style = Paint.Style.FILL; paint.color = if (isPressed) 0xffd8dbe2.toInt() else Color.WHITE
             canvas.drawCircle(cx, cy, dp(if (isPressed) 35f else 38f), paint)
-            if (review == null) return
-            paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(5f); paint.strokeCap = Paint.Cap.ROUND; paint.strokeJoin = Paint.Join.ROUND; paint.color = 0xff1d2433.toInt()
-            canvas.drawLine(cx - dp(15f), cy + dp(1f), cx - dp(4f), cy + dp(12f), paint); canvas.drawLine(cx - dp(4f), cy + dp(12f), cx + dp(16f), cy - dp(11f), paint)
+            if (review != null) {
+                paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(5f); paint.strokeCap = Paint.Cap.ROUND; paint.strokeJoin = Paint.Join.ROUND; paint.color = 0xff1d2433.toInt()
+                canvas.drawLine(cx - dp(15f), cy + dp(1f), cx - dp(4f), cy + dp(12f), paint); canvas.drawLine(cx - dp(4f), cy + dp(12f), cx + dp(16f), cy - dp(11f), paint)
+            }
+            canvas.restore()
         }
     }
 
@@ -687,6 +759,12 @@ internal class ScanScreen(
     }
 
     private companion object {
+        /**
+         * P709: finishing scanned pages reads and writes only the scan cache, so it has its own thread: on the shared
+         * `app.io` a scan waited behind a whole folder sync (10 to 15 s on a phone with a synced notebook).
+         */
+        val pageWork: java.util.concurrent.ExecutorService =
+            java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "scan-pages").apply { isDaemon = true } }
         const val STALE = "The notebook or page changed. Scan again."
         const val CORNERS = "Move the corners around the page."
         const val PREVIEW_EDGE = 240
@@ -694,6 +772,8 @@ internal class ScanScreen(
         const val AFTER_EDGE = 720
         /** Below this width the photo and its corners keep the whole screen. */
         const val BOTH_WIDTH = 480f
+        const val NARROW_WIDTH = 600
+        const val SHORT_HEIGHT = 760
         const val AUTO = "auto"
         /** The board's chips, with the look each one makes. */
         val LOOKS = listOf(ScanProcessing.Look.DOCUMENT to "Colour", ScanProcessing.Look.GREY to "Greyscale",
@@ -703,6 +783,8 @@ internal class ScanScreen(
         const val ROTATE = "M20 12a8 8 0 1 1-2.4-5.7L20 8.5M20 4v4.5h-4.5"
         /** The board's Flash bolt. */
         const val FLASH = "M13 2L4 14h7l-1 8 9-12h-7z"
+        /** P689: a page with a spark, for Google's document scanner (no brand mark). */
+        const val GOOGLE = "M5 3h8l4 4v3.5M5 3v18h8.5M13 3v4h4M18 13.5l1.2 2.8 2.8 1.2-2.8 1.2L18 21.5l-1.2-2.8-2.8-1.2 2.8-1.2z"
         const val TRASH = "M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10.5 11v5.5M13.5 11v5.5"
     }
 }

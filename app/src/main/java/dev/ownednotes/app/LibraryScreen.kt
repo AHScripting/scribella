@@ -94,6 +94,8 @@ class LibraryScreen(
     /** P139 (F170): opens the sync sheet, and the sync state shown beside it in the menu (F180). */
     private val onSync: (() -> Unit)? = null,
     private val syncStatus: () -> String = { "" },
+    /** P721: what a running sync is doing now, or null when none runs; shown live in the sync chip. */
+    private val syncProgress: () -> String? = { null },
     private val onSourceRecovery: ((String) -> Boolean)? = null,
     private val storageActions: NotebookStorageActions = NotebookStorageActions(repository),
     private val onExportSelected: ((List<String>) -> Unit)? = null,
@@ -140,7 +142,9 @@ class LibraryScreen(
     /** B18 (P136): the open folder options, a popover beside the folder, if any. */
     var folderMenu: Popover? = null; private set
     /** F178: the open list of a notebook's earlier versions, if any (for tests). */
-    var versionsDialog: AlertDialog? = null; private set
+    var versionsDialog: Kit.Sheet? = null; private set
+    /** P733: the Earlier versions sheet's rows, newest first (for tests). */
+    internal var versionRows: List<SyncPanels.RowCard> = emptyList(); private set
     /** The open rename dialog, if any (for tests). */
     var renameDialog: AlertDialog? = null; private set
     private var shownIdentities: List<LibraryEntry>? = null
@@ -150,18 +154,14 @@ class LibraryScreen(
     var modifiedFilter = NotebookModifiedFilter.entries.firstOrNull { it.name==preferences.getString(DATE_FILTER_KEY,null) } ?: NotebookModifiedFilter.ALL; private set
     internal var dateMenu:Popover?=null; private set
     /** Ids of pinned notebooks (P032), remembered in the library preferences; the trash grid ignores them. */
-    private val archived = (preferences.getStringSet(ARCHIVED_KEY, null) ?: emptySet()).toMutableSet()
+    private val archived = readArchived()
     internal var showingArchived = false; private set
-    private val pinned = (preferences.getStringSet(PINNED_KEY, null) ?: emptySet()).toMutableSet()
+    private val pinned = readPinned()
     /** Folder names (P044), alphabetical, and the folder each filed notebook id belongs to. */
-    private val folderNames = (preferences.getStringSet(FOLDERS_KEY, null) ?: emptySet()).flatMap { ancestry(it) }.distinct().sortedWith(PATH_ORDER).toMutableList()
-    private val filed = (preferences.getStringSet(FOLDER_OF_KEY, null) ?: emptySet()).mapNotNull { line ->
-        line.split('\n', limit = 2).takeIf { it.size == 2 && it[1] in folderNames }?.let { it[0] to it[1] }
-    }.toMap(hashMapOf())
+    private val folderNames = readFolderNames()
+    private val filed = readFiled(folderNames)
     /** Coloured cover chosen per notebook id (P045); absent means the first-page preview. */
-    private val coverStyles = (preferences.getStringSet(COVERS_KEY, null) ?: emptySet()).mapNotNull { line ->
-        line.split('\n', limit = 2).takeIf { it.size == 2 && it[1] in COVER_DESIGNS }?.let { it[0] to it[1] }
-    }.toMap(hashMapOf())
+    private val coverStyles = readCovers()
     /** The open cover chooser, if any (for tests). */
     var coverDialog: AlertDialog? = null; private set
     /** The folder whose notebooks are shown, or null for All. Not saved across launches; MainActivity restores it when returning from a notebook (B50). */
@@ -171,9 +171,7 @@ class LibraryScreen(
     /** P534: where notebooks move to, by folder tile. */
     internal var folderChooser: PictureChooser? = null; private set
     /** B18 (P136): a colour (a cover design key) chosen per folder path; absent means the default kraft. */
-    private val folderColors = (preferences.getStringSet(FOLDER_COLORS_KEY, null) ?: emptySet()).mapNotNull { line ->
-        line.split('\n', limit = 2).takeIf { it.size == 2 && it[1] in COVER_DESIGNS && it[0] in folderNames }?.let { it[0] to it[1] }
-    }.toMap(hashMapOf())
+    private val folderColors = readFolderColors(folderNames)
     private val folderTiles = linkedMapOf<String, FolderTile>()
     private var shownFolderKey: List<String>? = null
     private val folderRow = LinearLayout(context).apply {
@@ -183,16 +181,7 @@ class LibraryScreen(
     private val folderStrip = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; addView(folderRow) }
     private val folderChips = linkedMapOf<String?, TextView>()
     /** Tags of each notebook id (P052), alphabetical; a tag exists while some notebook carries it. */
-    private val tagged = hashMapOf<String, MutableList<String>>().also { map ->
-        (preferences.getStringSet(TAGS_KEY, null) ?: emptySet()).forEach { line ->
-            val parts = line.split('\n', limit = 2)
-            if (parts.size == 2 && tagName(parts[1]) == parts[1]) {
-                val list = map.getOrPut(parts[0]) { mutableListOf() }
-                if (list.none { it.equals(parts[1], ignoreCase = true) }) list += parts[1]
-            }
-        }
-        map.values.forEach { it.sortWith(String.CASE_INSENSITIVE_ORDER) }
-    }
+    private val tagged = readTags()
     /** The tag whose notebooks are shown (within the open folder), or null. Not remembered. */
     var openTag: String? = null; private set
     private val tagChips = linkedMapOf<String, TextView>()
@@ -328,6 +317,21 @@ class LibraryScreen(
         setTextColor(Glass.secondary(night)); textSize = 14f; typeface = Tokens.SANS; maxLines = if (context.largeText) Int.MAX_VALUE else 2; ellipsize = TextUtils.TruncateAt.END
         setPadding(0, dpi(4f), 0, 0)
     }
+    /** P721: how sync stands, under the count, live while a sync runs; a tap opens the Library sync sheet. */
+    internal val syncChip by lazy { SyncChip(context, night) { onSync?.invoke() }.apply { visibility = GONE } }
+    private val syncTick = object : Runnable {
+        override fun run() {
+            removeCallbacks(this)
+            if (!attached) return
+            val status = syncStatus()
+            val shown = onSync != null && status.isNotEmpty() && status != "Not syncing"
+            syncChip.visibility = if (shown) VISIBLE else GONE
+            val running = shown && syncChip.show(status, syncProgress())
+            postDelayed(this, if (running) 500L else 15_000L)
+        }
+    }
+    /** P721: looks at the sync again now (a sync was just started). */
+    fun syncChanged() { removeCallbacks(syncTick); post(syncTick) }
     /** P188: "Continue writing": the most recently edited notebooks as wide cards above the grid. */
     private val recentSection = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; visibility = GONE }
     private val recentRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
@@ -493,6 +497,7 @@ class LibraryScreen(
         header.setPadding(dpi(MAIN_PAD), dpi(30f), dpi(MAIN_PAD), dpi(6f))
         val heading = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         heading.addView(title); heading.addView(storageLine)
+        heading.addView(syncChip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpi(32f)).apply { topMargin = dpi(8f) })
         headingRow.addView(drawerButton, LinearLayout.LayoutParams(dpi(48f), dpi(48f)).apply { marginEnd = dpi(12f) })
         headingRow.addView(heading, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(headingRow); listOf(trashButton, emptyTrashButton, importButton, newButton).forEach { pills.addView(it) }
@@ -1013,8 +1018,10 @@ class LibraryScreen(
             Thread({ Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND); task.run() }, "library-text").apply { isDaemon = true }
         }
         repository.listen(observer)
+        post(syncTick)
     }
     override fun onDetachedFromWindow() {
+        removeCallbacks(syncTick)
         lift?.let { settle(it, null, animate = false) }
         storagePanel?.dispose(); storagePanel = null; storageRequest = null; storageBatch = null
         selectedStorageSheet?.dismiss(); selectedStorageSheet = null
@@ -2486,6 +2493,49 @@ class LibraryScreen(
         return true
     }
 
+    // The Library's organisation as saved; also read again when sync brings another device's (P698).
+    private fun readArchived() = (preferences.getStringSet(ARCHIVED_KEY, null) ?: emptySet()).toMutableSet()
+    private fun readPinned() = (preferences.getStringSet(PINNED_KEY, null) ?: emptySet()).toMutableSet()
+    private fun readFolderNames() = (preferences.getStringSet(FOLDERS_KEY, null) ?: emptySet()).flatMap { ancestry(it) }.distinct().sortedWith(PATH_ORDER).toMutableList()
+    private fun readFiled(names: List<String>) = (preferences.getStringSet(FOLDER_OF_KEY, null) ?: emptySet()).mapNotNull { line ->
+        line.split('\n', limit = 2).takeIf { it.size == 2 && it[1] in names }?.let { it[0] to it[1] }
+    }.toMap(hashMapOf())
+    private fun readCovers() = (preferences.getStringSet(COVERS_KEY, null) ?: emptySet()).mapNotNull { line ->
+        line.split('\n', limit = 2).takeIf { it.size == 2 && it[1] in COVER_DESIGNS }?.let { it[0] to it[1] }
+    }.toMap(hashMapOf())
+    private fun readFolderColors(names: List<String>) = (preferences.getStringSet(FOLDER_COLORS_KEY, null) ?: emptySet()).mapNotNull { line ->
+        line.split('\n', limit = 2).takeIf { it.size == 2 && it[1] in COVER_DESIGNS && it[0] in names }?.let { it[0] to it[1] }
+    }.toMap(hashMapOf())
+    private fun readTags() = hashMapOf<String, MutableList<String>>().also { map ->
+        (preferences.getStringSet(TAGS_KEY, null) ?: emptySet()).forEach { line ->
+            val parts = line.split('\n', limit = 2)
+            if (parts.size == 2 && tagName(parts[1]) == parts[1]) {
+                val list = map.getOrPut(parts[0]) { mutableListOf() }
+                if (list.none { it.equals(parts[1], ignoreCase = true) }) list += parts[1]
+            }
+        }
+        map.values.forEach { it.sortWith(String.CASE_INSENSITIVE_ORDER) }
+    }
+
+    /** P698: a sync brought the organisation from another device; show it. An open folder or tag stays open while it exists. */
+    fun reloadOrganization() {
+        archived.clear(); archived += readArchived()
+        pinned.clear(); pinned += readPinned()
+        folderNames.clear(); folderNames += readFolderNames()
+        filed.clear(); filed += readFiled(folderNames)
+        val oldCovers = HashMap(coverStyles)
+        coverStyles.clear(); coverStyles += readCovers()
+        folderColors.clear(); folderColors += readFolderColors(folderNames)
+        tagged.clear(); tagged += readTags()
+        if (openFolder != null && openFolder !in folderNames) openFolder = null
+        if (openTag != null && tags.none { it.equals(openTag, ignoreCase = true) }) openTag = null
+        (oldCovers.keys + coverStyles.keys).filter { oldCovers[it] != coverStyles[it] }.forEach { id ->
+            val key = coverStyles[id]
+            listOfNotNull(tiles[id]?.cover, recentCards[id]?.cover).forEach { it.style = key; if (key != null) it.release(); it.invalidate() }
+        }
+        buildFolderRow(); shownIdentities = null; refresh(); bindVisible()
+    }
+
     private fun saveFolders() {
         preferences.edit().putStringSet(FOLDERS_KEY, folderNames.toSet())
             .putStringSet(FOLDER_OF_KEY, filed.map { (id, folder) -> "$id\n$folder" }.toSet())
@@ -2730,14 +2780,35 @@ class LibraryScreen(
         repository.listVersions(id) { result ->
             if (!attached || versionsDialog != null) return@listVersions
             val versions = result.getOrDefault(emptyList())
-            val builder = AlertDialog.Builder(context).setTitle("Earlier versions of “${entry.title}”")
-                .setNegativeButton("Close", null).setOnDismissListener { versionsDialog = null }
+            // P733 (board 26): a sheet with the notebook's name under its title; a picture when none are kept; why they are
+            // kept is behind the (i). Choosing one restores it as a new notebook, as before.
+            val night = context.night
+            val sheet = Kit.Sheet(context, "Earlier versions", cancel = "Close", subtitle = entry.title)
+            sheet.dialog.setOnDismissListener { versionsDialog = null; versionRows = emptyList() }
+            val about = PageSheets.info(context, "About earlier versions", "Earlier versions", listOf(
+                Explain.Line(SyncPanels.P.REPEAT, Glass.accent(night), "When sync replaces this notebook, the old copy is kept here."),
+                Explain.Line(SyncPanels.P.CLOCK, SyncPanels.slate(night), "The last 5 are kept."),
+                Explain.Line(SyncPanels.P.PLUS, SyncPanels.green(night), "Restoring adds a new notebook; nothing is replaced.")))
             when {
-                result.isFailure -> builder.setMessage("The kept versions cannot be read: ${result.exceptionOrNull()?.message}")
-                versions.isEmpty() -> builder.setMessage(NO_VERSIONS)
-                else -> builder.setItems(versions.map(::versionLabel).toTypedArray()) { _, which -> restoreVersion(id, versions[which]) }
+                result.isFailure -> sheet.add(PageSheets.Empty(context, SyncPanels.P.ALERT, SyncPanels.amber(night), "Can’t read the kept versions",
+                    result.exceptionOrNull()?.message, about))
+                versions.isEmpty() -> sheet.add(PageSheets.Empty(context, SyncPanels.P.RESTORE, SyncPanels.slate(night), "No earlier versions yet", info = about))
+                else -> {
+                    sheet.add(SyncPanels.sectionRow(context, "Newest first", about))
+                    versionRows = versions.map { version ->
+                        val broken = version.error != null
+                        SyncPanels.RowCard(context, if (broken) SyncPanels.P.ALERT else SyncPanels.P.RESTORE,
+                            if (broken) SyncPanels.amber(night) else SyncPanels.slate(night), versionTime(version.time)).apply {
+                            state(if (broken) "Cannot be read: ${version.error}"
+                                else "${version.title} · ${if (version.pageCount == 1) "1 page" else "${version.pageCount} pages"}", null)
+                            isEnabled = !broken
+                            setOnClickListener { if (!broken) { sheet.dismiss(); restoreVersion(id, version) } }
+                        }
+                    }
+                    versionRows.forEachIndexed { i, row -> sheet.add(row, if (i == 0) 2f else 10f) }
+                }
             }
-            versionsDialog = builder.show()
+            versionsDialog = sheet.show()
         }
         return true
     }
@@ -3595,7 +3666,6 @@ private fun seenAtNight(color: Int): Int {
 private enum class PillIcon { IMPORT, PLUS, BACK }
 private enum class NavIcon { ALL, FOLDER, TRASH, MORE, GESTURES, SETTINGS }
 
-internal const val NO_VERSIONS ="No earlier versions are kept. When sync replaces this notebook with a newer copy from another device, the version it replaces is kept here (the last 5)."
 private const val SORT_KEY = "librarySortRecent"
 private const val DATE_FILTER_KEY = "libraryModifiedFilter"
 private const val ARCHIVED_KEY = "libraryArchived"
@@ -3643,6 +3713,11 @@ private val COVER_DESIGNS = linkedMapOf(
     "kraft" to CoverDesign("Kraft", 0xffb48a5c.toInt(), Finish.KRAFT), "linen" to CoverDesign("Linen", 0xffe3d9c6.toInt(), Finish.LINEN),
     "navy" to CoverDesign("Navy stripe", 0xff243b5a.toInt(), Finish.STRIPE), "coral" to CoverDesign("Coral dots", 0xffd0735e.toInt(), Finish.DOTS),
 )
+/** P680 (board 17, look B): a notebook's cover colour for its side-by-side card header; null for a first-page cover. */
+internal fun coverColorOf(preferences: android.content.SharedPreferences, id: String): Int? =
+    preferences.getStringSet(COVERS_KEY, null)?.firstNotNullOfOrNull { line ->
+        line.split('\n').takeIf { it.size == 2 && it[0] == id }?.let { COVER_DESIGNS[it[1]]?.color }
+    }
 /** Height over width of a coloured book cover. */
 private const val BOOK_ASPECT = 1.32f
 

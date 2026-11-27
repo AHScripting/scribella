@@ -17,8 +17,13 @@ object SvgRenderer {
         page.imageBackground?.let { background ->
             val asset = requireNotNull(images.firstOrNull { it.id == background.assetId }) { "Image asset missing" }
             val m = background.normalizedTransform()
-            val matrix = listOf(m[0] * page.width, m[1] * page.height, m[2] * page.width, m[3] * page.height, m[4] * page.width, m[5] * page.height)
+            // B77: a cropped page picture stretches its crop over the page and is clipped to the page.
+            val c = background.crop
+            val sx = page.width / c.width; val sy = page.height / c.height
+            val matrix = listOf(m[0] * sx, m[1] * sy, m[2] * sx, m[3] * sy, (m[4] - c.left) * sx, (m[5] - c.top) * sy)
+            if (background.isCropped) append("<defs><clipPath id=\"page-crop\" clipPathUnits=\"userSpaceOnUse\"><rect width=\"${number(page.width)}\" height=\"${number(page.height)}\"/></clipPath></defs><g clip-path=\"url(#page-crop)\">")
             append("<image width=\"1\" height=\"1\" preserveAspectRatio=\"none\" transform=\"matrix(${matrix.joinToString(" ") { number(it) }})\" href=\"data:${asset.mimeType};base64,${Base64.getEncoder().encodeToString(asset.svgBytes())}\"/>")
+            if (background.isCropped) append("</g>")
         }
         val layeredObjects = page.hasObjectLayers
         for ((sliceIndex, page) in page.paintSlices.withIndex()) {

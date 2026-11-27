@@ -16,6 +16,9 @@ import android.view.View
 import dev.ownednotes.core.ImageAsset
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
@@ -39,6 +42,8 @@ object ScanProcessing {
     var live = false
     /** Tests turn the in-app camera off to drive the system camera. */
     var liveAllowed = true
+    /** P689 (B1): this scan takes its next pages with Google's document scanner. */
+    var google = false
     /** The look new pages of this scan start with. */
     var look = Look.DOCUMENT
     /** Where the live camera last took a page, so coming back from an edit does not take the same page again. */
@@ -47,7 +52,7 @@ object ScanProcessing {
     fun remove(page: KeptPage) { pages.remove(page); page.photo.delete(); page.preview.recycle() }
     /** Ends a scan: no target, no kept pages and none of their photos. */
     fun clear() {
-        target = null; live = false; look = Look.DOCUMENT; lastTaken = null
+        target = null; live = false; google = false; look = Look.DOCUMENT; lastTaken = null
         pages.forEach { it.photo.delete(); it.preview.recycle() }; pages.clear()
     }
     fun captureFile(context: Context) = File(context.cacheDir, "scans/capture.jpg").also { it.parentFile!!.mkdirs() }
@@ -64,6 +69,29 @@ object ScanProcessing {
         return photo
     }
 
+    /**
+     * P686: a shared photo kept as a page of this scan, as the shutter keeps one: the page found in it (or the whole photo)
+     * straightened in [look], with a small preview. [file] is moved to become the page's photo, so it can be fitted again.
+     * Runs off the main thread; the caller adds the page to [pages] on the main thread.
+     */
+    fun keepShared(context: Context, file: File, look: Look, find: Boolean = true): KeptPage {
+        val photo = decode(file)
+        try {
+            // P689: a page from Google's scanner is already found and straightened, so it starts whole.
+            val corners = (if (find) detect(photo) else null) ?: whole(photo)
+            val page = finishPage(file, photo, corners, look)
+            try {
+                val k = SHARED_PREVIEW_EDGE.toFloat() / max(page.width, page.height)
+                val small = Bitmap.createScaledBitmap(page, max(1, (page.width * k).roundToInt()), max(1, (page.height * k).roundToInt()), true)
+                    .let { if (it === page) page.copy(Bitmap.Config.ARGB_8888, false) else it }
+                val kept = File(File(context.cacheDir, "scans").also { it.mkdirs() }, "page-${java.util.UUID.randomUUID()}.jpg")
+                if (!file.renameTo(kept)) { file.copyTo(kept, overwrite = true); file.delete() }
+                return KeptPage(encode(page), small, kept, corners, look)
+            } finally { page.recycle() }
+        } finally { photo.recycle() }
+    }
+    /** The size of a kept page's preview in the scan's row, as the scan screen makes it. */
+    private const val SHARED_PREVIEW_EDGE = 240
     /** Upright display/working copy, at most [longest] pixels on the longest edge. */
     fun decode(file: File, longest: Int = 2400): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -97,21 +125,36 @@ object ScanProcessing {
      * the photo has no clear page against a darker background.
      */
     fun detect(bitmap: Bitmap): List<PointF>? {
-        val k = min(1f, 200f / max(bitmap.width, bitmap.height))
+        val k = min(1f, DETECT_GRID.toFloat() / max(bitmap.width, bitmap.height))
         val w = max(1, (bitmap.width * k).roundToInt()); val h = max(1, (bitmap.height * k).roundToInt())
-        val small = Bitmap.createScaledBitmap(bitmap, w, h, true)
-        val pixels = IntArray(w * h).also { small.getPixels(it, 0, w, 0, 0, w, h) }
-        if (small !== bitmap) small.recycle()
-        val c = detectLuma(IntArray(pixels.size) { luminance(pixels[it]) }, w, h) ?: return null
-        val corners = (0 until 4).map { PointF(c[it * 2] / k, c[it * 2 + 1] / k) }
+        val lum = lumaGrid(bitmap, w, h)
+        val (region, inside) = brightRegion(lum, w, h) ?: return null
+        // P693: each side then moves onto the page's straight edge, which a shadow over a corner does not hide.
+        val c = PageEdges.refine(lum, w, h, region, inside)
+        val corners = (0 until 4).map { PointF(c[it * 2] * bitmap.width / w, c[it * 2 + 1] * bitmap.height / h) }
         return corners.takeIf { area(it) > bitmap.width * bitmap.height * .1f && convex(it) }
+    }
+    /** P693: the grid [detect] looks for the page in; edges need more cells than the bright region alone did (200). */
+    private const val DETECT_GRID = 400
+    /** Brightness of [bitmap] averaged over each cell of a [w]×[h] grid, so fine print and noise do not alias into edges. */
+    private fun lumaGrid(bitmap: Bitmap, w: Int, h: Int): IntArray {
+        val bw = bitmap.width; val bh = bitmap.height
+        val sum = LongArray(w * h); val count = IntArray(w * h); val row = IntArray(bw)
+        for (y in 0 until bh) {
+            bitmap.getPixels(row, 0, bw, 0, y, bw, 1)
+            val gy = min(h - 1, y * h / bh) * w
+            for (x in 0 until bw) { val i = gy + min(w - 1, x * w / bw); sum[i] += luminance(row[x]).toLong(); count[i]++ }
+        }
+        return IntArray(w * h) { if (count[it] == 0) 0 else (sum[it] / count[it]).toInt() }
     }
 
     /**
      * P247: the corners of the largest bright region in a [w]×[h] brightness grid, as x, y pairs (top-left, top-right,
      * bottom-right, bottom-left) in grid units, or null. Shared by photos ([detect]) and the live camera's small frames.
      */
-    fun detectLuma(lum: IntArray, w: Int, h: Int): FloatArray? {
+    fun detectLuma(lum: IntArray, w: Int, h: Int): FloatArray? = brightRegion(lum, w, h)?.first
+    /** [detectLuma]'s corners and the region's cells. */
+    private fun brightRegion(lum: IntArray, w: Int, h: Int): Pair<FloatArray, BooleanArray>? {
         val threshold = otsu(lum)
         val bright = BooleanArray(lum.size) { lum[it] > threshold }
         // Largest 4-connected bright region, so a reflection elsewhere does not pull the corners.
@@ -135,7 +178,27 @@ object ScanProcessing {
             if (x + y < minSum) { minSum = x + y; tl = i }; if (x + y > maxSum) { maxSum = x + y; br = i }
             if (x - y > maxDiff) { maxDiff = x - y; tr = i }; if (x - y < minDiff) { minDiff = x - y; bl = i }
         }
-        return FloatArray(8).also { out -> listOf(tl, tr, br, bl).forEachIndexed { n, i -> out[n * 2] = i % w + .5f; out[n * 2 + 1] = i / w + .5f } }
+        val corners = FloatArray(8).also { out -> listOf(tl, tr, br, bl).forEachIndexed { n, i -> out[n * 2] = i % w + .5f; out[n * 2 + 1] = i / w + .5f } }
+        return corners to BooleanArray(lum.size) { label[it] == best }
+    }
+
+    /** P689 (A2): the long edge of a finished scanned page, 300 dpi for A4. Corners are still dragged on the lighter [decode] copy. */
+    const val PAGE_EDGE = 3508
+    /**
+     * The finished page: [corners] (on the [working] copy) straightened in [look] from [file] read again at [PAGE_EDGE], so a
+     * large camera photo keeps its detail. Falls back to the working copy when the file is gone, no larger, or does not fit in
+     * memory. The caller owns the returned bitmap.
+     */
+    fun finishPage(file: File?, working: Bitmap, corners: List<PointF>, look: Look): Bitmap {
+        val full = file?.takeIf { it.isFile }?.let { f -> try { decode(f, PAGE_EDGE) } catch (e: Exception) { null } catch (e: OutOfMemoryError) { null } }
+        if (full == null || full.width <= working.width && full.height <= working.height) {
+            if (full !== working) full?.recycle()
+            return straighten(working, corners, look, PAGE_EDGE)
+        }
+        return try {
+            val kx = full.width.toFloat() / working.width; val ky = full.height.toFloat() / working.height
+            straighten(full, corners.map { PointF(it.x * kx, it.y * ky) }, look, PAGE_EDGE)
+        } catch (e: OutOfMemoryError) { straighten(working, corners, look, PAGE_EDGE) } finally { full.recycle() }
     }
 
     /** Straightens the quad into an upright page and applies [look]. The caller owns the returned bitmap. */
@@ -154,29 +217,76 @@ object ScanProcessing {
         return out
     }
 
-    /** Flattens shadows by dividing by an estimate of the paper's brightness, then applies the look. */
+    /**
+     * Flattens shadows by dividing by an estimate of the paper's brightness, then applies the look. P709: the rows are shared
+     * out over the phone's cores and the paper estimate is read from per-column tables, the same sums as before, so a 3508-pixel
+     * page no longer waits seconds here.
+     */
     fun enhance(bitmap: Bitmap, look: Look) {
         if (look == Look.ORIGINAL) return
         val w = bitmap.width; val h = bitmap.height
         val pixels = IntArray(w * h).also { bitmap.getPixels(it, 0, w, 0, 0, w, h) }
-        val paper = paper(pixels, w, h)
-        for (y in 0 until h) for (x in 0 until w) {
-            val i = y * w + x; val p = pixels[i]
-            val gain = 255f / paper(x, y)
-            pixels[i] = when (look) {
-                Look.DOCUMENT -> Color.rgb(curve(Color.red(p) * gain), curve(Color.green(p) * gain), curve(Color.blue(p) * gain))
-                Look.GREY -> curve(luminance(p) * gain).let { Color.rgb(it, it, it) }
-                else -> (luminance(p) * gain).let { v -> if (v < 150f) 0 else if (v > 200f) 255 else ((v - 150f) * 255f / 50f).roundToInt() }.let { Color.rgb(it, it, it) }
+        val balance = FloatArray(3)
+        val paper = paper(pixels, w, h, balance)
+        val br = balance[0]; val bg = balance[1]; val bb = balance[2]
+        val smooth = paper.smooth; val cw = paper.cw; val ch = paper.ch; val cell = paper.cell
+        // Where each column falls between two cells of the paper estimate, worked out once instead of once per pixel.
+        val x0s = IntArray(w); val x1s = IntArray(w); val txs = FloatArray(w)
+        for (x in 0 until w) {
+            val fx = ((x + .5f) / cell - .5f).coerceIn(0f, cw - 1f); val x0 = fx.toInt()
+            x0s[x] = x0; x1s[x] = min(cw - 1, x0 + 1); txs[x] = fx - x0
+        }
+        inRows(h, w) { from, to ->
+            for (y in from until to) {
+                val fy = ((y + .5f) / cell - .5f).coerceIn(0f, ch - 1f)
+                val y0 = fy.toInt(); val y1 = min(ch - 1, y0 + 1); val ty = fy - y0
+                val r0 = y0 * cw; val r1 = y1 * cw
+                for (x in 0 until w) {
+                    val i = y * w + x; val p = pixels[i]
+                    val x0 = x0s[x]; val x1 = x1s[x]; val tx = txs[x]
+                    val top = smooth[r0 + x0] * (1 - tx) + smooth[r0 + x1] * tx
+                    val bottom = smooth[r1 + x0] * (1 - tx) + smooth[r1 + x1] * tx
+                    val gain = 255f / (top * (1 - ty) + bottom * ty)
+                    pixels[i] = when (look) {
+                        Look.DOCUMENT -> Color.rgb(curve(Color.red(p) * gain * br), curve(Color.green(p) * gain * bg), curve(Color.blue(p) * gain * bb))
+                        Look.GREY -> curve(luminance(p) * gain).let { Color.rgb(it, it, it) }
+                        else -> (luminance(p) * gain).let { v -> if (v < 150f) 0 else if (v > 200f) 255 else ((v - 150f) * 255f / 50f).roundToInt() }.let { Color.rgb(it, it, it) }
+                    }
+                }
             }
         }
         bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
     }
-    /** Paper brightness per cell (a bright percentile, so ink does not count), smoothed and interpolated. */
-    private fun paper(pixels: IntArray, w: Int, h: Int): (Int, Int) -> Float {
+    /** [paper]'s estimate: the paper's brightness per [cell]-sized cell of a [cw] x [ch] grid, smoothed. */
+    private class Paper(val smooth: FloatArray, val cell: Int, val cw: Int, val ch: Int)
+    /** P709: the phone's cores, shared by every scan. Its threads are daemons, so they never keep the app alive. */
+    private val workers: ExecutorService by lazy {
+        val n = max(2, min(8, Runtime.getRuntime().availableProcessors()))
+        Executors.newFixedThreadPool(n) { r -> Thread(r, "scan-rows").apply { isDaemon = true } }
+    }
+    /** Runs [block] over rows 0 until [h] in bands, one per core; a small picture (a preview) is done on this thread. */
+    private fun inRows(h: Int, w: Int, block: (from: Int, to: Int) -> Unit) {
+        val n = max(1, min(8, Runtime.getRuntime().availableProcessors()))
+        if (n == 1 || w.toLong() * h < 400_000L || Thread.currentThread().name == "scan-rows") return block(0, h)
+        val band = (h + n - 1) / n
+        val jobs = (1 until n).mapNotNull { k -> val from = k * band; val to = min(h, from + band); if (from < to) workers.submit { block(from, to) } else null }
+        var failure: Throwable? = null
+        try { block(0, min(h, band)) } catch (t: Throwable) { failure = t }
+        for (job in jobs) try { job.get() } catch (e: ExecutionException) { if (failure == null) failure = e.cause ?: e }
+        failure?.let { throw it }
+    }
+    /**
+     * Paper brightness per cell (a bright percentile, so ink does not count), smoothed and interpolated. P693: a picture's
+     * cells take the paper around them, so the picture keeps its tones; a shadow fades in gradually, so it still counts as paper.
+     * [balance] receives one gain per colour channel that turns the paper's colour (a warm lamp, cream paper) neutral.
+     */
+    private fun paper(pixels: IntArray, w: Int, h: Int, balance: FloatArray): Paper {
         val cell = max(8, max(w, h) / 32); val cw = (w + cell - 1) / cell; val ch = (h + cell - 1) / cell
         val grid = FloatArray(cw * ch)
+        val colour = Array(3) { FloatArray(cw * ch) }
+        inRows(ch, w * cell / 4) { fromRow, toRow ->
         val histogram = IntArray(64)
-        for (gy in 0 until ch) for (gx in 0 until cw) {
+        for (gy in fromRow until toRow) for (gx in 0 until cw) {
             histogram.fill(0); var n = 0
             var y = gy * cell
             while (y < min(h, (gy + 1) * cell)) {
@@ -187,21 +297,68 @@ object ScanProcessing {
             var seen = 0; var bin = 63
             while (bin > 0 && seen + histogram[bin] < n * .1f) { seen += histogram[bin]; bin-- }
             grid[gy * cw + gx] = (bin * 4 + 2f).coerceAtLeast(64f)
+            // The paper's colour here: the average of the pixels as bright as the paper.
+            var r = 0L; var g = 0L; var b = 0L; var k = 0
+            y = gy * cell
+            while (y < min(h, (gy + 1) * cell)) {
+                var x = gx * cell
+                while (x < min(w, (gx + 1) * cell)) {
+                    val p = pixels[y * w + x]
+                    if (luminance(p) shr 2 >= bin) { r += Color.red(p); g += Color.green(p); b += Color.blue(p); k++ }
+                    x += 2
+                }
+                y += 2
+            }
+            if (k > 0) { colour[0][gy * cw + gx] = r.toFloat() / k; colour[1][gy * cw + gx] = g.toFloat() / k; colour[2][gy * cw + gx] = b.toFloat() / k }
+        }
+        }
+        // A picture starts where the brightness drops sharply from one cell to the next, and takes in the cells beside it
+        // that are as dark compared with the paper it started from.
+        val isPaper = BooleanArray(grid.size) { true }
+        val level = FloatArray(grid.size); val stack = IntArray(grid.size); var top = 0
+        for (i in grid.indices) {
+            val gx = i % cw; val gy = i / cw; var m = 0f
+            for (dy in -1..1) for (dx in -1..1) { val x = gx + dx; val y = gy + dy; if ((dx != 0 || dy != 0) && x in 0 until cw && y in 0 until ch) m = max(m, grid[y * cw + x]) }
+            if (grid[i] < GUARD * m) { isPaper[i] = false; level[i] = m; stack[top++] = i }
+        }
+        while (top > 0) {
+            val i = stack[--top]; val gx = i % cw; val gy = i / cw
+            fun grow(j: Int) { if (isPaper[j] && grid[j] < GUARD * level[i]) { isPaper[j] = false; level[j] = level[i]; stack[top++] = j } }
+            if (gx > 0) grow(i - 1); if (gx < cw - 1) grow(i + 1); if (gy > 0) grow(i - cw); if (gy < ch - 1) grow(i + cw)
+        }
+        // White balance: the typical colour of the paper cells, each channel scaled to the paper's brightness.
+        val ratios = Array(3) { FloatArray(grid.size) }; var count = 0
+        for (i in grid.indices) {
+            if (!isPaper[i]) continue
+            val l = (colour[0][i] * 54 + colour[1][i] * 183 + colour[2][i] * 19) / 256
+            if (l < 1f) continue
+            for (c in 0 until 3) ratios[c][count] = colour[c][i] / l
+            count++
+        }
+        for (c in 0 until 3) balance[c] = if (count == 0) 1f else (1f / ratios[c].copyOf(count).sorted()[count / 2]).coerceIn(.7f, 1.4f)
+        // Picture cells take the paper around them, spreading inwards from the paper cells.
+        val known = isPaper.copyOf()
+        while (true) {
+            var changed = false
+            val next = grid.copyOf(); val now = known.copyOf()
+            for (i in grid.indices) {
+                if (known[i]) continue
+                val gx = i % cw; val gy = i / cw; var sum = 0f; var n = 0
+                for (dy in -1..1) for (dx in -1..1) { val x = gx + dx; val y = gy + dy; if (x in 0 until cw && y in 0 until ch && known[y * cw + x]) { sum += grid[y * cw + x]; n++ } }
+                if (n > 0) { next[i] = sum / n; now[i] = true; changed = true }
+            }
+            if (!changed) break
+            next.copyInto(grid); now.copyInto(known)
         }
         val smooth = FloatArray(grid.size) { i ->
             val gx = i % cw; val gy = i / cw; var sum = 0f; var n = 0
             for (dy in -1..1) for (dx in -1..1) { val x = gx + dx; val y = gy + dy; if (x in 0 until cw && y in 0 until ch) { sum += grid[y * cw + x]; n++ } }
             sum / n
         }
-        return { x, y ->
-            val fx = ((x + .5f) / cell - .5f).coerceIn(0f, cw - 1f); val fy = ((y + .5f) / cell - .5f).coerceIn(0f, ch - 1f)
-            val x0 = fx.toInt(); val y0 = fy.toInt(); val x1 = min(cw - 1, x0 + 1); val y1 = min(ch - 1, y0 + 1)
-            val tx = fx - x0; val ty = fy - y0
-            val top = smooth[y0 * cw + x0] * (1 - tx) + smooth[y0 * cw + x1] * tx
-            val bottom = smooth[y1 * cw + x0] * (1 - tx) + smooth[y1 * cw + x1] * tx
-            top * (1 - ty) + bottom * ty
-        }
+        return Paper(smooth, cell, cw, ch)
     }
+    /** P693: a cell this much darker than the paper next to it is a picture; a shadow darkens far less from cell to cell. */
+    private const val GUARD = .8f
     private fun curve(v: Float) = ((v - 22f) * 255f / 218f).roundToInt().coerceIn(0, 255)
 
     /** JPEG bytes within the notebook's image limit. */
@@ -274,6 +431,7 @@ class ScanCropView(context: Context, private val photo: Bitmap, corners: List<Po
 
     // P561: the magnifier shown while a corner or edge is held, because the finger or pen hides that spot.
     private val lens = Matrix()
+    private val lensPhoto = Matrix()
     private val lensClip = Path()
     private val lensBack = Paint().apply { color = 0xff1a1715.toInt() }
     private val lensEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = Glass.ACCENT; strokeJoin = Paint.Join.ROUND }
@@ -294,7 +452,79 @@ class ScanCropView(context: Context, private val photo: Bitmap, corners: List<Po
     internal fun lensCircle(): FloatArray? = lensTarget()?.let { placeLens(it[0], it[1]) }
 
     init { contentDescription = "Scan corners and edges" }
-    fun setCorners(points: List<PointF>) { points.forEachIndexed { i, p -> corners[i].set(p) }; invalidate(); onCornersChanged?.invoke() }
+    /**
+     * P689: a straight crop. The four sides stay square to the photo: a corner drags its two sides with it and a side moves
+     * only across. Switching it on squares the corners to the box around them, keeping which corner is the top left.
+     */
+    var straight = false
+        set(value) { field = value; if (value) setCorners(squared(corners)) else invalidate() }
+    fun setCorners(points: List<PointF>) {
+        val placed = if (angle == 0f) points else fitted(points)
+        placed.forEachIndexed { i, p -> corners[i].set(p) }; invalidate(); onCornersChanged?.invoke()
+    }
+
+    // ---- P720: straighten. The photo is shown turned by [angle] about its middle, inside its own frame; [corners] are kept
+    // in that turned photo (so a straight crop stays square on screen) and [photoCorners] gives them back in the photo.
+    /** Degrees the photo is turned, clockwise, at most 45 either way. */
+    var angle = 0f; private set
+    private val turn = Matrix(); private val unturn = Matrix(); private val drawn = Matrix()
+    /** P720: the scan board's tint over the chosen part; the picture crop shows a picture in its own colours. */
+    var tint = true
+    /** P720: a fine grid inside the outline, shown while the photo is being straightened. */
+    var grid = false
+        set(value) { field = value; invalidate() }
+    private val gridLine = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    /**
+     * Turns the photo to [degrees]. The outline becomes [base] (the outline before straightening started, so turning back
+     * gives it back) made smaller about its middle until it lies on the photo.
+     */
+    fun setAngle(degrees: Float, base: List<PointF> = corners.map { PointF(it.x, it.y) }) {
+        angle = degrees.coerceIn(-MAX_ANGLE, MAX_ANGLE)
+        turn.setRotate(angle, photo.width / 2f, photo.height / 2f); turn.invert(unturn)
+        drawn.set(turn); drawn.postConcat(fit)
+        fitted(base).forEachIndexed { i, p -> corners[i].set(p) }
+        invalidate(); onCornersChanged?.invoke()
+    }
+    /** The corners in the photo itself, for straightening: the turned outline turned back. */
+    fun photoCorners(): List<PointF> = corners.map { c -> floatArrayOf(c.x, c.y).also { unturn.mapPoints(it) }.let { PointF(it[0], it[1]) } }
+    /** On the photo's frame and on the turned photo (a little play, so the photo's own edge counts). */
+    private fun onPhoto(x: Float, y: Float): Boolean {
+        val play = .5f
+        if (x < -play || y < -play || x > photo.width + play || y > photo.height + play) return false
+        if (angle == 0f) return true
+        val p = floatArrayOf(x, y).also { unturn.mapPoints(it) }
+        return p[0] >= -play && p[1] >= -play && p[0] <= photo.width + play && p[1] <= photo.height + play
+    }
+    private fun allOnPhoto(points: List<PointF>) = points.all { onPhoto(it.x, it.y) }
+    /** [points] made smaller about their middle (or the photo's, when theirs is off the photo) until all lie on the photo. */
+    private fun fitted(points: List<PointF>): List<PointF> {
+        if (allOnPhoto(points)) return points.map { PointF(it.x, it.y) }
+        var mx = points.sumOf { it.x.toDouble() }.toFloat() / points.size; var my = points.sumOf { it.y.toDouble() }.toFloat() / points.size
+        if (!onPhoto(mx, my)) { mx = photo.width / 2f; my = photo.height / 2f }
+        fun scaled(s: Float) = points.map { PointF(mx + (it.x - mx) * s, my + (it.y - my) * s) }
+        var low = 0f; var high = 1f
+        repeat(16) { val s = (low + high) / 2; if (allOnPhoto(scaled(s))) low = s else high = s }
+        return scaled(low)
+    }
+    /** After a drag: when it took the outline off the turned photo, it goes only as far as it stays on. */
+    private fun keepOnPhoto(before: List<PointF>) {
+        if (allOnPhoto(corners) || !allOnPhoto(before)) return
+        val after = corners.map { PointF(it.x, it.y) }
+        fun at(t: Float) = before.indices.map { i -> PointF(before[i].x + (after[i].x - before[i].x) * t, before[i].y + (after[i].y - before[i].y) * t) }
+        var low = 0f; var high = 1f
+        repeat(14) { val t = (low + high) / 2; if (allOnPhoto(at(t))) low = t else high = t }
+        at(low).forEachIndexed { i, p -> corners[i].set(p) }
+    }
+    private fun drawGrid(canvas: Canvas) {
+        val q = (0 until 4).map { cornerInView(it) }
+        fun along(a: FloatArray, b: FloatArray, t: Float) = floatArrayOf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        for (n in 1 until GRID) {
+            val t = n.toFloat() / GRID
+            gridLine.strokeWidth = (if (n % 2 == 0) 1.2f else .7f) * density; gridLine.color = if (n % 2 == 0) 0xb3ffffff.toInt() else 0x59ffffff
+            val top = along(q[0], q[1], t); val bottom = along(q[3], q[2], t); canvas.drawLine(top[0], top[1], bottom[0], bottom[1], gridLine)
+            val left = along(q[0], q[3], t); val right = along(q[1], q[2], t); canvas.drawLine(left[0], left[1], right[0], right[1], gridLine)
+        }
+    }
     /** P567: the first corner becomes the page's top left, so handing the corners on by one turns the page a quarter clockwise. */
     fun turnClockwise() = setCorners(ScanProcessing.turned(corners))
     /** Where the page's top edge is once the page has been turned, so a narrow screen with no After pane shows it too. */
@@ -315,18 +545,24 @@ class ScanCropView(context: Context, private val photo: Bitmap, corners: List<Po
         val pad = 20f * density
         fit.setRectToRect(RectF(0f, 0f, photo.width.toFloat(), photo.height.toFloat()), RectF(pad, pad, w - pad, h - pad), Matrix.ScaleToFit.CENTER)
         fit.invert(inverse)
+        drawn.set(turn); drawn.postConcat(fit)
     }
     fun cornerInView(i: Int) = floatArrayOf(corners[i].x, corners[i].y).also { fit.mapPoints(it) }
     override fun onDraw(canvas: Canvas) {
-        canvas.drawBitmap(photo, fit, photoPaint)
-        path.reset(); path.fillType = Path.FillType.EVEN_ODD
         val shown = RectF(0f, 0f, photo.width.toFloat(), photo.height.toFloat()).also { fit.mapRect(it) }
+        // P720: a straightened photo turns inside its own frame.
+        canvas.save(); canvas.clipRect(shown)
+        canvas.drawBitmap(photo, drawn, photoPaint)
+        path.reset(); path.fillType = Path.FillType.EVEN_ODD
         path.addRect(shown, Path.Direction.CW)
         (0 until 4).forEach { i -> val p = cornerInView(i); if (i == 0) path.moveTo(p[0], p[1]) else path.lineTo(p[0], p[1]) }
         path.close()
         canvas.drawPath(path, dim)
+        canvas.restore()
         path.reset(); (0 until 4).forEach { i -> val p = cornerInView(i); if (i == 0) path.moveTo(p[0], p[1]) else path.lineTo(p[0], p[1]) }; path.close()
-        canvas.drawPath(path, fill); canvas.drawPath(path, edge)
+        if (tint) canvas.drawPath(path, fill)
+        if (grid) drawGrid(canvas)
+        canvas.drawPath(path, edge)
         (0 until 4).forEach { i ->
             val a = cornerInView(i); val b = cornerInView((i + 1) % 4)
             val length = hypot(b[0] - a[0], b[1] - a[1])
@@ -357,7 +593,8 @@ class ScanCropView(context: Context, private val photo: Bitmap, corners: List<Po
         canvas.save()
         lensClip.rewind(); lensClip.addCircle(cx, cy, r, Path.Direction.CW); canvas.clipPath(lensClip)
         canvas.drawCircle(cx, cy, r, lensBack)
-        canvas.drawBitmap(photo, lens, photoPaint)
+        lensPhoto.set(turn); lensPhoto.postConcat(lens)
+        canvas.drawBitmap(photo, lensPhoto, photoPaint)
         // The outline, in the same enlargement but no thicker than it would be.
         lensClip.rewind()
         val quad = FloatArray(8) { i -> if (i % 2 == 0) corners[i / 2].x else corners[i / 2].y }.also { lens.mapPoints(it) }
@@ -398,9 +635,13 @@ class ScanCropView(context: Context, private val photo: Bitmap, corners: List<Po
                 parent?.requestDisallowInterceptTouchEvent(true)
             }
             MotionEvent.ACTION_MOVE -> if (dragging >= 0) {
+                val before = if (angle == 0f) null else corners.map { PointF(it.x, it.y) }
                 val p = floatArrayOf(event.x, event.y).also { inverse.mapPoints(it) }
-                if (dragging < 4) corners[dragging].set((p[0] + grabbed.x).coerceIn(0f, photo.width.toFloat()), (p[1] + grabbed.y).coerceIn(0f, photo.height.toFloat()))
+                val x = (p[0] + grabbed.x).coerceIn(0f, photo.width.toFloat()); val y = (p[1] + grabbed.y).coerceIn(0f, photo.height.toFloat())
+                if (dragging < 4) { if (straight) moveStraightCorner(dragging, x, y) else corners[dragging].set(x, y) }
+                else if (straight) moveStraightEdge(dragging - 4, p[0] - lastTouch[0], p[1] - lastTouch[1])
                 else moveEdge(dragging - 4, p[0] - lastTouch[0], p[1] - lastTouch[1])
+                before?.let { keepOnPhoto(it) }
                 lastTouch = p; touch.set(event.x, event.y); onCornersChanged?.invoke()
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> dragging = -1
@@ -425,11 +666,44 @@ class ScanCropView(context: Context, private val photo: Bitmap, corners: List<Po
         val moveY = dy.coerceIn(-min(a.y, b.y), photo.height - max(a.y, b.y))
         a.offset(moveX, moveY); b.offset(moveX, moveY)
     }
+    /** The smallest side a straight crop keeps, so it never turns inside out. */
+    private val leastSide get() = max(8f, max(photo.width, photo.height) * .02f)
+    /** A straight corner stays on its side of the opposite corner; the neighbour sharing its x takes the new x, the other the new y. */
+    private fun moveStraightCorner(i: Int, x: Float, y: Float) {
+        val held = corners[i]; val opposite = corners[(i + 2) % 4]
+        val nx = if (held.x < opposite.x) min(x, opposite.x - leastSide) else max(x, opposite.x + leastSide)
+        val ny = if (held.y < opposite.y) min(y, opposite.y - leastSide) else max(y, opposite.y + leastSide)
+        for (n in listOf(corners[(i + 1) % 4], corners[(i + 3) % 4])) {
+            if (abs(n.x - held.x) <= abs(n.y - held.y)) n.x = nx else n.y = ny
+        }
+        held.set(nx, ny)
+    }
+    /** A straight side moves only across itself, stopping at the photo's edge and short of the opposite side. */
+    private fun moveStraightEdge(edge: Int, dx: Float, dy: Float) {
+        val a = corners[edge]; val b = corners[(edge + 1) % 4]; val far = corners[(edge + 2) % 4]
+        if (abs(b.x - a.x) >= abs(b.y - a.y)) {
+            val limit = if (a.y < far.y) (0f to far.y - leastSide) else (far.y + leastSide to photo.height.toFloat())
+            val y = (a.y + dy).coerceIn(limit.first, max(limit.first, limit.second)); a.y = y; b.y = y
+        } else {
+            val limit = if (a.x < far.x) (0f to far.x - leastSide) else (far.x + leastSide to photo.width.toFloat())
+            val x = (a.x + dx).coerceIn(limit.first, max(limit.first, limit.second)); a.x = x; b.x = x
+        }
+    }
+    /** The box around [points], its corners handed out so the one nearest the first point's corner of the box leads. */
+    private fun squared(points: List<PointF>): List<PointF> {
+        val left = points.minOf { it.x }; val right = points.maxOf { it.x }; val top = points.minOf { it.y }; val bottom = points.maxOf { it.y }
+        val box = listOf(PointF(left, top), PointF(right, top), PointF(right, bottom), PointF(left, bottom))
+        val lead = box.indices.minBy { hypot(box[it].x - points[0].x, box[it].y - points[0].y) }
+        return box.indices.map { box[(lead + it) % 4] }
+    }
     private companion object {
         /** How much larger than the photo on screen the magnifier shows it. */
         const val LENS_ZOOM = 3f
         const val LENS_RADIUS = 68f
         /** From the spot to the magnifier's rim: clear of a fingertip or the pen's tip. */
         const val LENS_GAP = 48f
+        /** P720: the straighten grid's divisions; every second line is brighter (thirds). */
+        const val GRID = 6
+        const val MAX_ANGLE = 45f
     }
 }

@@ -61,10 +61,17 @@ class PageOrganizer(
     private var shownMarks: List<Triple<String, String, Int>>? = null
     private val observer: () -> Unit = { update() }
 
+    /**
+     * P592: large text on a phone squeezed the notebook's name between Done and Select ("Note…"); there the name goes on
+     * its own line under the two buttons. P730: so on any phone narrower than about 400 dp of normal-size text (a 360 or
+     * 384 dp phone, or 130% text), where the 120 dp kept each side left "C…" or "Cardio…".
+     */
+    private val nameUnder = c.resources.configuration.let { it.screenWidthDp < 600 && (c.largeText || it.screenWidthDp / it.fontScale.coerceAtLeast(1f) < 400f) }
+
     init {
         setBackgroundColor(Kit.desk(night)); isClickable = true
         val column = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
-        column.addView(topBar(), LinearLayout.LayoutParams(MATCH_PARENT, if (c.largeText) WRAP_CONTENT else c.dpi(84f)))
+        column.addView(topBar(), LinearLayout.LayoutParams(MATCH_PARENT, if (nameUnder || c.largeText) WRAP_CONTENT else c.dpi(84f)))
         column.addView(tabs, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             setMargins(c.dpi(24f), 0, c.dpi(24f), c.dpi(12f))
         })
@@ -98,9 +105,7 @@ class PageOrganizer(
 
     private fun topBar() = FrameLayout(c).apply {
         setPadding(c.dpi(24f), c.dpi(16f), c.dpi(24f), c.dpi(16f))
-        // P592: large text on a phone squeezed the notebook's name between Done and Select ("Note…"); there the name
-        // goes on its own line under the two buttons.
-        val under = c.largeText && c.resources.configuration.screenWidthDp < 600
+        val under = nameUnder
         val done = Kit.button(c, "Done", Kit.Button.GLASS) { onClose() }.apply { contentDescription = "Close all pages" }
         addView(done, LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.START or if (under) Gravity.TOP else Gravity.CENTER_VERTICAL))
         val names = LinearLayout(c).apply {

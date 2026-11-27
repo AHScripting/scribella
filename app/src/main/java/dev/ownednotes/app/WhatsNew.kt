@@ -2,6 +2,9 @@ package dev.ownednotes.app
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
 import kotlin.concurrent.thread
 
 /**
@@ -13,6 +16,16 @@ import kotlin.concurrent.thread
  */
 internal object WhatsNew {
     val NOTES: Map<String, List<String>> = mapOf(
+        "0.4.0-alpha" to listOf(
+            "Instant sync: changes, photos too, reach your other device in seconds through a small free server of your own on Cloudflare. A guide and a QR code set it up.",
+            "Changed on both devices? Scribella combines the two or asks which to keep. Library folders, colours, tags and pins follow sync too.",
+            "Scan uses Google's document scanner where your device has it. Scans are sharper, and Scribella's own scanner finds shaded corners and whitens the paper.",
+            "Share photos from Photos, Drive or Files to Scribella, as new pages or as pictures on the open page. Scans made on your phone can go to your tablet.",
+            "Crop a picture with straight sides or four free corners, straighten it, change its look, and turn a picture into a page or a page into a picture.",
+            "Handwritten sticky notes, and typing straight into a text box on the page, turned ones too.",
+            "A calmer look with fewer words: sync, backups, storage, gestures, Settings and the older dialogs, with explanations behind (i). The app fits phones.",
+            "Steadier with big notebooks, big photos and long sync backlogs; highlights along text lines keep one height per line.",
+        ),
         "0.3.0-alpha" to listOf(
             "Peek: a floating window shows another page of the notebook. Move it, resize it, or fold it to a small bubble at the edge.",
             "Show beside: choose which page sits next to this one in the landscape two-page view.",
@@ -38,6 +51,52 @@ internal object WhatsNew {
     private const val SEEN = "whatsNewSeen"
 
     /**
+     * P735 (board 28): the same items in a few words, each with an icon, two to a row. A version without these keeps its
+     * sentences. Each list has one item per line of [NOTES], in the same order.
+     */
+    internal enum class Tone {
+        ACCENT, AMBER, SLATE, GREEN;
+        fun color(night: Boolean) = when (this) {
+            ACCENT -> Glass.accent(night); AMBER -> SyncPanels.amber(night); SLATE -> SyncPanels.slate(night); GREEN -> SyncPanels.green(night)
+        }
+    }
+    internal data class Item(val icon: String, val tone: Tone, val text: String)
+    private val P = SyncPanels.P
+    val SHORT: Map<String, List<Item>> = mapOf(
+        "0.4.0-alpha" to listOf(
+            Item(P.BOLT, Tone.ACCENT, "Instant sync: your other device in seconds"),
+            Item(P.DEVICES, Tone.GREEN, "Changed on both devices: combine or choose"),
+            Item(P.CAMERA, Tone.ACCENT, "Google’s document scanner; sharper scans"),
+            Item(P.SHARE, Tone.ACCENT, "Share photos in as pages or pictures"),
+            Item(P.FIT, Tone.SLATE, "Crop with straight sides or four corners"),
+            Item(P.TEXTBOX, Tone.AMBER, "Handwritten sticky notes; type on the page"),
+            Item(P.SPARK, Tone.ACCENT, "A calmer look with fewer words; fits phones"),
+            Item(P.CHECK, Tone.GREEN, "Steadier with big notebooks and photos"),
+        ),
+        "0.3.0-alpha" to listOf(
+            Item(P.WINDOW, Tone.ACCENT, "Peek: another page in a floating window"),
+            Item(P.SPREAD, Tone.ACCENT, "Show beside: pick the page next to this one"),
+            Item(P.SLIM, Tone.ACCENT, "The slim bar holds every button"),
+            Item(P.MARKER, Tone.AMBER, "Add highlights from a marked-up PDF"),
+            Item(P.FIT, Tone.SLATE, "PDF pages of another shape: fit them or keep their size"),
+            Item(P.CHECK, Tone.GREEN, "A damaged page no longer stops a notebook opening"),
+            Item(P.CLOUD, Tone.GREEN, "A cloud folder that stops answering can’t freeze sync"),
+            Item(P.FOUNTAIN, Tone.SLATE, "Fountain pen stays fast; two pages stay sharp"),
+        ),
+    )
+
+    private fun card(context: Context, item: Item) = LinearLayout(context).apply {
+        val night = context.night
+        gravity = Gravity.CENTER_VERTICAL
+        background = SyncPanels.cardBackground(context)
+        minimumHeight = context.dpi(60f)
+        setPadding(context.dpi(12f), context.dpi(10f), context.dpi(12f), context.dpi(10f))
+        addView(SyncPanels.disc(context, item.icon, item.tone.color(night), 36f, 20f))
+        addView(SyncPanels.label(context, item.text, 14f, false, Glass.text(night)).apply { maxLines = if (context.largeText) 4 else 2 },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = context.dpi(12f) })
+    }
+
+    /**
      * The notes to show now, or null. Records [version] as seen either way, so each version's note appears at most once.
      * [updated] is false for a new install: then nothing is shown.
      */
@@ -52,9 +111,11 @@ internal object WhatsNew {
 
     /** Glass parts only. Public builds also offer the automatic update check here, until it is on. */
     fun show(context: Context, version: String, lines: List<String>): Kit.Sheet {
+        val items = SHORT[version]?.takeIf { it.size == lines.size }
         val sheet = Kit.Sheet(context, "What’s new", cancel = "Close")
         sheet.add(Kit.text(context, "Version ${UpdateCheck.display(version)}", Kit.Type.HEADLINE))
-        lines.forEach { sheet.add(Kit.text(context, "•  $it", secondary = true), gap = 8f) }
+        if (items != null) sheet.add(SyncPanels.TileGrid(context, 300f).apply { items.forEach { addView(card(context, it)) } }, gap = 16f)
+        else lines.forEach { sheet.add(Kit.text(context, "•  $it", secondary = true), gap = 8f) }
         if (!context.personalTools) {
             val saved = AutoUpdateCheck.preferences(context)
             if (!AutoUpdateCheck.enabled(saved)) sheet.add(Kit.row(context, "Tell me when a new version is out", "Once a day, asks GitHub. Nothing about your notebooks is sent.",

@@ -88,18 +88,23 @@ object VisualOptions {
      * P187: the Glass board's segmented well, for tool popovers: a grey well of options, each a small drawing over its
      * name; the chosen one sits on a [SlidingWell] pill with accent text. Same contract as [row], about 20 dp shorter.
      */
-    fun well(context: Context, labels: List<String>, art: List<Pictogram>, selected: Int, onSelect: (Int) -> Unit): LinearLayout {
+    fun well(context: Context, labels: List<String>, art: List<Pictogram>, selected: Int, onSelect: (Int) -> Unit): LinearLayout =
+        well(context, labels, art, selected, 33f, 22f, 58f, 12f, onSelect)
+
+    /** P735 (boards 27 and 28): the same well in Settings, with larger drawings and names. */
+    fun well(context: Context, labels: List<String>, art: List<Pictogram>, selected: Int, artWidth: Float, artHeight: Float,
+             height: Float, textSize: Float, onSelect: (Int) -> Unit): LinearLayout {
         val row = SlidingWell(context, context.dp(12f), ToolControls.pill(context.night)).apply {
             background = rounded(ToolControls.wellFill(context.night), dp(16f))
             dpi(4f).let { setPadding(it, it, it, it) }
         }
-        val tiles = labels.mapIndexed { index, label -> WellOption(context, label, art[index]) }
+        val tiles = labels.mapIndexed { index, label -> WellOption(context, label, art[index], artWidth, artHeight, textSize) }
         fun paint(current: Int, animate: Boolean) { tiles.forEachIndexed { index, tile -> tile.mark(index == current) }; row.select(current, animate) }
         tiles.forEachIndexed { index, tile ->
             tile.setOnClickListener {
                 runCatching { onSelect(index) }.onSuccess { paint(index, true); tile.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
             }
-            row.addView(tile, LinearLayout.LayoutParams(0, context.dpi(58f), 1f).apply { if (index > 0) marginStart = context.dpi(4f) })
+            row.addView(tile, LinearLayout.LayoutParams(0, context.dpi(height), 1f).apply { if (index > 0) marginStart = context.dpi(4f) })
         }
         paint(selected, false)
         return row
@@ -166,14 +171,14 @@ class SlidingWell(context: Context, private val radius: Float, pill: Int = Color
 
 /** P187: one option in a [VisualOptions.well]. */
 @android.annotation.SuppressLint("AppCompatCustomView") // the app uses framework widgets throughout
-private class WellOption(context: Context, label: String, art: Pictogram) : TextView(context) {
-    private val drawing = PictogramDrawable(art, context.dpi(33f), context.dpi(22f), context.night).apply { setBounds(0, 0, context.dpi(33f), context.dpi(22f)) }
+private class WellOption(context: Context, label: String, art: Pictogram, artWidth: Float = 33f, artHeight: Float = 22f, size: Float = 12f) : TextView(context) {
+    private val drawing = PictogramDrawable(art, context.dpi(artWidth), context.dpi(artHeight), context.night).apply { setBounds(0, 0, context.dpi(artWidth), context.dpi(artHeight)) }
     init {
-        text = label; tooltipText = label; textSize = 12f; gravity = Gravity.CENTER; maxLines = 1; includeFontPadding = false
+        text = label; tooltipText = label; textSize = size; gravity = Gravity.CENTER; maxLines = 1; includeFontPadding = false
         // P599/P602: "Highlighter" in the Lasso's six choices showed as "Highlig", then "Highlight", on a 320 dp phone; it may
         // go smaller there until the whole word fits.
-        shrinkToFitWords(7.5f, 12f)
-        setCompoundDrawables(null, drawing, null, null); compoundDrawablePadding = dpi(3f)
+        shrinkToFitWords(7.5f, size)
+        setCompoundDrawables(null, drawing, null, null); compoundDrawablePadding = dpi(if (size > 12f) 8f else 3f)
         // No ripple: the sliding pill is the touch feedback, and a dark ripple flashed over it.
         setPadding(dpi(3f), dpi(5f), dpi(3f), dpi(5f))
     }
@@ -377,6 +382,54 @@ object Pictograms {
         c.drawRoundRect(31f, 18f, 42f, 27f, 1.5f, 1.5f, pen(ink(on), 1.4f))
     } }
     val lassoFilters = listOf(everything, inkOnly, marksOnly, textOnly, imagesOnly, shapes)
+
+    // P735 (boards 27 and 28): Settings choices drawn as the boards draw them, in the boards' own units (1 unit = 1 dp):
+    // drawings in a 34 x 44 box, icons as 24-unit paths filling a square. The chosen one is in the accent colour.
+    private fun tone(on: Boolean) = if (on) Glass.accent(night) else Glass.secondary(night)
+    private inline fun board(canvas: Canvas, box: RectF, block: () -> Unit) {
+        val k = minOf(box.width() / 34f, box.height() / 44f)
+        canvas.save(); canvas.translate(box.centerX() - 17f * k, box.top); canvas.scale(k, k); block(); canvas.restore()
+    }
+    /** A 1.8 dp line just inside the rectangle, as a CSS border would be. */
+    private fun frame(c: Canvas, l: Float, t: Float, w: Float, h: Float, on: Boolean, radius: Float = 3f) =
+        c.drawRoundRect(l + .9f, t + .9f, l + w - .9f, t + h - .9f, radius - .9f, radius - .9f, pen(tone(on), 1.8f))
+    private fun block(c: Canvas, l: Float, t: Float, w: Float, h: Float, color: Int, radius: Float) {
+        fill.color = color; val r = minOf(radius, w / 2, h / 2); c.drawRoundRect(l, t, l + w, t + h, r, r, fill)
+    }
+    private fun tint(on: Boolean) = (tone(on) and 0x00ffffff) or 0x59000000
+    /** A 24-unit SVG path filling the square in the middle of the box. */
+    fun glyph(pathData: String) = Pictogram { c, box, on ->
+        val shape = androidx.core.graphics.PathParser.createPathFromPathData(pathData)
+        val k = minOf(box.width(), box.height()) / 24f
+        c.save(); c.translate(box.centerX() - 12f * k, box.centerY() - 12f * k); c.scale(k, k); c.drawPath(shape, pen(tone(on), 1.6f)); c.restore()
+    }
+    /** A tablet with its toolbar along one side: 0 top, 1 bottom, 2 left, 3 right. */
+    fun dock(side: Int) = Pictogram { c, box, on -> board(c, box) {
+        frame(c, 0f, 0f, 34f, 44f, on, 6f)
+        when (side) {
+            0 -> block(c, 4f, 4f, 22f, 5f, tone(on), 3f)
+            1 -> block(c, 4f, 31f, 22f, 5f, tone(on), 3f)
+            2 -> block(c, 4f, 6f, 5f, 28f, tone(on), 3f)
+            else -> block(c, 21f, 6f, 5f, 28f, tone(on), 3f)
+        }
+    } }
+    val docks = listOf(dock(0), dock(1), dock(2), dock(3))
+    val singlePage = Pictogram { c, box, on -> board(c, box) { frame(c, 7f, 2f, 20f, 28f, on) } }
+    val continuousPages = Pictogram { c, box, on -> board(c, box) {
+        frame(c, 7f, 0f, 20f, 16f, on); frame(c, 7f, 19f, 20f, 16f, on)
+        c.save(); c.clipRect(7f, 38f, 27f, 44f); frame(c, 7f, 38f, 20f, 12f, on); c.restore()
+    } }
+    val twoPages = Pictogram { c, box, on -> board(c, box) { frame(c, 0f, 4f, 16f, 24f, on); frame(c, 18f, 4f, 16f, 24f, on) } }
+    private val ask = Pictogram { c, box, on -> board(c, box) {
+        frame(c, 7f, 2f, 20f, 28f, on)
+        fill.color = tone(on); fill.textSize = 16f; fill.typeface = android.graphics.Typeface.create(Tokens.SANS, android.graphics.Typeface.BOLD)
+        fill.textAlign = Paint.Align.CENTER; c.drawText("?", 17f, 21.5f, fill); fill.textAlign = Paint.Align.LEFT
+    } }
+    private fun pdfPage(wide: Boolean) = Pictogram { c, box, on -> board(c, box) {
+        frame(c, 5f, 2f, 24f, 32f, on)
+        if (wide) block(c, 1f, 5f, 32f, 12f, tint(on), 2f) else block(c, 8f, 5f, 18f, 12f, tint(on), 2f)
+    } }
+    val pdfFits = listOf(ask, pdfPage(false), pdfPage(true))
 
     /** A palette as its first colours, side by side. */
     fun palette(colors: List<Long>) = Pictogram { c, box, on -> units(c, box) {

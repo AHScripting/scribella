@@ -44,6 +44,8 @@ import kotlin.math.hypot
     @EncodeDefault(EncodeDefault.Mode.NEVER) val link: NotebookLink? = null,
     /** Schema 36: local clip moment captured at pen-down, never exported to a remote ink reader. */
     @EncodeDefault(EncodeDefault.Mode.NEVER) val audio: AudioLink? = null,
+    /** P680 (B68, schema 38): id of the handwritten sticky note on this page that this ink belongs to. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val note: String? = null,
 ) {
     val isHighlighter get() = brush == HIGHLIGHTER
     val isExtendedPen get() = brush == BALLPOINT || brush == DASHED
@@ -75,7 +77,16 @@ import kotlin.math.hypot
 }
 @Serializable data class PdfBackground(val assetId: String, val pageIndex: Int)
 @OptIn(ExperimentalSerializationApi::class)
-@Serializable data class ImageBackground(val assetId: String, @EncodeDefault(EncodeDefault.Mode.NEVER) val orientation: Int = 1) {
+/**
+ * A page's own photo. B77 (schema 39): [crop] is the part of the upright photo the page shows; the original stays whole,
+ * so the crop can be changed back. Left out of the file when it is the whole photo.
+ */
+@Serializable data class ImageBackground(
+    val assetId: String,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val orientation: Int = 1,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val crop: ImageCrop = ImageCrop.FULL,
+) {
+    val isCropped get() = crop != ImageCrop.FULL
     /** EXIF orientation, mapping normalized raw pixels to normalized upright coordinates. */
     fun normalizedTransform(): List<Float> {
         require(orientation in 1..8) { "Invalid image orientation" }
@@ -103,10 +114,11 @@ import kotlin.math.hypot
     val editableImages: List<ImageObject> by lazy { images.filter { canEdit(it) } }
     val editableTexts: List<TextBox> by lazy { textBoxes.filter { canEdit(it) } }
     val activeReviewedInk: List<ReviewedInk> by lazy { reviewedInk.filter { it.matches(this) } }
-    /** Strokes on visible layers, in drawing order; the same list as [strokes] when nothing is hidden. */
+    /** Strokes on visible layers and open notes, in drawing order; the same list as [strokes] when nothing is hidden. */
     val drawnStrokes: List<InkStroke> by lazy {
         val hidden = layers.filter { it.hidden }.map { it.id }.toSet()
-        if (hidden.isEmpty()) strokes else strokes.filterNot { it.layer in hidden }
+        val folded = textBoxes.filter { it.sticky?.let { note -> note.ink && note.collapsed } == true }.map { it.id }.toSet()
+        if (hidden.isEmpty() && folded.isEmpty()) strokes else strokes.filterNot { it.layer in hidden || it.note in folded }
     }
     private val layerOpacity: Map<String, Float> by lazy { layers.filter { it.opacity < 1f }.associate { it.id to it.opacity } }
     /** P102 (F078): how opaque [stroke]'s layer draws it; 1 on a page without see-through layers. */
@@ -184,18 +196,26 @@ internal fun Notebook.validate(checked: (InkStroke) -> Boolean, checkedPage: (Pa
         require(!page.hasBackground || page.paper == PaperStyle.DEFAULT) { "Background pages retain their original paper" }
         require(page.reviewedInk.size <= ReviewedInk.MAX_PER_PAGE && page.reviewedInk.map { it.id }.distinct().size == page.reviewedInk.size &&
             page.reviewedInk.sumOf { it.text.length } <= 65_536) { "Too much or duplicate reviewed handwriting text" }
-        require(page.strokes.size <= NotebookLimits.STROKES_PER_PAGE && page.strokes.map { it.id }.distinct().size == page.strokes.size) { "Invalid strokes" }
-        require(page.layers.size <= Page.MAX_LAYERS && page.layers.map { it.id }.distinct().size == page.layers.size &&
-            page.layers.all { validId(it.id) && Layer.validName(it.name) && it.opacity.isFinite() && it.opacity in Layer.MIN_OPACITY..1f }) { "Invalid layers" }
-        val order = page.layers.mapIndexed { index, layer -> layer.id to index }.toMap()
-        require(page.images.all { it.layer == null || it.layer in order } && page.textBoxes.all { it.layer == null || it.layer in order }) { "Object on a missing layer" }
-        require(page.strokes.all { if (page.layers.isEmpty()) it.layer == null else it.layer in order }) { "Stroke on a missing layer" }
-        require(page.strokes.zipWithNext().all { (a, b) -> (order[a.layer] ?: 0) <= (order[b.layer] ?: 0) }) { "Strokes out of layer order" }
-        // B24 (P140): one page's point data must fit its package entry, so a page that saves is never refused later.
-        require(page.strokes.sumOf(::inkBytes) <= NotebookLimits.PAGE_INK_BYTES) {
-            "This page is full. Continue on a new page."
-        }
+        // P727: a page already checked (the same object) passed these checks of its own ink and layers; after an edit only
+        // its references and counts are looked at again (every page of a big notebook was walked again after each pen lift).
         val pageChecked = checkedPage(page)
+        if (!pageChecked) {
+            require(page.strokes.size <= NotebookLimits.STROKES_PER_PAGE && page.strokes.map { it.id }.distinct().size == page.strokes.size) { "Invalid strokes" }
+            require(page.layers.size <= Page.MAX_LAYERS && page.layers.map { it.id }.distinct().size == page.layers.size &&
+                page.layers.all { validId(it.id) && Layer.validName(it.name) && it.opacity.isFinite() && it.opacity in Layer.MIN_OPACITY..1f }) { "Invalid layers" }
+            val order = page.layers.mapIndexed { index, layer -> layer.id to index }.toMap()
+            require(page.images.all { it.layer == null || it.layer in order } && page.textBoxes.all { it.layer == null || it.layer in order }) { "Object on a missing layer" }
+            require(page.strokes.all { if (page.layers.isEmpty()) it.layer == null else it.layer in order }) { "Stroke on a missing layer" }
+            require(page.strokes.zipWithNext().all { (a, b) -> (order[a.layer] ?: 0) <= (order[b.layer] ?: 0) }) { "Strokes out of layer order" }
+            if (page.strokes.any { it.note != null }) {
+                val notes = page.textBoxes.filter { it.sticky?.ink == true }.map { it.id }.toSet()
+                require(page.strokes.all { it.note == null || it.note in notes }) { "Ink belongs to a missing sticky note" }
+            }
+            // B24 (P140): one page's point data must fit its package entry, so a page that saves is never refused later.
+            require(page.strokes.sumOf(::inkBytes) <= NotebookLimits.PAGE_INK_BYTES) {
+                "This page is full. Continue on a new page."
+            }
+        }
         page.strokes.forEach { stroke ->
             if (pageChecked || checked(stroke)) {
                 eraserPoints += stroke.erasures.sumOf { it.points.size }
@@ -262,16 +282,77 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
         val followed = if (redraw == null) proposed.pages else notebook.pages.associateBy { it.id }.let { old ->
             proposed.pages.map { page -> old[page.id]?.let { Connectors.follow(it, page, redraw) } ?: page }
         }
-        val next = proposed.copy(pages = followed.map(::layered))
+        // P680: handwriting inside a sticky note moves and is deleted with it.
+        val inked = if (followed.none { p -> p.strokes.any { it.note != null } }) followed else notebook.pages.associateBy { it.id }.let { old ->
+            followed.map { page -> old[page.id]?.let { StickyInk.follow(it, page) } ?: page }
+        }
+        // P727: a page the edit kept (the same object) passed validation, so it is already in layer order.
+        val before = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Page, Boolean>()).apply { addAll(notebook.pages) }
+        val next = proposed.copy(pages = inked.map { if (it in before) it else layered(it) })
         if (next == notebook) return false
-        // The current notebook passed validation, so strokes it holds unchanged need only be counted.
+        // The current notebook passed validation, so pages and strokes it holds unchanged need only be counted. P727: only
+        // the pages this edit changed are gathered; putting every stroke of a big notebook (German: about 13,000) in a set
+        // after each pen lift held writing up for about 0.1 s when it ran during a save.
+        val after = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Page, Boolean>()).apply { addAll(next.pages) }
         val known = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<InkStroke, Boolean>())
-        notebook.pages.forEach { known.addAll(it.strokes) }
-        next.validate(known::contains)
+        notebook.pages.forEach { if (it !in after) known.addAll(it.strokes) }
+        next.validate(known::contains) { it in before }
         undo.addLast(notebook)
         if (undo.size > 100) undo.removeFirst()
         redo.clear()
         notebook = next
+        localSteps++
+        return true
+    }
+    /**
+     * P722: how many times this device has changed the notebook's history (an edit, Undo, Redo, a step joined or dropped).
+     * Another device's change ([takeRemote]) does not count: it is folded into every state instead. So a step stays
+     * recognisable as the last one made here although the other device changed the notebook since.
+     */
+    var localSteps = 0L; private set
+    /**
+     * Live sync (docs/LIVE-SYNC-PLAN.md): another device's change. It is applied to the notebook and to every Undo and Redo
+     * state, and adds no Undo step, so Undo never takes away the other device's work. A state the change cannot apply to
+     * stays as it was. Returns false when nothing changed.
+     */
+    fun takeRemote(change: (Notebook) -> Notebook): Boolean {
+        val next = change(notebook)
+        if (next == notebook) return false
+        fun follow(states: ArrayDeque<Notebook>) { for (i in states.indices) states[i] = runCatching { change(states[i]) }.getOrDefault(states[i]) }
+        follow(undo); follow(redo)
+        notebook = next
+        return true
+    }
+    /**
+     * P728: [takeRemote] in three steps, so the work can run off the main thread: [remoteBase] here, [RemoteBase.prepare]
+     * on any thread, then [takePrepared] here again. On the Pixel a backlog of the tablet's changes, folded into the big
+     * German notebook and every Undo and Redo state on the main thread, held it for over 5 s ("not responding").
+     */
+    fun remoteBase(): RemoteBase = RemoteBase(notebook, undo.toList(), redo.toList())
+    class RemoteBase internal constructor(val notebook: Notebook, internal val undo: List<Notebook>, internal val redo: List<Notebook>) {
+        /** Applies [change] as [takeRemote] does, to copies; touches no session. Throws when the current state cannot take it. */
+        fun prepare(change: (Notebook) -> Notebook): PreparedRemote {
+            val next = change(notebook)
+            if (next == notebook) return PreparedRemote(this, notebook, undo, redo, changed = false)
+            fun follow(states: List<Notebook>) = states.map { runCatching { change(it) }.getOrDefault(it) }
+            return PreparedRemote(this, next, follow(undo), follow(redo), changed = true)
+        }
+    }
+    class PreparedRemote internal constructor(internal val base: RemoteBase, val notebook: Notebook, internal val undo: List<Notebook>,
+        internal val redo: List<Notebook>, val changed: Boolean)
+    /**
+     * Takes in [prepared] when the session is still as it was at its [remoteBase] (the same notebook and Undo and Redo
+     * states): then true when it changed something, false when not. Null when this device changed the notebook meanwhile:
+     * prepare again from a new base.
+     */
+    fun takePrepared(prepared: PreparedRemote): Boolean? {
+        val base = prepared.base
+        fun same(states: ArrayDeque<Notebook>, then: List<Notebook>) = states.size == then.size && states.indices.all { states[it] === then[it] }
+        if (notebook !== base.notebook || !same(undo, base.undo) || !same(redo, base.redo)) return null
+        if (!prepared.changed) return false
+        undo.clear(); undo.addAll(prepared.undo)
+        redo.clear(); redo.addAll(prepared.redo)
+        notebook = prepared.notebook
         return true
     }
     /** Saving a transcription is one Undo step; original stroke data remains unchanged. */
@@ -429,7 +510,20 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
         require(source.pages.all { it.imageBackground != null }) { "Insertion requires image pages" }
         return insertBackgroundPages(source, afterPageId)
     }
-    private fun insertBackgroundPages(source: Notebook, afterPageId: String): List<String> {
+    /**
+     * P694 (C1): pages from a page drop take the ids the drop gives them ([PageDrop.pageId]), so a drop that arrives twice
+     * adds nothing the second time. Null [afterPageId], or a page no longer here, puts them at the end. Empty when any of
+     * the ids is already in the notebook.
+     */
+    fun insertDropPages(source: Notebook, afterPageId: String?, pageIds: List<String>): List<String> {
+        source.validate()
+        require(source.pages.all { it.imageBackground != null }) { "Insertion requires image pages" }
+        require(pageIds.size == source.pages.size && pageIds.toSet().size == pageIds.size) { "Each dropped page needs its own id" }
+        if (notebook.pages.any { it.id in pageIds }) return emptyList()
+        val after = afterPageId?.takeIf { id -> notebook.pages.any { it.id == id } } ?: notebook.pages.last().id
+        return insertBackgroundPages(source, after, pageIds)
+    }
+    private fun insertBackgroundPages(source: Notebook, afterPageId: String, ids: List<String>? = null): List<String> {
         val after = notebook.pages.indexOfFirst { it.id == afterPageId }
         require(after >= 0) { "Page not found" }
         source.validate()
@@ -448,7 +542,7 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
         require(assets.size + images.size <= NotebookLimits.BACKGROUND_FILES && assets.sumOf { it.size.toLong() } + images.sumOf { it.size.toLong() } <= NotebookLimits.BACKGROUND_BYTES) {
             "A notebook can use at most ${NotebookLimits.BACKGROUND_FILES} PDF and image files, ${NotebookLimits.BACKGROUND_BYTES / (1024 * 1024)} MB together"
         }
-        val pages = source.pages.map { page -> page.copy(id = UUID.randomUUID().toString(),
+        val pages = source.pages.mapIndexed { index, page -> page.copy(id = ids?.get(index) ?: UUID.randomUUID().toString(),
             strokes = page.strokes.map { it.copy(id = UUID.randomUUID().toString()) }, images = page.images.map { it.copy(id = UUID.randomUUID().toString()) },
             textBoxes = page.textBoxes.map { it.copy(id = UUID.randomUUID().toString()) }, attachments = page.attachments.map { it.copy(id = UUID.randomUUID().toString()) }).withCopiedReviews(page) }
         val files = notebook.attachmentAssets.toMutableList()
@@ -595,9 +689,11 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
         val sourceStrokes=audioPlan?.strokes ?: bundle.strokes
         val target=audioPlan?.notebook ?: notebook
         val groups=(sourceStrokes.mapNotNull { it.group }+bundle.images.mapNotNull { it.group }+bundle.texts.mapNotNull { it.group }).distinct().associateWith { UUID.randomUUID().toString() }
-        val strokes=sourceStrokes.map { it.translated(dx,dy).copy(id=UUID.randomUUID().toString(),layer=null,locked=false,group=it.group?.let(groups::getValue)) }
+        // P680: a pasted handwritten note keeps its ink; ink without its note becomes plain ink when committed.
+        val noteIds=bundle.texts.filter { it.sticky?.ink==true }.associate { it.id to UUID.randomUUID().toString() }
+        val strokes=sourceStrokes.map { it.translated(dx,dy).copy(id=UUID.randomUUID().toString(),layer=null,locked=false,group=it.group?.let(groups::getValue),note=it.note?.let(noteIds::get)) }
         val photos=bundle.images.map { it.copy(id=UUID.randomUUID().toString(),placement=it.placement.translated(dx,dy),locked=false,layer=it.layer?.takeIf { layer -> notebook.pages.first { it.id==pageId }.layerEditable(layer) },group=it.group?.let(groups::getValue)) }
-        val text=bundle.texts.map { it.copy(id=UUID.randomUUID().toString(),placement=it.placement.translated(dx,dy),locked=false,layer=it.layer?.takeIf { layer -> notebook.pages.first { it.id==pageId }.layerEditable(layer) },group=it.group?.let(groups::getValue)) }
+        val text=bundle.texts.map { it.copy(id=noteIds[it.id] ?: UUID.randomUUID().toString(),placement=it.placement.translated(dx,dy),locked=false,layer=it.layer?.takeIf { layer -> notebook.pages.first { it.id==pageId }.layerEditable(layer) },group=it.group?.let(groups::getValue)) }
         val ids=ObjectIds(strokes.map { it.id }.toSet(),photos.map { it.id }.toSet(),text.map { it.id }.toSet())
         if(ids.isEmpty) return ids
         val assets=notebook.imageAssets.associateBy { it.id }.toMutableMap()
@@ -886,6 +982,25 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
             imageAssets = if (existing == null) notebook.imageAssets + asset else notebook.imageAssets))
         return image.id
     }
+    /** P688: several pictures placed on one page as a single change, so one Undo takes them all out. */
+    /** [ids], when given, name the new pictures (P694: pictures from a page drop), and nothing is added when one is already on the page. */
+    fun insertImageObjects(pageId: String, items: List<Triple<ImageAsset, ImagePlacement, Int>>, ids: List<String>? = null): List<String> {
+        require(notebook.pages.any { it.id == pageId }) { "Page not found" }
+        if (items.isEmpty()) return emptyList()
+        if (ids != null) {
+            require(ids.size == items.size && ids.toSet().size == ids.size) { "Each picture needs its own id" }
+            if (notebook.pages.any { p -> p.images.any { it.id in ids } }) return emptyList()
+        }
+        val assets = notebook.imageAssets.toMutableList()
+        val images = items.map { (asset, placement, orientation) ->
+            val existing = assets.firstOrNull { it.id == asset.id }
+            require(existing == null || existing == asset) { "Conflicting image asset" }
+            if (existing == null) assets += asset
+            ImageObject(asset.id, placement, orientation = orientation)
+        }.let { made -> if (ids == null) made else made.mapIndexed { i, image -> image.copy(id = ids[i]) } }
+        commit(notebook.copy(pages = notebook.pages.map { if (it.id == pageId) it.copy(images = it.images + images) else it }, imageAssets = assets))
+        return images.map { it.id }
+    }
     fun updateImageObject(pageId: String, imageId: String, placement: ImagePlacement): Boolean {
         val page = notebook.pages.firstOrNull { it.id == pageId } ?: error("Page not found")
         notebook.captureObjects(pageId, ObjectIds(images = setOf(imageId)))
@@ -916,6 +1031,76 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
         val pages = notebook.pages.map { if (it.id == pageId) it.copy(images = it.images.filterNot { image -> image.id in ids }) else it }
         val referenced = pages.flatMap { it.imageAssetIds }.toSet()
         return commit(notebook.copy(pages = pages, imageAssets = notebook.imageAssets.filter { it.id in referenced }))
+    }
+    /**
+     * P689: the picture's image becomes [asset] (a straightened or restyled copy made from it), upright and uncropped, at
+     * [placement]. It keeps its id, lock, group and layer; the old image goes once nothing uses it. One Undo step.
+     */
+    fun replaceImageObjectAsset(pageId: String, imageId: String, asset: ImageAsset, placement: ImagePlacement): Boolean {
+        val page = notebook.pages.firstOrNull { it.id == pageId } ?: error("Page not found")
+        notebook.captureObjects(pageId, ObjectIds(images = setOf(imageId)))
+        require(page.images.any { it.id == imageId }) { "Image not found" }
+        val pages = notebook.pages.map { if (it.id == pageId) it.copy(images = it.images.map { image ->
+            if (image.id == imageId) image.copy(assetId = asset.id, placement = placement, orientation = 1, crop = ImageCrop.FULL) else image
+        }) else it }
+        return commit(notebook.copy(pages = pages, imageAssets = imagesUsedBy(pages, asset)))
+    }
+    /** P689: an image page's photo becomes [asset], the page reshaped to [width] by [height]; its ink stays where it is. One Undo step. */
+    fun replacePageImage(pageId: String, asset: ImageAsset, width: Float, height: Float): Boolean {
+        val page = notebook.pages.firstOrNull { it.id == pageId } ?: error("Page not found")
+        require(page.imageBackground != null) { "Not an image page" }
+        val pages = notebook.pages.map { if (it.id == pageId) it.copy(imageBackground = ImageBackground(asset.id), width = width, height = height) else it }
+        return commit(notebook.copy(pages = pages, imageAssets = imagesUsedBy(pages, asset)))
+    }
+    /**
+     * B77: an image page shows [crop] of its own photo, which stays whole; the page is reshaped to [width] by [height] and
+     * its ink stays where it is. [ImageCrop.FULL] shows the whole photo again. One Undo step.
+     */
+    fun cropPageImage(pageId: String, crop: ImageCrop, width: Float, height: Float): Boolean {
+        val page = notebook.pages.firstOrNull { it.id == pageId } ?: error("Page not found")
+        val background = page.imageBackground ?: error("Not an image page")
+        val pages = notebook.pages.map { if (it.id == pageId) it.copy(imageBackground = background.copy(crop = crop), width = width, height = height) else it }
+        return commit(notebook.copy(pages = pages))
+    }
+    /**
+     * P689: the picture leaves [pageId] and becomes a page of its own right after it, [width] by [height], showing
+     * [background]: the picture's own image, or [asset] when its crop had to be made into a new image. One Undo step.
+     */
+    fun pictureToPage(pageId: String, imageId: String, background: ImageBackground, asset: ImageAsset?, width: Float, height: Float): String {
+        val index = notebook.pages.indexOfFirst { it.id == pageId }
+        require(index >= 0) { "Page not found" }
+        notebook.captureObjects(pageId, ObjectIds(images = setOf(imageId)))
+        require(notebook.pages[index].images.any { it.id == imageId }) { "Image not found" }
+        require(asset == null || asset.id == background.assetId) { "Background does not match its image" }
+        require(notebook.pages.size < NotebookLimits.PAGES) { "A notebook can have at most ${NotebookLimits.PAGES} pages" }
+        val made = Page(width = width, height = height, imageBackground = background)
+        val pages = notebook.pages.map { if (it.id == pageId) it.copy(images = it.images.filterNot { image -> image.id == imageId }) else it }
+            .toMutableList().apply { add(index + 1, made) }
+        commit(notebook.copy(pages = pages, imageAssets = imagesUsedBy(pages, asset)))
+        return made.id
+    }
+    /**
+     * P689: an image page's photo becomes a picture covering the page, under its other pictures, on the paper of the nearest
+     * page without a background (as [addPage] does); the page keeps its size and ink. One Undo step. Returns the picture's id.
+     */
+    fun pageToPicture(pageId: String): String {
+        val index = notebook.pages.indexOfFirst { it.id == pageId }
+        require(index >= 0) { "Page not found" }
+        val page = notebook.pages[index]
+        val background = page.imageBackground ?: error("Not an image page")
+        val all = notebook.pages
+        val paper = ((index downTo 0).asSequence() + (index + 1 until all.size).asSequence())
+            .map { all[it] }.firstOrNull { !it.hasBackground }?.paper ?: PaperStyle.DEFAULT
+        val image = ImageObject(background.assetId, ImagePlacement(0f, 0f, page.width, page.height), orientation = background.orientation, crop = background.crop)
+        commit(notebook.copy(pages = all.map { if (it.id == pageId) it.copy(imageBackground = null, paper = paper, images = listOf(image) + it.images) else it }))
+        return image.id
+    }
+    /** The images [pages] still use, with [added] among them; a conflicting copy of [added] is refused. */
+    private fun imagesUsedBy(pages: List<Page>, added: ImageAsset?): List<ImageAsset> {
+        val existing = added?.let { a -> notebook.imageAssets.firstOrNull { it.id == a.id } }
+        require(existing == null || existing == added) { "Conflicting image asset" }
+        val referenced = pages.flatMap { it.imageAssetIds }.toSet()
+        return (notebook.imageAssets + listOfNotNull(added.takeIf { existing == null })).filter { it.id in referenced }
     }
     /** targetIndex is the page's final zero-based position in the ordered list. */
     fun movePage(pageId: String, targetIndex: Int): Boolean {
@@ -1066,15 +1251,34 @@ class DocumentSession private constructor(initial: Notebook, @Suppress("UNUSED_P
     fun applyRecoveredNotebook(next: Notebook): Boolean = commit(next)
     fun undo(): Boolean {
         if (undo.isEmpty()) return false
-        redo.addLast(notebook); notebook = undo.removeLast(); return true
+        redo.addLast(notebook); notebook = undo.removeLast(); localSteps++; return true
     }
     fun redo(): Boolean {
         if (redo.isEmpty()) return false
-        undo.addLast(notebook); notebook = redo.removeLast(); return true
+        undo.addLast(notebook); notebook = redo.removeLast(); localSteps++; return true
+    }
+    /**
+     * P720, P722: the step just made joins the one before it into one Undo step, when that one was made at [mark] (the
+     * [localSteps] right after it) and nothing else was done here since: importing a picture and cropping it straight
+     * after. Changes from the other device in between do not matter; they are in both states. False, and nothing changes,
+     * otherwise.
+     */
+    fun joinWithPrevious(mark: Long): Boolean {
+        if (localSteps != mark + 1 || undo.size < 2) return false
+        undo.removeLast(); localSteps++; return true
+    }
+    /**
+     * P720, P722: takes back the step made at [mark] (the [localSteps] right after it) without keeping it for Redo, when
+     * nothing else was done here since: a picture imported and then cancelled on its crop screen leaves nothing behind.
+     * What the other device changed meanwhile stays. False, and nothing changes, otherwise.
+     */
+    fun discardLastStep(mark: Long): Boolean {
+        if (localSteps != mark || undo.isEmpty()) return false
+        notebook = undo.removeLast(); localSteps++; return true
     }
 }
 
-private fun InkStroke.translated(dx: Float, dy: Float): InkStroke = copy(
+internal fun InkStroke.translated(dx: Float, dy: Float): InkStroke = copy(
     samples = samples.map { it.copy(x = it.x + dx, y = it.y + dy) },
     outlines = outlines.map { outline -> outline.map { Point(it.x + dx, it.y + dy) } },
     erasures = erasures.map { sweep -> sweep.copy(points = sweep.points.map { Point(it.x + dx, it.y + dy) }) },

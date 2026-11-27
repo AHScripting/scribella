@@ -23,7 +23,10 @@ internal class TextSelection(private val repository: NotebookRepository, private
     private var pageId: String? = null
     private var selected: String? = null
     private data class Drag(val pointer: Int, val start: Point, val box: TextBox, val handle: Int?,
-        val frame: ImagePlacement, var preview: ImagePlacement, var lastAngle: Float = 0f, var rotation: Float = 0f, var alignment: ObjectMoveGuides? = null)
+        val frame: ImagePlacement, var preview: ImagePlacement, var lastAngle: Float = 0f, var rotation: Float = 0f, var alignment: ObjectMoveGuides? = null,
+        val wasSelected: Boolean = false, val unit: Float = 1f)
+    /** P681 (B70): a tap that did not move, on a box that was already selected. */
+    var onSecondTap: ((String, Point) -> Unit)? = null
     private var drag: Drag? = null
     val moveGuides get() = run { sync(); drag?.alignment?.lines.orEmpty() }
     val isEditing get() = drag != null
@@ -111,9 +114,10 @@ internal class TextSelection(private val repository: NotebookRepository, private
                 val box = if (handle != null) current() else current()?.takeIf { it.placement.contains(point) }
                     ?: if (finger) null else repository.currentPage?.editableTexts?.lastOrNull { !it.locked && it.placement.contains(point) }
                 if (box == null) { clear(); return false }
+                val wasSelected = selected == box.id && box.placement.contains(point)
                 select(box.id)
                 drag = Drag(event.getPointerId(index),point,box,handle,frame(box.placement,unit),box.placement,
-                    angle(point,box.placement.pagePoint(.5f,.5f))).also { d ->
+                    angle(point,box.placement.pagePoint(.5f,.5f)),wasSelected=wasSelected,unit=unit).also { d ->
                     if (handle == null) d.alignment = repository.currentPage?.let { ObjectMoveGuides(it, ObjectMoveGuides.bounds(box.placement), ObjectIds(texts = setOf(box.id)), unit) }
                 }
                 return true
@@ -124,6 +128,11 @@ internal class TextSelection(private val repository: NotebookRepository, private
                 if (event.getPointerId(event.actionIndex) != d.pointer) return true
                 if (event.flags and MotionEvent.FLAG_CANCELED != 0) { cancelGesture(); return true }
                 append(event,map); drag = null
+                val upAt = map(event.getX(event.actionIndex),event.getY(event.actionIndex))
+                // A still tap inside a short box also lands near its handles; it is still a tap.
+                if (d.wasSelected && hypot(upAt.x-d.start.x,upAt.y-d.start.y) <= 10 * d.unit) {
+                    onSecondTap?.invoke(d.box.id, d.start); return true
+                }
                 val snapshot = baseline; val owner = pageId
                 if (snapshot !== repository.session?.notebook || owner != repository.selectedPageId || repository.readOnly || repository.busy || repository.fileBusy) { clear(); return true }
                 if (d.preview != d.box.placement) runCatching { repository.edit { it.updateTextBox(owner!!,d.box.copy(placement=d.preview)) } }

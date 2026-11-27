@@ -2,6 +2,31 @@
 
 Scribella is an alpha: expect rough edges, and export your notebooks now and then so you always have a copy.
 
+## 0.4.0 alpha
+
+The fourth alpha brings instant sync between your own devices, merging when both changed, photo sharing and better scans, handwritten sticky notes and a calmer, simpler look.
+
+### New
+
+- **Instant sync.** Changes reach your other device in seconds, photos too, through a small free server you run on your own Cloudflare account. Settings has a step-by-step guide, and a QR code joins the second device. Changes are encrypted on your device; the server cannot read them. Receiving in the background is a switch of its own.
+- **Changed on both devices.** When a notebook changed on both devices between syncs, Scribella combines the two, or asks which to keep. The Library's folders, colours, covers, tags, pins and archive follow sync too, and sync checks sooner after a save.
+- **Scanning.** Where Google Play services has it, Scan uses Google's document scanner; Scribella's own camera stays as the other choice in Settings. Scans are sharper (3508 px on the long edge), Scribella's scanner finds shaded page corners and whitens the paper, and the scan screen fits phones.
+- **Photos.** Share photos from Photos, Drive or Files to Scribella and choose the notebook: as new pages (find and crop the page first) or as pictures on the open page, in one Undo step. Large camera photos are scaled down instead of refused. Scans made on a phone can go to your tablet's notebook.
+- **Pictures.** Crop with straight sides or four free corners (straightens a slanted page), Straighten and Look tools, and the crop can be changed later. Turn a picture into a page and an image page into a picture.
+- **Handwritten sticky notes**, and typing straight into a text box on the page, turned boxes too.
+
+### A calmer look
+
+- Sync, Instant sync, Library backup, notebook storage, the Gestures guide, Settings and the older dialogs (layers, bookmarks, history, delete page, earlier versions) are rebuilt with fewer words: choices are pictures, and explanations wait behind (i).
+- What's new shows each item in a few words with an icon.
+- Phones: tools in one row with the rest behind », and a strip of pages above them.
+
+### Fixed
+
+- Big notebooks: quick strokes no longer stall, and a backlog of changes from the other device no longer freezes the open notebook.
+- Phones with little memory no longer run out of it during sync or with big photos.
+- Highlights that follow text lines take the whole line's height, so short words and long ones match.
+
 ## 0.3.0 alpha
 
 The third alpha adds a floating second page, lets you choose the two-page pairs, finishes the slim bar and makes the app sturdier with damaged pages and slow cloud folders.

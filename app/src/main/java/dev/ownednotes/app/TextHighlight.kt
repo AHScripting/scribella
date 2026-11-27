@@ -31,11 +31,11 @@ internal object TextHighlight {
         if (samples.size < 2) return emptyList()
         val scale = min(1f, 2048f / max(page.width, page.height))
         val margin = (TextLineSnap.maxLineHeight(width * scale, ceil(page.height * scale).toInt()) + 8f) / scale + width
-        val left = floor((samples.minOf { it.x } - margin) * scale) / scale
         val top = floor((samples.minOf { it.y } - margin) * scale) / scale
-        val right = min(page.width, samples.maxOf { it.x } + margin)
+        // P734: the page's whole width, so a short word is measured with the rest of its printed line.
+        val right = page.width
         val bottom = min(page.height, samples.maxOf { it.y } + margin)
-        val x = max(0f, left); val y = max(0f, top)
+        val x = 0f; val y = max(0f, top)
         val w = ceil((right - x) * scale).toInt(); val h = ceil((bottom - y) * scale).toInt()
         if (w <= 0 || h <= 0 || w.toLong() * h > 8_000_000L) return emptyList()
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -60,11 +60,12 @@ internal object TextHighlight {
         val sx = bitmap.width / pageWidth; val sy = bitmap.height / pageHeight
         val points = samples.map { Point(it.x * sx, it.y * sy) }
         val rasterWidth = width * sy
-        // Only the pixels the detector can reach are copied: the stroke's span plus a line height around it.
+        // Only the rows the detector can reach are copied: a line height around the stroke, across the whole width
+        // so a short word is measured with the rest of its printed line (P734).
         val margin = max(rasterWidth * 2.5f, 12f) + rasterWidth + 8f
-        val left = floor(points.minOf { it.x } - margin).toInt().coerceIn(0, bitmap.width)
+        val left = 0
         val top = floor(points.minOf { it.y } - margin).toInt().coerceIn(0, bitmap.height)
-        val right = ceil(points.maxOf { it.x } + margin).toInt().coerceIn(0, bitmap.width)
+        val right = bitmap.width
         val bottom = ceil(points.maxOf { it.y } + margin).toInt().coerceIn(0, bitmap.height)
         val w = right - left; val h = bottom - top
         if (w <= 0 || h <= 0 || w.toLong() * h > 4_000_000L) return null
@@ -84,12 +85,13 @@ internal object TextHighlight {
         val sx = bitmap.width / pageWidth; val sy = bitmap.height / pageHeight
         val points = samples.map { Point(it.x * sx, it.y * sy) }
         val rasterWidth = width * sy
-        // The pixels the detector can reach: the stroke's span plus the tallest line around it.
+        // The pixels the detector can reach: the tallest line around the stroke, across the whole width so a short
+        // word is measured with the rest of its printed line (P734).
         val referencePixels = ceil(referenceHeight * sy).toInt()
         val margin = TextLineSnap.maxLineHeight(rasterWidth, referencePixels) + rasterWidth + 8f
-        val left = floor(points.minOf { it.x } - margin).toInt().coerceIn(0, bitmap.width)
+        val left = 0
         val top = floor(points.minOf { it.y } - margin).toInt().coerceIn(0, bitmap.height)
-        val right = ceil(points.maxOf { it.x } + margin).toInt().coerceIn(0, bitmap.width)
+        val right = bitmap.width
         val bottom = ceil(points.maxOf { it.y } + margin).toInt().coerceIn(0, bitmap.height)
         val w = right - left; val h = bottom - top
         if (w <= 0 || h <= 0 || w.toLong() * h > 8_000_000L) return emptyList()

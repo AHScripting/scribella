@@ -99,7 +99,9 @@ import java.util.UUID
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable data class StickyNote(val color:Long=0xffffe59a, val collapsed:Boolean=false,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val expandedWidth:Float?=null,
-    @EncodeDefault(EncodeDefault.Mode.NEVER) val expandedHeight:Float?=null) {
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val expandedHeight:Float?=null,
+    /** P680 (B68, schema 38): a handwritten note; strokes naming it are its content and draw over the page ink. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val ink:Boolean=false) {
     init {
         require(color in 0xff000000L..0xffffffffL) { "Choose an opaque note colour" }
         require(if(collapsed) expandedWidth!=null && expandedHeight!=null && expandedWidth.isFinite() && expandedHeight.isFinite() && expandedWidth in 1f..100000f && expandedHeight in 1f..100000f
@@ -109,6 +111,6 @@ import java.util.UUID
 fun TextBox.toggleStickyFold():TextBox {
     val note=sticky ?: return this
     return if(note.collapsed)copy(placement=placement.copy(width=note.expandedWidth!!,height=note.expandedHeight!!),sticky=note.copy(collapsed=false,expandedWidth=null,expandedHeight=null))
-    else copy(placement=placement.copy(width=minOf(48f,placement.width),height=minOf(48f,placement.height)),
-        sticky=note.copy(collapsed=true,expandedWidth=placement.width,expandedHeight=placement.height))
+    else (if(note.ink)StickyInk.TAB else 48f).let { side -> copy(placement=placement.copy(width=minOf(side,placement.width),height=minOf(side,placement.height)),
+        sticky=note.copy(collapsed=true,expandedWidth=placement.width,expandedHeight=placement.height)) }
 }

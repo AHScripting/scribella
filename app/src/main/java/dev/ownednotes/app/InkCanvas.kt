@@ -243,6 +243,8 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         var hold: ShapeRecognizer.HoldDetector? = null
         var assist: HoldAssist = HoldAssist.SHAPES
         var followText = false
+        /** P680 (B68): the handwritten sticky note this ink began on; it belongs to that note. */
+        var note: String? = null
         /** Set once held ink snaps; subsequent contact adjusts geometry without appending to the freehand baseline. */
         var snap: Snap? = null
         var heldShape: HeldShape? = null
@@ -311,7 +313,12 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
     }
     private val shapePointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeJoin=Paint.Join.ROUND;strokeCap=Paint.Cap.ROUND }
     private val photoSelection = PhotoSelection(repository, failure)
-    private val textSelection = TextSelection(repository, failure)
+    private val textSelection = TextSelection(repository, failure).also { it.onSecondTap = { id, point -> onTextTap?.invoke(id, point) } }
+    /** P681 (B70): a second tap on the selected text box, to type in it where it was tapped. */
+    internal var onTextTap: ((String, Point) -> Unit)? = null
+    /** P681 (B70): the text box being typed in place; its words are left out here, the field over the page shows them. */
+    internal var typingTextId: String? = null
+        set(value) { field = value; dry.invalidate(); invalidate() }
     init {
         InkColors(toolPreferences).apply { remember(penStyle.color); remember(highlighterStyle.color) }
         selection.configure(InkSelection.Options(
@@ -689,7 +696,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         val uri = SystemClipboard.outsideImage(app) ?: return false.also { failure("Photo paste failed: the picture is no longer on the clipboard") }
         val target = repository.captureImageInsertTarget() ?: return false
         repository.setFileBusy(true); publishChange()
-        app.io.execute {
+        app.importing.execute { // B80 (P707): not behind folder sync
             val parsed = runCatching { app.contentResolver.openInputStream(uri)?.use { ImageSupport.importPhoto(it) } ?: error("Cannot open the picture") }
             app.main.post {
                 repository.setFileBusy(false)
@@ -1275,10 +1282,10 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                 canvas.withObjectOpacity(page, image.layer) { PhotoRendering.draw(canvas, photoSelection.preview(image), it, bitmapPaint) };canvas.restore()
             } }
             slice.textBoxes.forEach { box ->
-                val preview = textSelection.preview(box)
+                val preview = noteTouch?.takeIf { it.note.id == box.id && it.pageId == page.id }?.let { box.copy(placement = it.preview) } ?: textSelection.preview(box)
                 (textLayouts.layout(preview) ?: textLayouts.layout(box))?.let {
                     canvas.save();if(textKey(box.id) in selection.ids) { val delta=selection.offset;canvas.translate(delta.x,delta.y);canvas.concat(selection.previewMatrix) }
-                    canvas.withObjectOpacity(page, box.layer) { TextRendering.draw(canvas, preview, it) };canvas.restore()
+                    canvas.withObjectOpacity(page, box.layer) { TextRendering.draw(canvas, preview, it, controls = true, text = box.id != typingTextId) };canvas.restore()
                 }
             }
             AttachmentRendering.drawPage(canvas, attachmentDrag?.takeIf { it.owner === repository.session?.notebook && it.pageId == page.id }?.let { d -> slice.copy(attachments = slice.attachments.map { if (it.id == d.card.id) it.copy(placement = d.preview) else it }) } ?: slice, repository.session?.notebook?.attachmentAssets.orEmpty())
@@ -1293,7 +1300,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             // P617: with Mix colours off a later highlight covers earlier ones; a moving selection keeps its own shape.
             val moving = selected.isNotEmpty() && (delta.x != 0f || delta.y != 0f || !selection.previewMatrix.isIdentity)
             val flat = InkGeometry.flatHighlights(slice.drawnStrokes.filter { !(moving && it.id in selected) && painting.none { p -> it.id in p } }) { visible.getValue(it.id) }
-            slice.drawnStrokes.forEach { stroke ->
+            InkNoteLook.clipInk(canvas, slice, shownNote(slice, page)) { slice.drawnStrokes.forEach { stroke ->
                 if (AudioPlayback.visibleInReplay(stroke,replay) && erasing.none { it.mode == EraserMode.STROKE && stroke.id in it.erased }) {
                     val repainted = painting.firstNotNullOfOrNull { it[stroke.id] }
                     val path = repainted?.second ?: visible.getValue(stroke.id)
@@ -1310,7 +1317,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                     else InkGeometry.draw(canvas, repainted?.first ?: stroke, inkPaint, page.opacityOf(stroke) * (if (fade != null && stroke.id in fade.new) faded else 1f), flat[stroke] ?: path)
                     canvas.restore()
                 }
-            }
+            } }
             }
             if (fade != null) {
                 fade.old.forEach { (stroke, path) -> InkGeometry.draw(canvas, stroke, inkPaint, page.opacityOf(stroke) * (1 - faded), path) }
@@ -1362,7 +1369,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                     TextRendering.drawPage(canvas, slice)
                     AttachmentRendering.drawPage(canvas, slice, notebook.attachmentAssets)
                     val flat = InkGeometry.flatHighlights(slice.drawnStrokes) { paths.getValue(it.id) }
-                    slice.drawnStrokes.forEach { InkGeometry.draw(canvas, it, inkPaint, partner.opacityOf(it), flat[it] ?: paths.getValue(it.id)) }
+                    InkNoteLook.clipInk(canvas, slice, null) { slice.drawnStrokes.forEach { InkGeometry.draw(canvas, it, inkPaint, partner.opacityOf(it), flat[it] ?: paths.getValue(it.id)) } }
                 }
             } else PaperRenderer.draw(canvas.apply { translate(s.partner.left, s.partner.top); scale(k, k) }, partner, paint)
             canvas.restore()
@@ -1417,9 +1424,23 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         return null
     }
     // B01: the library marks its renderer hook restricted; PencilWetRenderer only draws through it.
+    /** P682: every wet renderer made for [wet], so live note ink can be cut at its note. */
+    private val wetRenderers = java.util.concurrent.CopyOnWriteArrayList<PencilWetRenderer>()
     @SuppressLint("RestrictedApi")
-    private val wet = InProgressStrokesView(context).apply { rendererFactory = { PencilWetRenderer() } }
-    val isEditing get() = attachmentDrag != null || active.isNotEmpty() || finishing.isNotEmpty() || selection.isEditing || photoSelection.isEditing || textSelection.isEditing
+    private val wet = InProgressStrokesView(context).apply { rendererFactory = { PencilWetRenderer().also { wetRenderers += it } } }
+    /** P682: tells the wet renderers which handwritten notes have a stroke on them now (wet ink was cut only once finished). */
+    private fun updateWetClips(starting: Pending? = null) {
+        val notebook = repository.session?.notebook
+        val clips = (active.values + finishing.values + listOfNotNull(starting)).mapNotNull { p ->
+            val id = p.note ?: return@mapNotNull null
+            val box = notebook?.pages?.firstOrNull { it.id == p.pageId }?.textBoxes?.firstOrNull { it.id == id } ?: return@mapNotNull null
+            val r = box.placement
+            val rect = RectF(r.x, r.y, r.x + r.width, r.y + r.height)
+            PencilWetRenderer.Clip(rect, Path().apply { addRoundRect(rect, InkNoteLook.CLIP_RADIUS, InkNoteLook.CLIP_RADIUS, Path.Direction.CW) })
+        }.distinctBy { it.rect }
+        wetRenderers.forEach { it.clips = clips }
+    }
+    val isEditing get() = attachmentDrag != null || noteTouch != null || placeDown >= 0 || active.isNotEmpty() || finishing.isNotEmpty() || selection.isEditing || photoSelection.isEditing || textSelection.isEditing
     val pendingCount get() = active.size + finishing.size + (if (selection.isEditing) 1 else 0) + (if (photoSelection.isEditing) 1 else 0) + (if (textSelection.isEditing) 1 else 0)
     init {
         addView(dry, LayoutParams(-1, -1)); addView(wet, LayoutParams(-1, -1)); addView(laser, LayoutParams(-1,-1))
@@ -1562,6 +1583,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             return
         }
         if (selectPdfText(event)) return
+        if (noteContact(event)) return
         if (fingerObjectContact(event)) return
         if (!rulerShown) { navigate(event); handle(event); return }
         val fingers = (0 until event.pointerCount).filter { event.getToolType(it) == MotionEvent.TOOL_TYPE_FINGER }
@@ -1656,6 +1678,9 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         if (fitted && page != null && strip == null && spreadFor(page)?.key != spread?.key) fitted = false
         if (!fitted && width > 0 && repository.currentPage != null) fit()
         pageCurl?.deskColor = deskColor; bookFlip?.deskColor = deskColor
+        syncTurns()
+    }
+    private fun syncTurns() {
         val turnable = pageCurlEnabled && strip == null && !zoomedIn && inputEnabled && !isEditing
         pageCurl?.sync(turnable && spread == null)
         // A chosen pair turns without the book flip, whose pictures follow page-number pairs.
@@ -1725,11 +1750,13 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         val hadSpread = spread != null
         val keep = if (fitted && strip == null && zoomedIn && fitScale > 0f)
             (pageScale / fitScale) to fitArea.let { floatArrayOf(it.centerX(), it.centerY()) }.also { inverse.mapPoints(it) } else null
+        val scaleBefore = pageScale
         fitInsets.set(left, top, right, bottom)
         if (isEditing || width <= 0) return
         val overview = fitted && strip == null && !zoomedIn
         settleCurl(); cancelCurl(); fit(overview)
-        if (keep == null || hadSpread != (spread != null)) return
+        if (keep == null) return
+        if (hadSpread != (spread != null)) { keepAcrossSpreadLine(scaleBefore, keep.second); return }
         val (zoom, centre) = keep
         val area = fitArea; val zoomed = fitScale * zoom
         viewport.setScale(zoomed, zoomed)
@@ -2197,6 +2224,9 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                 fingerSettings.mode == FingerMode.ONE && fingerSettings.axis == TurnAxis.HORIZONTAL &&
                 fingers.size == 1 && pens.isEmpty() && (spread?.let { spreadBounds(it) } ?: pageRect)?.contains(event.getX(index), event.getY(index)) == true
             curlOriginX = event.getX(index); curlOriginY = event.getY(index)
+            // B63: if this page's turn previews were let go meanwhile (the other pane side by side), ask for them again now,
+            // so the turn can still start during this swipe once they arrive, rather than only after one instant turn.
+            if (curlEligible && pageCurl?.active != true && (if (spread == null) pageCurl?.previewsReady == false else bookFlip?.previewsReady == false)) syncTurns()
         }
         if (action == MotionEvent.ACTION_POINTER_DOWN || pens.isNotEmpty()) cancelCurl()
         val writer = action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN) && (index in pens ||
@@ -2249,6 +2279,81 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             dry.invalidate(); publishChange()
         }
         else onFingerHold?.let { tapPointer = -1; it(tapX, tapY) }
+    }
+    /**
+     * P680 (B68, board 18): pen or finger on a handwritten note's header or corner. The grip moves the note and the
+     * corner resizes it; the colour dot, Fold and More are buttons; a folded tab opens. The note's body takes ink.
+     */
+    private class NoteTouch(val owner: Notebook, val pageId: String, val note: TextBox, val part: InkNoteLook.Part,
+        val start: Point, val pointer: Int, val x: Float, val y: Float) { var preview = note.placement; var moved = false; var dead = false }
+    private var noteTouch: NoteTouch? = null
+    /** The buttons on a note: page id, note id, which part, and where it was tapped in this view. */
+    internal var onNoteAction: ((String, String, InkNoteLook.Part, Float, Float) -> Unit)? = null
+    /** P680: Insert › Sticky note waits for one tap where the note goes; this makes it there. */
+    var placingNote: ((String, Point) -> Unit)? = null
+    private var placeDown = -1
+    private fun shownNote(slice: Page, page: Page): ImagePlacement? {
+        val note = slice.inkNote ?: return null
+        noteTouch?.takeIf { it.note.id == note.id && it.pageId == page.id }?.let { return it.preview }
+        return textSelection.preview(note).placement
+    }
+    private fun noteContact(event: MotionEvent): Boolean {
+        if (placeDown >= 0) {
+            if (event.actionMasked == MotionEvent.ACTION_UP && event.getPointerId(0) == placeDown) {
+                placeDown = -1
+                val place = placingNote; placingNote = null
+                val page = repository.currentPage
+                if (place != null && page != null && event.flags and MotionEvent.FLAG_CANCELED == 0) place(page.id, pagePoint(event.x, event.y))
+                publishChange()
+            } else if (event.actionMasked == MotionEvent.ACTION_CANCEL) { placeDown = -1; publishChange() }
+            return true
+        }
+        val t = noteTouch
+        if (t == null) {
+            if (event.actionMasked != MotionEvent.ACTION_DOWN || event.pointerCount != 1 || event.flags and MotionEvent.FLAG_CANCELED != 0) return false
+            val tool = event.getToolType(0)
+            if (tool != MotionEvent.TOOL_TYPE_FINGER && tool != MotionEvent.TOOL_TYPE_STYLUS) return false
+            if (!inputEnabled || !pdfBackgroundReady || repository.readOnly || repository.busy || repository.fileBusy ||
+                !repository.canChangeNotebook || isEditing || rulerShown) return false
+            if (tool == MotionEvent.TOOL_TYPE_FINGER && fingerSettings.handLock && isHandLocked(event.eventTime)) return false
+            val page = repository.currentPage ?: return false
+            val owner = repository.session?.notebook ?: return false
+            val point = pagePoint(event.x, event.y)
+            if (placingNote != null) {
+                if (point.x !in 0f..page.width || point.y !in 0f..page.height) return false
+                placeDown = event.getPointerId(0)
+                removeCallbacks(fingerHold); tapPointer = -1; cancelCurl(); endNavigation(null)
+                return true
+            }
+            val note = StickyInk.notes(page).lastOrNull { page.canSee(it.layer) && page.canEdit(it) && it.placement.contains(point) } ?: return false
+            val part = InkNoteLook.part(note, point) ?: return false
+            if (part == InkNoteLook.Part.BODY) return false
+            noteTouch = NoteTouch(owner, page.id, note, part, point, event.getPointerId(0), event.x, event.y)
+            removeCallbacks(fingerHold); tapPointer = -1; cancelCurl(); endNavigation(null)
+            dry.invalidate(); publishChange(); return true
+        }
+        if (t.dead || event.pointerCount > 1 || event.getPointerId(0) != t.pointer || t.owner !== repository.session?.notebook ||
+            t.pageId != repository.selectedPageId) t.dead = true
+        val up = event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL
+        if (!t.dead && event.actionMasked != MotionEvent.ACTION_CANCEL) {
+            if (hypot(event.x - t.x, event.y - t.y) > ViewConfiguration.get(context).scaledTouchSlop) t.moved = true
+            val point = pagePoint(event.x, event.y)
+            val p = t.note.placement
+            if (t.moved) runCatching {
+                if (t.part == InkNoteLook.Part.GRIP) t.preview = p.translated(point.x - t.start.x, point.y - t.start.y)
+                else if (t.part == InkNoteLook.Part.RESIZE) t.preview = p.copy(width = maxOf(InkNoteLook.MIN_WIDTH, p.width + point.x - t.start.x),
+                    height = maxOf(InkNoteLook.MIN_HEIGHT, p.height + point.y - t.start.y))
+            }
+        }
+        if (up) {
+            noteTouch = null
+            if (!t.dead && event.actionMasked == MotionEvent.ACTION_UP && event.flags and MotionEvent.FLAG_CANCELED == 0) {
+                if (t.preview != t.note.placement) runCatching { repository.edit { it.updateTextBox(t.pageId, t.note.copy(placement = t.preview)) } }
+                    .onFailure { failure("The note could not be moved: ${it.message}") }
+                else if (!t.moved) onNoteAction?.invoke(t.pageId, t.note.id, t.part, event.x, event.y)
+            }
+        }
+        dry.invalidate(); publishChange(); return true
     }
     private data class AttachmentDrag(val owner: Notebook, val pageId: String, val card: FileAttachment,
         val start: Point, var preview: ImagePlacement)
@@ -2347,7 +2452,16 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
                     val page = repository.currentPage ?: return
                     val xy = floatArrayOf(event.getX(index), event.getY(index)); inverse.mapPoints(xy)
                     val card = AttachmentRendering.hit(page, xy[0], xy[1])
+                    // P681 (B70, board 19): with the pen, a finger tap selects a text box and a second tap types in it.
+                    val at = Point(xy[0], xy[1])
+                    val text = if (effectiveLasso || repository.readOnly || onTextTap == null) null
+                        else page.editableTexts.lastOrNull { !it.locked && it.sticky?.ink != true && it.placement.contains(at) }
+                            ?.takeIf { !writing || it.id == selectedTextId }
                     if (card != null) { fingerTapTaken = writing; post { onAttachmentTap(card) } }
+                    else if (text != null) {
+                        fingerTapTaken = writing
+                        if (text.id == selectedTextId) post { onTextTap?.invoke(text.id, at) } else if (!isEditing) selectText(text.id)
+                    }
                     else if (!(fingerSettings.handLock && isHandLocked(event.eventTime))) {
                         val hit = strip?.pageAt(event.getX(index), event.getY(index)) ?: spread?.let { spread ->
                             spread.partnerId?.takeIf { spread.partner.contains(xy[0], xy[1]) }?.let { id ->
@@ -2510,8 +2624,9 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         val zoom = pageScale / fitScale
         val centre = floatArrayOf((fitInsets.left + oldw - fitInsets.right) / 2, (fitInsets.top + oldh - fitInsets.bottom) / 2).also { inverse.mapPoints(it) }
         val systemBar = width == oldw && kotlin.math.abs(height - oldh) <= SYSTEM_BAR_DP * resources.displayMetrics.density
+        val scaleBefore = pageScale
         fit()
-        if (hadSpread != (spread != null)) return
+        if (hadSpread != (spread != null)) { keepAcrossSpreadLine(scaleBefore, centre); return }
         if (systemBar) viewport.set(before)
         else {
             val area = fitArea; val scale = fitScale * zoom
@@ -2520,8 +2635,24 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         }
         viewport.invert(inverse); dry.invalidate(); onViewportChanged()
     }
+    /**
+     * B69: a zoomed pane crossed the line between one page and a two-page spread (side by side, the divider, the Pages
+     * panel or the toolbar changed its width or height). The page keeps its size on screen and the point that was in the
+     * middle stays there, kept on this page; only a level no larger than the new fit goes back to fit.
+     */
+    private fun keepAcrossSpreadLine(scale: Float, centre: FloatArray) {
+        val page = repository.currentPage ?: return
+        if (!scale.isFinite() || scale <= fitScale * 1.001f) return
+        val kept = scale.coerceAtMost(zoomCap)
+        val x = centre[0].coerceIn(0f, page.width); val y = centre[1].coerceIn(0f, page.height)
+        val area = fitArea
+        viewport.setScale(kept, kept)
+        viewport.postTranslate(area.centerX() - x * kept, area.centerY() - y * kept)
+        viewport.invert(inverse); dry.invalidate(); onViewportChanged()
+    }
     fun cancelActive() {
         pendingLassoCompletion = null
+        placingNote = null; placeDown = -1; noteTouch = null
         laser.clear()
         rulerHeldPen=false;boxFinger=false
         cancelSnapFrame()
@@ -2543,7 +2674,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         try {
             check(repository.session?.notebook?.id == pending.notebookId) { "Notebook changed before stroke completion" }
             val original = InkStroke(color = pending.style.inkColor, width = pending.style.width, brush = pending.kind,
-                samples = pending.samples.toList(), outlines = outlines(stroke), layer = repository.session?.activeLayer(pending.pageId), audio=pending.audio)
+                samples = pending.samples.toList(), outlines = outlines(stroke), layer = repository.session?.activeLayer(pending.pageId), audio=pending.audio, note=pending.note)
             // A renderer handoff may arrive after navigation or pause. Never use another page's pixels.
             val page = repository.currentPage
             val straight = if (pending.followText && pending.kind == InkStroke.HIGHLIGHTER &&
@@ -2573,7 +2704,7 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             val scribbled = if (straight != null || !ScribbleErase.enabled(context)) emptySet() else
                 repository.session!!.notebook.pages.firstOrNull { it.id == pending.pageId }?.strokes?.let { strokes ->
                     val current = strokes === repository.currentPage?.strokes
-                    ScribbleErase.covered(original, strokes.filter(onActiveLayer(pending.pageId))) { if (current) visiblePaths(strokes).getValue(it.id) else InkGeometry.visible(it) }
+                    ScribbleErase.covered(original, strokes.filter(onActiveLayer(pending.pageId)).filter { it.note == original.note }) { if (current) visiblePaths(strokes).getValue(it.id) else InkGeometry.visible(it) }
                 }.orEmpty()
             repository.edit {
                 it.add(original, pending.pageId)
@@ -2779,10 +2910,10 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
         val snap = pending.snap ?: return
         try {
             check(repository.session?.notebook?.id == pending.notebookId) { "Notebook changed before shape completion" }
-            val original = InkStroke(color = pending.style.inkColor, width = pending.style.width, brush = pending.kind, samples = pending.samples.toList(), outlines = outlines(reconstruct(pending)), audio=pending.audio)
+            val original = InkStroke(color = pending.style.inkColor, width = pending.style.width, brush = pending.kind, samples = pending.samples.toList(), outlines = outlines(reconstruct(pending)), audio=pending.audio, note=pending.note)
             // Two history steps: Undo first brings back the freehand stroke, then removes it.
             val before = repository.session?.notebook
-            repository.edit { it.add(original, pending.pageId); it.replaceStroke(original.id, snap.stroke.copy(id = original.id), pending.pageId); true }
+            repository.edit { it.add(original, pending.pageId); it.replaceStroke(original.id, snap.stroke.copy(id = original.id, note = original.note), pending.pageId); true }
             repository.session?.notebook?.takeIf { it !== before }?.let { after -> onShapeSnapped?.invoke(snap.kind, after) }
         } catch (error: Exception) { failure("Shape could not be committed: ${error.message}") }
     }
@@ -3010,6 +3141,10 @@ class InkCanvas(context: Context, private val repository: NotebookRepository, pr
             if (!erase && !paint && holdToShape && it.assist != HoldAssist.FREEHAND)
                 it.hold = ShapeRecognizer.HoldDetector(resources.displayMetrics.xdpi / 25.4f * holdSettings.toleranceMm / pageScale, holdSettings.delayMs)
             capture(event, pointerId, it, includeHistory = false)
+            if (!erase && !paint) it.note = it.samples.firstOrNull()?.let { s ->
+                repository.session?.notebook?.pages?.firstOrNull { p -> p.id == pageId }?.inkNoteAt(Point(s.x, s.y))?.id
+            }
+            if (it.note != null || wetRenderers.any { r -> r.clips.isNotEmpty() }) updateWetClips(it)
         }
     }
     private fun Pending.sweep() = EraserSweep(samples.map { Point(it.x, it.y) }, radius)

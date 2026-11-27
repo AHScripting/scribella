@@ -254,6 +254,25 @@ internal class SafetyCopies(private val app: NotesApplication, private val direc
         else "Newest PDF of each notebook: Downloads / ${app.getString(R.string.safety_folder)}. Editable and earlier copies: its folder “${OLDER.trimEnd('/')}”. Most recent completed copy "+java.text.DateFormat.getDateTimeInstance().format(Date(last))+
             "\n"+providerStatus()+(prefs.errors("cloud-error:").firstOrNull()?.let {"\n$it"} ?: "")
     }
+    /** P732: the one line on Library backup's recovery row (board 25); [status] stays on its own sheet. */
+    fun brief():String {
+        val problem=runCatching {File(app.storageRoot,"safety-copies/scheduling-error.txt").takeIf {it.isFile}?.readText()}.getOrNull()
+            ?: prefs.errors("error:").firstOrNull()
+        val last=prefs.getLong("last",0)
+        val workingAt=prefs.getLong("workingAt",0)
+        return when {
+            problem!=null -> problem.lineSequence().first().removeSuffix(".")
+            workingAt>0 && System.currentTimeMillis()-workingAt>10*60_000 -> "The last refresh did not finish"
+            outstanding>0 || workingAt>0 -> "Updating · PDFs in Downloads"
+            last==0L -> "No readable copy has finished yet"
+            else -> {
+                val clock=android.text.format.DateUtils.formatDateTime(app,last,android.text.format.DateUtils.FORMAT_SHOW_TIME)
+                val day=if(android.text.format.DateUtils.isToday(last)) "today" else android.text.format.DateUtils.formatDateTime(app,last,
+                    android.text.format.DateUtils.FORMAT_SHOW_DATE or android.text.format.DateUtils.FORMAT_ABBREV_MONTH)
+                "Latest: $day $clock · PDFs in Downloads"
+            }
+        }
+    }
     internal fun records():List<JSONObject> = prefs.records()
     fun openFiles(activity:MainActivity) {
         val folder=Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload%2FNotes%20Lab%20Safety")

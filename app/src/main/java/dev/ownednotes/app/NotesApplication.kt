@@ -13,7 +13,25 @@ data class PdfInsertTarget(val notebook: Notebook, val pageId: String)
 data class ImageInsertTarget(val notebook: Notebook, val pageId: String)
 
 open class NotesApplication : Application() {
-    val io = Executors.newSingleThreadExecutor()
+    /**
+     * B80 (P707): folder sync runs on [syncing], not on io, but every io job still holds [libraryOrder] while it runs,
+     * and so does sync. Library writes (rename, restore, import, trash, settings) therefore stay in turn with sync
+     * exactly as when both shared one thread. Jobs that never write the library (photo decoding on [importing],
+     * exports of an in-memory snapshot on [exporting]) take no lock, so they no longer wait minutes behind a sync.
+     */
+    internal val libraryOrder = java.util.concurrent.locks.ReentrantLock()
+    val io: java.util.concurrent.ExecutorService = object : java.util.concurrent.ThreadPoolExecutor(1, 1, 0L,
+        java.util.concurrent.TimeUnit.MILLISECONDS, java.util.concurrent.LinkedBlockingQueue(), { task -> Thread(task, "notes-io") }) {
+        override fun beforeExecute(thread: Thread, task: Runnable) { libraryOrder.lock(); super.beforeExecute(thread, task) }
+        override fun afterExecute(task: Runnable, error: Throwable?) { try { super.afterExecute(task, error) } finally { libraryOrder.unlock() } }
+    }
+    /** B80 (P707): folder sync and both-changed choices; each job holds [libraryOrder] (see [inLibraryOrder]). */
+    internal val syncing = Executors.newSingleThreadExecutor { task -> Thread(task, "notes-sync").apply { isDaemon = true } }
+    /** B80 (P707): decoding a picture the user is placing never waits behind a sync or another file job. */
+    internal val importing = Executors.newSingleThreadExecutor { task -> Thread(task, "notes-import").apply { isDaemon = true } }
+    /** B80 (P707): exports and shares of a notebook snapshot already in memory; they read no library file. */
+    internal val exporting = Executors.newSingleThreadExecutor { task -> Thread(task, "notes-export").apply { isDaemon = true } }
+    internal fun <T> inLibraryOrder(work: () -> T): T { libraryOrder.lock(); try { return work() } finally { libraryOrder.unlock() } }
     // Saved reads do not queue behind a provider or a stalled recoverable Trash move.
     internal val opening = Executors.newSingleThreadExecutor { task -> Thread(task,"notes-opening").apply {isDaemon=true} }
     internal val trashing = Executors.newSingleThreadExecutor { task -> Thread(task,"notes-trash").apply {isDaemon=true} }
@@ -63,6 +81,8 @@ open class NotesApplication : Application() {
     internal val isRecoveryProcess get() = Application.getProcessName().endsWith(":recovery")
     /** P674: the process that reads and writes the sync folder; it needs nothing of the editor. */
     internal val isFolderProcess get() = Application.getProcessName().endsWith(FolderProcess.PROCESS)
+    /** P717: the process that reads a memory report; it needs nothing of the app. */
+    internal val isReportProcess get() = Application.getProcessName().endsWith(":report")
     open val automaticSafetyCopies: Boolean get() = preferencesName == "library" && personalTools
     internal val safetyCopies by lazy { SafetyCopies(this) }
     val main = Handler(Looper.getMainLooper())
@@ -83,6 +103,26 @@ open class NotesApplication : Application() {
     internal val audio by lazy {AudioRecording(this)}
     internal val audioPlayback by lazy {AudioPlayback(this)}
     internal val backgroundHistory by lazy { BackgroundSyncHistory(getSharedPreferences(preferencesName, 0)) }
+    /** Instant sync between the user's devices through their own server (docs/LIVE-SYNC-PLAN.md). */
+    internal val liveSync by lazy { LiveSync(this) }
+    /**
+     * B73 (P723): when each notebook was last changed here by instant sync (a change taken in from the other device); an
+     * edit made here removes it again. While instant sync is on, folder sync leaves such a notebook to the device that
+     * made the change for [LEAVE_TO_OTHER_MS], so the two do not send it to the folder at the same moment (OneDrive
+     * refused one with 409 Conflict). After that this device sends it too, so the folder stays a backup.
+     */
+    internal val changedByLive = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    internal fun leaveToOtherDevice(now: Long = System.currentTimeMillis()): Set<String> =
+        if (!liveSync.configured) emptySet() else changedByLive.filterValues { now - it in 0 until LEAVE_TO_OTHER_MS }.keys.toSet()
+    /**
+     * Live sync: another device's change, to the open notebook (either side of side-by-side) or to a closed one's file.
+     * P724: [sets] are one or more changes in a row to the same notebook, taken in together.
+     */
+    internal fun takeLiveChanges(sets: List<LiveChanges.ChangeSet>, photos: List<ImageAsset>, done: (LiveSyncClient.Taken) -> Unit) {
+        val id = sets.firstOrNull()?.notebook
+        if (!::repository.isInitialized || id == null || sets.any { it.notebook != id }) return done(LiveSyncClient.Taken.NOT)
+        (openDocuments.firstOrNull { it.session?.notebook?.id == id } ?: repository).takeLive(sets, photos, done)
+    }
     /** Landscape two-page spread (N003) until the user chooses; instrumented tests keep single-page fitting. */
     open val bookSpreadDefault: Boolean get() = true
     var exportSnapshot: Notebook? = null
@@ -113,6 +153,8 @@ open class NotesApplication : Application() {
     lateinit var repository: NotebookRepository
     /** P530 (F081/F082): the open documents; the second exists only once side-by-side view has been used. Main thread. */
     internal val openDocuments get() = listOfNotNull(repository, repository.companion)
+    /** Instant sync: the notebooks loaded now, on either side (none before the repository exists). Main thread. */
+    internal val openNotebooks get() = if (::repository.isInitialized) openDocuments.mapNotNull { it.session?.notebook } else emptyList()
     /** P530: every open document can take part in a library-wide operation (sync, backup). */
     internal val documentsReady get() = openDocuments.all { it.canChangeNotebook }
     private var focusedCompanion = false
@@ -135,9 +177,19 @@ open class NotesApplication : Application() {
         super.onLowMemory()
         PageText.clearMemory(); InkText.clearMemory(); NotebookPackage.clearCaches()
     }
+    /** B80 (P707): debuggable builds log disk reads, disk writes and slow calls on the main thread (logcat tag StrictMode).
+     *  Release builds are not debuggable, so this never runs there. Log only: nothing is stopped or shown. */
+    private fun watchMainThread() {
+        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+        android.os.StrictMode.setThreadPolicy(android.os.StrictMode.ThreadPolicy.Builder()
+            .detectDiskReads().detectDiskWrites().detectCustomSlowCalls().penaltyLog().build())
+    }
     override fun onCreate() {
         super.onCreate()
-        if (isFolderProcess) return
+        if (isFolderProcess || isReportProcess) return
+        CrashNote.install(this) // P714: why the app stopped, shown once at the next start
+        if (personalTools) MemoryReport.watch(this) // P716: a memory report when the app's memory stays high
+        watchMainThread()
         com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(this)
         PdfAccess.initialize(this)
         DocumentSession.redrawConnector = ConnectorInk::redraw
@@ -146,9 +198,12 @@ open class NotesApplication : Application() {
         PageText.index = SearchIndex(File(cacheDir, "search-index"))
         repository = NotebookRepository(this)
         BackgroundSync.update(this)
+        LibraryLayoutSync.start(this) // P698: Library folders and the rest of its organisation travel with sync
         repository.listen { searchIndexer.schedule(activeDocument.session?.notebook) }
     }
 }
+/** B73 (P723): how long folder sync leaves a notebook changed here only by instant sync to the device that made the change. */
+internal const val LEAVE_TO_OTHER_MS = 10 * 60_000L
 
 class NotebookRepository(private val app: NotesApplication, private val owner: NotebookRepository? = null) {
     /** P530 (F081/F082): what both documents see of one library. Document state (session, journal, revisions, writer) stays per repository. */
@@ -331,6 +386,8 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
     val importing get() = busy
     private var revision = 0L
     private var savedRevision = 0L
+    /** P699: successful saves so far; sync follows a save of a synced notebook within a few seconds. */
+    internal var saves = 0L; private set
     private var pendingWrite: Pair<Long, Notebook>? = null
     private var writing = false
     private val saveWaiters = mutableListOf<Pair<Long, java.util.concurrent.CompletableFuture<Unit>>>()
@@ -434,6 +491,9 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
         userReadOnly = preferences.getBoolean("readOnly:${notebook.id}",false)
         selectedPageId = notebook.pages.firstOrNull { it.id == remembered }?.id ?: notebook.pages.first().id
         if (owner == null) preferences.edit().putString("active", notebook.id).apply()
+        // Live sync follows the notebook from what it is now: its file already holds this device's saves and what came
+        // from the other devices, so nothing in it is sent again.
+        app.liveSync.opened(notebook)
         // B24 (P140): compress the pages once in the background, so even the first save copies the unchanged ones.
         if (!readOnly) app.io.execute { runCatching { NotebookPackage.prime(notebook) } }
     }
@@ -455,6 +515,10 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
         entries = (entries.filterNot { it.id == notebook.id } + LibraryEntry(notebook.id, notebook.title, notebook.pages.size, modified = modified)).sortedWith(compareBy({ it.title.lowercase(java.util.Locale.ROOT) }, { it.id }))
     }
     fun setFileBusy(value: Boolean) { fileBusy = value; notifyChanged() }
+    /** B80 (P707): snapshot exports run beside editing; the status line says so without locking the editor. */
+    var exportsRunning = 0; private set
+    fun exportStarted() { exportsRunning++; notifyChanged() }
+    fun exportFinished() { if (exportsRunning > 0) exportsRunning--; notifyChanged() }
     private val legacyInputOwner=Any()
     private val inputOwners=java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any,Boolean>())
     fun setInputBusy(value:Boolean)=setInputBusy(legacyInputOwner,value)
@@ -516,6 +580,44 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
         var inserted: String? = null
         edit { inserted = it.insertImageObject(page.id, photo.asset, placement, photo.orientation); true }
         return inserted
+    }
+    /**
+     * P688: shared photos placed on one page in a single edit, so one Undo takes them all out. One photo is placed as
+     * Import photo places it; more are fitted into a grid of cells over the page, in the order shared.
+     */
+    fun insertPhotos(target: ImageInsertTarget, photos: List<ImageSupport.ImportedPhoto>): List<String> {
+        if (photos.isEmpty() || !canInsertImage(target)) return emptyList()
+        val page = target.notebook.pages.first { it.id == target.pageId }
+        val places = if (photos.size == 1) listOf(photos[0].placement(page)) else photoGrid(photos, page.width, page.height)
+        val inserted = mutableListOf<String>()
+        edit { session -> inserted += session.insertImageObjects(page.id, photos.mapIndexed { i, p -> Triple(p.asset, places[i], p.orientation) }); inserted.isNotEmpty() }
+        return inserted
+    }
+    /**
+     * P695 (C2): a page drop from another device goes into this open notebook as one edit, so one Undo takes it out.
+     * Null when the notebook cannot be changed now (busy, read-only, another notebook); empty when the drop is already in.
+     */
+    internal fun insertDrop(notebookId: String, manifest: dev.ownednotes.core.PageDrop.Manifest, content: PageDrops.Content): List<String>? {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (busy || readOnly || !canChangeNotebook || session?.notebook?.id != notebookId) return null
+        var inserted = emptyList<String>()
+        edit { inserted = PageDrops.insert(it, manifest, content, ::photoGrid); inserted.isNotEmpty() }
+        return inserted
+    }
+    /** The grid with the column count that shows the photos largest in all, each photo fitted and centred in its cell. */
+    internal fun photoGrid(photos: List<ImageSupport.ImportedPhoto>, pageWidth: Float, pageHeight: Float): List<ImagePlacement> {
+        val margin = minOf(pageWidth, pageHeight) * .06f; val gap = margin / 2
+        val sizes = photos.map { p -> if (p.orientation >= 5) p.asset.height.toFloat() to p.asset.width.toFloat() else p.asset.width.toFloat() to p.asset.height.toFloat() }
+        fun layout(columns: Int): List<ImagePlacement> {
+            val rows = (photos.size + columns - 1) / columns
+            val cellW = (pageWidth - 2 * margin - (columns - 1) * gap) / columns; val cellH = (pageHeight - 2 * margin - (rows - 1) * gap) / rows
+            return sizes.mapIndexed { i, (w, h) ->
+                val k = minOf(cellW / w, cellH / h); val pw = (w * k).coerceAtLeast(1f); val ph = (h * k).coerceAtLeast(1f)
+                val cx = margin + (i % columns) * (cellW + gap) + cellW / 2; val cy = margin + (i / columns) * (cellH + gap) + cellH / 2
+                ImagePlacement(cx - pw / 2, cy - ph / 2, pw, ph)
+            }
+        }
+        return (1..photos.size).map { layout(it) }.maxBy { places -> places.sumOf { (it.width * it.height).toDouble() } }
     }
     /** Attached files use the same target guard; core limits reject before history changes. */
     fun insertAttachment(target: ImageInsertTarget, asset: AttachmentAsset, name: String?, mimeType: String?): String? {
@@ -647,9 +749,11 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
         edit(operation)
         return current.notebook !== expected
     }
-    fun save() {
+    /** [live]: saving a change taken in from the other device (B73, P723); any other save is an edit made here. */
+    fun save(live: Boolean = false) {
         if (busy || userReadOnly || recoveryUnavailable) return
         val snapshot = session?.notebook ?: return
+        if (live) app.changedByLive[snapshot.id] = System.currentTimeMillis() else app.changedByLive.remove(snapshot.id)
         val target = ++revision
         val recovery = runCatching { journal?.append(snapshot) }
         if (recoveryCheckpoint != null || recovery.isFailure || recovery.getOrNull() == RecoveryJournal.Append.NEEDS_ASSET_CHECKPOINT ||
@@ -663,8 +767,83 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
         if(recovery.getOrNull()==RecoveryJournal.Append.RECORDED) app.safetyCopies.request(snapshot.id)
         status = "Saving…"; updateEntry(snapshot)
         pendingWrite = target to snapshot
+        // Live sync: what changed goes to the other devices now (in save order; see docs/LIVE-SYNC-PLAN.md).
+        app.liveSync.saved(snapshot)
         notifyChanged(); writeNext()
     }
+    /**
+     * Live sync: another device's change ([sets]). The open notebook takes it with no Undo step of its own (Undo never removes the
+     * other device's work) and saves; a closed notebook's file is read, changed and written under its read gate. While
+     * the notebook is opening or busy for a moment (a folder copy check, a page copy) it is offered again soon (B71: a
+     * second quick delete was dropped). Not taken when read-only, being trashed or not on this device: folder sync
+     * brings it later.
+     */
+    /**
+     * P719: [photos] are the set's new pictures, fetched through the sync server (empty for other sets). P724: [sets], in
+     * order, all for one notebook: one step for the open notebook, one read and write for a closed one.
+     */
+    internal fun takeLive(sets: List<LiveChanges.ChangeSet>, photos: List<ImageAsset>, done: (LiveSyncClient.Taken) -> Unit) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val id = sets.first().notebook
+        // P728: the whole run in one go, the result validated once.
+        fun withChanges(notebook: Notebook) = LiveChanges.applyRun(notebook, sets, photos)
+        val current = session
+        if (current != null && current.notebook.id == id) {
+            if (userReadOnly || recoveryUnavailable || current.notebook.id == trashingId) return done(LiveSyncClient.Taken.NOT)
+            // P719: a save making new originals durable (a photo just added, here or by a change taken in) is read-only for a
+            // moment: offered again soon. Answered NOT, ink drawn on another device right after its photo was lost.
+            if (!loaded || busy || readOnly) return done(LiveSyncClient.Taken.LATER)
+            // P728: prepared off the main thread, then taken in here.
+            takeLiveOpen(current, ::withChanges, done, tries = 0)
+            return
+        }
+        if (owner != null || localEntry(id) == null || id == trashingId || isNotebookReadOnly(id)) return done(LiveSyncClient.Taken.NOT)
+        if (id in openingIds || heldByPeer(id)) return done(LiveSyncClient.Taken.LATER)
+        app.saving.execute {
+            val result = runCatching {
+                NotebookReadGate.access(File(app.storageRoot, "notebooks"), id) {
+                    val before = library.read(id)
+                    withChanges(before).also { if (it != before) { library.write(it); liveFileWrites.merge(id, 1, Int::plus) } }
+                }
+            }
+            app.main.post {
+                result.onSuccess { updateEntry(it); app.changedByLive[id] = System.currentTimeMillis(); notifyChanged() }
+                done(if (result.isSuccess) LiveSyncClient.Taken.FILE else LiveSyncClient.Taken.NOT)
+            }
+        }
+    }
+    /** P728: prepares another device's changes for the open notebook off the main thread, one run at a time. */
+    private val liveTaking by lazy { java.util.concurrent.Executors.newSingleThreadExecutor { java.lang.Thread(it, "live-take").apply { isDaemon = true } } }
+    /**
+     * P728: the open notebook takes another device's changes ([withChanges]) prepared on [liveTaking], with every Undo and
+     * Redo state, and only swaps the result in on the main thread. On the Pixel a backlog of the tablet's changes to the big
+     * German notebook, worked out on the main thread, held it for over 5 s and Android closed the app as not responding.
+     * A stroke made here meanwhile means preparing again from the new state (a few times, then the run is offered again later).
+     */
+    private fun takeLiveOpen(current: DocumentSession, withChanges: (Notebook) -> Notebook, done: (LiveSyncClient.Taken) -> Unit, tries: Int) {
+        val base = current.remoteBase()
+        liveTaking.execute {
+            val prepared = runCatching { base.prepare(withChanges) }
+            app.main.post {
+                if (session !== current) return@post done(LiveSyncClient.Taken.LATER) // closed meanwhile: taken into its file next time
+                if (userReadOnly || recoveryUnavailable || current.notebook.id == trashingId) return@post done(LiveSyncClient.Taken.NOT)
+                if (!loaded || busy || readOnly) return@post done(LiveSyncClient.Taken.LATER)
+                val ready = prepared.getOrElse { return@post done(LiveSyncClient.Taken.NOT) }
+                // B72: when the shown page goes, show the one at the same place (the page before, if it was the last), as a local delete does.
+                val shownIndex = current.notebook.pages.indexOfFirst { it.id == selectedPageId }
+                val changed = current.takePrepared(ready)
+                    ?: return@post if (tries < 3) takeLiveOpen(current, withChanges, done, tries + 1) else done(LiveSyncClient.Taken.LATER)
+                // Taken in before this save is diffed, so the change is not sent back.
+                done(LiveSyncClient.Taken.OPEN)
+                if (!changed) return@post
+                val pages = current.notebook.pages
+                if (pages.none { it.id == selectedPageId }) { selectedPageId = pages[minOf(shownIndex.coerceAtLeast(0), pages.lastIndex)].id; rememberPage() }
+                save(live = true)
+            }
+        }
+    }
+    /** P724: how often instant sync wrote each closed notebook's file (a test checks a backlog takes a few writes, not one per change). */
+    internal val liveFileWrites = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /**
      * B33 (P196): every save rewrites the whole package, photos and PDFs included (a 6 MB photo meant 270 MB written for
      * 48 strokes). A save that follows straight on from another waits until about [SAVE_BYTES_PER_MS] of its photos,
@@ -720,7 +899,7 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
                     val heavy = snapshot.assets.sumOf { it.size.toLong() } + snapshot.imageAssets.sumOf { it.size.toLong() } + snapshot.attachmentAssets.sumOf { it.size.toLong() }
                     spacingSave = true; app.main.postDelayed(spacedSave, maxOf(took * SAVE_SPACING, heavy / SAVE_BYTES_PER_MS).coerceAtMost(SAVE_SPACING_MAX_MS))
                 }
-                if (result.isSuccess) failedSaves = 0
+                if (result.isSuccess) { failedSaves = 0; saves++ }
                 else if (pendingWrite == null) { failedSaves++; app.main.removeCallbacks(retrySave); app.main.postDelayed(retrySave, (1000L shl minOf(failedSaves, 5)).coerceAtMost(SAVE_RETRY_MAX_MS)) }
                 finishSaveWaiters(result.exceptionOrNull()?.takeIf { pendingWrite == null })
                 notifyChanged(); writeNext()
@@ -1181,7 +1360,7 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
         return true
     }
     /**
-     * Sync and all native writes remain serialized. Explicit read-only opens use a separate executor with live
+     * Sync and all native writes remain serialized (B80: sync on its own thread, in turn with io through libraryOrder). Explicit read-only opens use a separate executor with live
      * reservations; FolderSync rechecks those reservations under the per-notebook local commit gate.
      * Provider work never holds that gate, so a stalled transfer cannot gate opening saved local work.
      */
@@ -1190,9 +1369,12 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
         val open=java.util.concurrent.ConcurrentHashMap.newKeySet<String>().apply {addAll(openingIds);addAll(openDocumentIds())}
         syncReservations.add(open)
         val titles = (trashed + entries).associate { it.id to it.title }
-        app.io.execute {
-            val result = runCatching { app.afterQueuedSaves(); sync(open, titles) }
-            val lists = runCatching { library.entries() to library.trashEntries() }.getOrNull()
+        // B80 (P707): sync waits for the io jobs asked for before it (a changed folder's old state, say), then holds
+        // libraryOrder, so it keeps the order it had on io while photo imports and exports go past it.
+        val before = app.io.submit {}
+        app.syncing.execute {
+            val result = runCatching { before.get(); app.inLibraryOrder { app.afterQueuedSaves(); sync(open, titles) } }
+            val lists = runCatching { app.inLibraryOrder { library.entries() to library.trashEntries() } }.getOrNull()
             app.main.post {
                 syncReservations.removeAll {it===open}
                 lists?.let { (list, trash) -> entries = list; trashed = trash }
@@ -1203,6 +1385,29 @@ class NotebookRepository(private val app: NotesApplication, private val owner: N
     }
     /** Every notebook a pane holds; sync, downloads and storage release leave these alone. */
     private fun openDocumentIds() = setOfNotNull(session?.notebook?.id, peer?.session?.notebook?.id)
+    /**
+     * P699: carries out the user's choice for notebook [id], changed on two devices: [work] runs on the save thread after
+     * queued saves while edits wait. When [id] is the open notebook it must be saved first, and it is read again after,
+     * at the same page. False (nothing done) while busy, unsaved, or open in the second pane.
+     */
+    fun resolveBothChanged(id: String, work: () -> Unit, done: (Result<Unit>) -> Unit): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val open = session?.notebook?.id == id
+        if (!loaded || busy || heldByPeer(id) || (open && (sideBySide || !canChangeNotebook))) return false
+        busy = true; status = "Keeping your choice…"; notifyChanged()
+        val before = app.io.submit {}
+        app.syncing.execute {
+            val result = runCatching { before.get(); app.inLibraryOrder { app.afterQueuedSaves(); work() } }
+            val lists = runCatching { app.inLibraryOrder { library.entries() to library.trashEntries() } }.getOrNull()
+            app.main.post {
+                lists?.let { (list, trash) -> entries = list; trashed = trash }
+                busy = false; status = if (session == null) "Ready" else "Saved locally"
+                if (open && result.isSuccess && session?.notebook?.id == id) openNotebook(id)
+                notifyChanged(); done(result)
+            }
+        }
+        return true
+    }
     /**
      * Retitles a notebook (P027). The open notebook is renamed through its normal undoable edit and autosave; any other
      * readable notebook is read, retitled and written atomically in the background. False when refused.

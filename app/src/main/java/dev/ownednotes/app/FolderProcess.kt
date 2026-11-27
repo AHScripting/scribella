@@ -119,9 +119,23 @@ object FolderProcess {
         override fun open(): Long = call(context, OPEN, answerMillis, { p ->
             p.writeString(tree.toString()); p.writeInt(if (create) 1 else 0); p.writeString(rootName); p.writeStringList(path)
         }) { it.readLong() }
+        /**
+         * P700: a child folder is opened once per folder object (one sync), not at every use: opening one lists every folder
+         * above it, which takes seconds each through a cloud provider on a phone. A child found missing stays missing until
+         * one is created through [child] with create.
+         */
+        private val children = HashMap<String, FolderSync.NestedFolder>()
+        private val missing = HashSet<String>()
         override fun child(name: String, create: Boolean): FolderSync.NestedFolder {
             FolderSync.requireChildName(name)
-            return Remote(context, tree, create, path + name, rootName)
+            synchronized(children) {
+                children[name]?.let { return it }
+                if (!create && name in missing) throw java.io.FileNotFoundException("The sync namespace is missing")
+            }
+            val opened = try { Remote(context, tree, create, path + name, rootName) }
+                catch (e: java.io.FileNotFoundException) { if (!create) synchronized(children) { missing += name }; throw e }
+            synchronized(children) { missing -= name; children[name] = opened }
+            return opened
         }
         override fun list(): Map<String, FolderSync.Stat> = onFolder(LIST, answerMillis, { }) { r ->
             LinkedHashMap<String, FolderSync.Stat>().apply { repeat(r.readInt()) { put(r.readString()!!, FolderSync.Stat(r.readLong(), r.readLong())) } }
@@ -152,7 +166,7 @@ object FolderProcess {
             val end = SystemClock.uptimeMillis() + stallMillis
             while (true) {
                 val left = end - SystemClock.uptimeMillis()
-                if (left <= 0) { stop(context); throw unavailable(STOPPED) }
+                if (left <= 0) { stop(context); throw unavailable(STOPPED).apply { addSuppressed(FolderSync.Step("no data for ${stallMillis / 1000} s")) } }
                 val ready = try { Os.poll(arrayOf(wait), left.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()) }
                     catch (e: ErrnoException) { if (e.errno == OsConstants.EINTR) continue; throw unavailable("The sync folder could not be read", e) }
                 if (ready <= 0) continue
@@ -253,7 +267,10 @@ object FolderProcess {
                 } finally { data.recycle(); reply.recycle() }
             })
             return try { work.get(millis, TimeUnit.MILLISECONDS) }
-            catch (e: TimeoutException) { work.cancel(true); stop(context); throw unavailable(STOPPED) }
+            catch (e: TimeoutException) {
+                work.cancel(true); stop(context)
+                throw unavailable(STOPPED).apply { addSuppressed(FolderSync.Step("no answer in ${millis / 1000} s")) }
+            }
             catch (e: ExecutionException) { throw e.cause ?: e }
             catch (e: InterruptedException) { work.cancel(true); Thread.currentThread().interrupt(); throw InterruptedIOException("Sync stopped") }
         } finally { active.decrementAndGet(); touched() }
@@ -277,18 +294,21 @@ object FolderProcess {
         })
         reply.writeString(error.message)
         reply.writeString(FolderSync.problemKind(error).name)
+        // P710: the folder side's error types and step labels (no names, paths or messages), shown when a sync fails.
+        reply.writeString(FolderSync.failureTypes(error))
     }
     private fun failure(reply: Parcel): Exception {
         val type = reply.readInt()
         val message = reply.readString()
         val kind = runCatching { FolderSync.ProblemKind.valueOf(reply.readString()!!) }.getOrDefault(FolderSync.ProblemKind.UNAVAILABLE)
+        val types = runCatching { reply.readString() }.getOrNull()
         return when (type) {
             NOT_FOUND -> FileNotFoundException(message)
             SECURITY -> SecurityException(message)
             ARGUMENT -> IllegalArgumentException(message)
             STATE -> IllegalStateException(message)
             else -> Failure(message ?: "The sync folder failed", kind)
-        }
+        }.apply { if (!types.isNullOrEmpty()) addSuppressed(FolderSync.Step("in the folder: $types")) }
     }
 }
 

@@ -58,11 +58,11 @@ internal class ZipWriter(private val out: OutputStream) {
                     override fun write(value: Int) { write(byteArrayOf(value.toByte()), 0, 1) }
                     override fun write(bytes: ByteArray, offset: Int, count: Int) {
                         if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("Notebook save cancelled")
-                        require(count >= 0 && size + count <= expectedSize) { "PDF size changed during save" }
+                        require(count >= 0 && size + count <= expectedSize) { "File size changed during save" }
                         encoded.write(bytes, offset, count); crc.update(bytes, offset, count); size += count
                     }
                 }
-                writeTo(counted); require(size == expectedSize.toLong()) { "PDF size changed during save" }
+                writeTo(counted); require(size == expectedSize.toLong()) { "File size changed during save" }
                 encoded.finish()
             }
             val bytes = name.toByteArray(Charsets.UTF_8); val length = compressed.length()
@@ -74,6 +74,55 @@ internal class ZipWriter(private val out: OutputStream) {
             compressed.inputStream().use { it.copyTo(out, 65536) }; position += length
         } finally { deflater.end(); compressed.delete() }
     }
+
+    /**
+     * B78 (P705): writes already-compressed originals (photos) as a deflate stream of stored blocks, straight from
+     * [writeTo] to the output with no copy in memory. A first pass computes the CRC; the second writes the blocks,
+     * whose total length is known in advance, so the local header keeps exact sizes and needs no data descriptor.
+     */
+    fun storedEntry(name: String, expectedSize: Int, writeTo: (OutputStream) -> Unit) {
+        require(expectedSize >= 0) { "File size changed during save" }
+        fun pass(sink: (ByteArray, Int, Int) -> Unit): Long {
+            val crc = CRC32(); var size = 0L
+            writeTo(object: OutputStream() {
+                override fun write(value: Int) { write(byteArrayOf(value.toByte()), 0, 1) }
+                override fun write(bytes: ByteArray, offset: Int, count: Int) {
+                    if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("Notebook save cancelled")
+                    require(count >= 0 && size + count <= expectedSize) { "File size changed during save" }
+                    crc.update(bytes, offset, count); sink(bytes, offset, count); size += count
+                }
+            })
+            require(size == expectedSize.toLong()) { "File size changed during save" }
+            return crc.value
+        }
+        val crc = pass { _, _, _ -> }
+        val blocks = maxOf(1L, (expectedSize.toLong() + STORED_BLOCK - 1) / STORED_BLOCK)
+        val length = expectedSize + 5 * blocks
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        require(position + length < 0xffffffffL && written.size < 0xffff) { "Package too large" }
+        written += Written(bytes, crc, expectedSize, length.toInt(), position)
+        int(0x04034b50); short(20); short(0x0800); short(8); short(0); short(0x21)
+        int(crc); int(length); int(expectedSize.toLong()); short(bytes.size); short(0)
+        header.write(bytes); flushHeader()
+        var done = 0L; var left = 0
+        fun block() {
+            val n = minOf(STORED_BLOCK.toLong(), expectedSize - done).toInt()
+            header.write(if (done + n == expectedSize.toLong()) 1 else 0)
+            short(n); short(n.inv() and 0xffff); flushHeader(); left = n
+        }
+        if (expectedSize == 0) block()
+        val again = pass { b, offset, count ->
+            var at = offset; var rest = count
+            while (rest > 0) {
+                if (left == 0) block()
+                val n = minOf(rest, left)
+                out.write(b, at, n); at += n; rest -= n; left -= n; done += n; position += n
+            }
+        }
+        require(again == crc) { "File changed during save" }
+    }
+
+    private companion object { const val STORED_BLOCK = 65535 }
 
     fun finish() {
         val start = position

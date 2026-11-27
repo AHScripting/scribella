@@ -41,7 +41,8 @@ internal object PageText {
 
     private fun diskKey(key: Key) = when (val b = key.background) {
         is PdfBackground -> "pdf|${b.assetId}|${b.pageIndex}|${key.width}|${key.height}"
-        is ImageBackground -> "image|${b.assetId}|${b.orientation}|${key.width}|${key.height}"
+        is ImageBackground -> "image|${b.assetId}|${b.orientation}|${key.width}|${key.height}" +
+            (if (b.isCropped) "|${b.crop.left},${b.crop.top},${b.crop.right},${b.crop.bottom}" else "")
         else -> error("Unsupported page background")
     }
 

@@ -71,6 +71,17 @@ class PagePanel(
      */
     var grid = false
         set(value) { field = value; offset = 0f; requestThumbnails(); invalidate() }
+    /**
+     * P730 (design canvas board 24, Look A, chosen 27 November): on a phone the pages stand in one row of 64 dp previews
+     * that scrolls sideways, in a strip above the toolbox, so the page keeps its width. Tap, hold for the page's actions
+     * and hold and drag to move work as in the column; the New page tile ends the row. [offset] then scrolls across.
+     */
+    var across = false
+        set(value) { if (field != value) { field = value; offset = 0f; requestThumbnails(); invalidate() } }
+    private val scrollX get() = if (across) offset else 0f
+    private val scrollY get() = if (across) 0f else offset
+    /** P730: across, the strip scrolls sideways while there is more to see that way. */
+    override fun canScrollHorizontally(direction: Int) = across && if (direction < 0) offset > 0f else offset < maxOffset()
 
     private var notebook: Notebook? = null
     private var selectedId: String? = null
@@ -82,8 +93,8 @@ class PagePanel(
 
     // P607: the strip's metrics are the design canvas's Pages-Panel board: 140 dp previews in the 188 dp card, corners of
     // 10, the number's 22 dp pill 8 dp below, 18 dp between pages.
-    private val sidePad get() = if (grid) dp(28f) else ((width - dp(STRIP_THUMB_DP)) / 2).coerceAtLeast(dp(12f))
-    private val topPad get() = if (grid) dp(18f) else dp(16f)
+    private val sidePad get() = if (across) dp(16f) else if (grid) dp(28f) else ((width - dp(STRIP_THUMB_DP)) / 2).coerceAtLeast(dp(12f))
+    private val topPad get() = if (across) dp(14f) else if (grid) dp(18f) else dp(16f)
     // P639: page numbers grow with the reader's text size (as far as a tile holds); the band under each page grows with them.
     private val gridLabel = context.readerSize(13f, 17f)
     private val stripLabel = context.readerSize(12f, 16f)
@@ -92,13 +103,14 @@ class PagePanel(
     private val labelHeight get() = if (grid) dp(32f) + gridGrow else dp(30f) + stripGrow
     private val gap get() = dp(18f)
     private val corner get() = if (grid) dp(8f) else dp(10f)
-    private val colGap get() = dp(26f)
+    private val colGap get() = if (across) dp(10f) else dp(26f)
     // P610: a phone (about 411 dp) just misses two 168 dp previews; it takes two of at least 136 dp, not one page as wide as the screen.
-    private val cols get() = if (!grid || width == 0) 1 else {
+    // P730: the strip across a phone is one row holding every page.
+    private val cols get() = if (across) maxOf(1, notebook?.pages?.size ?: 1) else if (!grid || width == 0) 1 else {
         val room = width - 2 * sidePad + colGap
         maxOf((room / (dp(GRID_CELL_DP) + colGap)).toInt(), if (room / (dp(GRID_CELL_MIN_DP) + colGap) >= 2) 2 else 1)
     }
-    private val cellWidth get() = ((width - 2 * sidePad - (cols - 1) * colGap) / cols).coerceAtLeast(1f)
+    private val cellWidth get() = if (across) dp(ACROSS_THUMB_DP) else ((width - 2 * sidePad - (cols - 1) * colGap) / cols).coerceAtLeast(1f)
     private fun colLeft(index: Int) = sidePad + (index % cols) * (cellWidth + colGap)
     private val ribbon = Path().apply { moveTo(1f, 0f); lineTo(13f, 0f); lineTo(13f, 20f); lineTo(7f, 15f); lineTo(1f, 20f); close() }
     /** P607: the strip's bookmark, 14 by 22 with a notch, as on the board. */
@@ -142,9 +154,11 @@ class PagePanel(
         override fun run() {
             if (drag == null) { autoScrolling = false; return }
             val edge = dp(56f)
+            // P730: across a phone the strip scrolls at its left and right ends.
+            val at = if (across) dragX else dragY; val size = if (across) width else height
             val step = when {
-                dragY < edge -> -(edge - dragY) / edge * dp(16f)
-                dragY > height - edge -> (dragY - (height - edge)) / edge * dp(16f)
+                at < edge -> -(edge - at) / edge * dp(16f)
+                at > size - edge -> (at - (size - edge)) / edge * dp(16f)
                 else -> 0f
             }
             val before = offset
@@ -206,7 +220,7 @@ class PagePanel(
     fun pageBounds(index: Int): RectF? {
         val pages = notebook?.pages ?: return null
         if (index !in pages.indices || width == 0) return null
-        return RectF().also { thumbRect(pages[index], index, tops(pages)[index] - offset, it) }
+        return RectF().also { thumbRect(pages[index], index, tops(pages)[index] - scrollY, it) }
     }
     /** P607: view-relative bounds of the New page tile at the current scroll position, or null when it is not shown. */
     fun newPageBounds(): RectF? = if (tileShown && width > 0) RectF().also { tileRect(it) } else null
@@ -227,6 +241,12 @@ class PagePanel(
     fun revealCurrent() {
         val pages = notebook?.pages ?: return
         val index = currentIndex.takeIf { it >= 0 } ?: return
+        if (across) {
+            // P730: the current page in view, with the New page tile after the last page.
+            val left = colLeft(index); val right = if (tileShown && index == pages.lastIndex) left + 2 * cellWidth + colGap else left + cellWidth
+            if (left - sidePad < offset) setOffset(left - sidePad) else if (right > offset + width) setOffset(right - width + sidePad)
+            invalidate(); return
+        }
         val top = tops(pages)[index]
         // P607: on the last page the New page tile after it comes into view too.
         val bottom = if (tileShown && index == pages.lastIndex) contentHeight() - gap else top + rowHeight(pages, index / cols)
@@ -274,14 +294,37 @@ class PagePanel(
     private val thumbWidth get() = cellWidth
     private val thumbPixels get() = thumbWidth.roundToInt().coerceIn(1, PageThumbnails.MAX_EDGE)
 
-    private fun requestThumbnails() {
+    /**
+     * B65: the pages within two screens of the view, nearest the middle of the view first. All 200 pages of a book were
+     * asked for from page 1, so with page 99 open its tiles waited behind the 98 before it (and every preview kept in
+     * memory at once).
+     */
+    private fun nearPages(pages: List<Page>): List<Int> {
+        if (across) {
+            if (width == 0) return pages.indices.toList()
+            val from = offset - 2 * width; val to = offset + 3 * width; val middle = offset + width / 2f
+            return pages.indices.filter { colLeft(it) + cellWidth >= from && colLeft(it) <= to }.sortedBy { abs(colLeft(it) + cellWidth / 2 - middle) }
+        }
+        if (height == 0) return pages.indices.toList()
+        val rows = rowTops(pages)
+        val from = offset - 2 * height; val to = offset + 3 * height; val middle = offset + height / 2f
+        return pages.indices.filter { rows[it / cols + 1] >= from && rows[it / cols] <= to }
+            .sortedBy { kotlin.math.abs((rows[it / cols] + rows[it / cols + 1]) / 2 - middle) }
+    }
+    private var nearShown: List<Int> = emptyList()
+
+    private fun requestThumbnails(scrolled: Boolean = false) {
         val current = notebook ?: return
         if (width == 0) return
-        val ids = current.pages.map { it.id }.toSet()
-        (pending.keys - ids).forEach { pending.remove(it)?.request?.cancel() }
-        shown.keys.retainAll(ids); shownKeys.keys.retainAll(ids); failedKeys.keys.retainAll(ids)
+        val near = nearPages(current.pages)
+        if (scrolled && near.toSet() == nearShown.toSet()) return
+        nearShown = near
+        val nearIds = near.map { current.pages[it].id }.toSet()
+        (pending.keys - nearIds).forEach { pending.remove(it)?.request?.cancel() }
+        // Far from view, previews are let go (the cache may still hold them) and a failed one is tried again on return.
+        shown.keys.retainAll(nearIds); shownKeys.keys.retainAll(nearIds); failedKeys.keys.retainAll(nearIds); arrived.keys.retainAll(nearIds)
         val pixels = thumbPixels
-        for (page in current.pages) {
+        for (page in near.map { current.pages[it] }) {
             val key = thumbnails.key(current, page, pixels)
             if (shownKeys[page.id] == key || failedKeys[page.id] == key || pending[page.id]?.key == key) continue
             pending.remove(page.id)?.request?.cancel()
@@ -311,7 +354,7 @@ class PagePanel(
         super.onSizeChanged(w, h, oldw, oldh)
         // A new size re-anchors from the top, so a scroll forced by an early, shorter layout pass never leaves
         // the first page clipped; the current page is then revealed as usual.
-        if (h != oldh) offset = 0f
+        if (if (across) w != oldw else h != oldh) offset = 0f
         setOffset(offset); requestThumbnails(); revealCurrent()
     }
 
@@ -341,21 +384,40 @@ class PagePanel(
     private val tileShown get() = newPageShown && !grid && notebook != null
     /** The New page tile, after the last page: 140 by 76, as on the board. */
     private fun tileRect(out: RectF) {
+        if (across) {
+            // P730: after the last page, a page's size: 64 dp wide, as tall as a portrait page.
+            val left = sidePad + (notebook?.pages?.size ?: 0) * (cellWidth + colGap) - offset
+            out.set(left, topPad, left + cellWidth, topPad + cellWidth * ACROSS_TILE_RATIO); return
+        }
         val top = (notebook?.pages?.let { rowTops(it).last() } ?: topPad) - offset
         val left = (width - dp(STRIP_THUMB_DP)) / 2
         out.set(left, top, left + dp(STRIP_THUMB_DP), top + dp(76f))
     }
     private fun contentHeight(): Float = (notebook?.pages?.let { rowTops(it).last() } ?: topPad) + footer +
         if (tileShown) dp(76f) + dp(20f) else gap
-    private fun maxOffset() = (contentHeight() - height).coerceAtLeast(0f)
-    private fun setOffset(value: Float) { offset = value.coerceIn(0f, maxOffset()) }
+    private fun maxOffset() = if (across) {
+        val n = notebook?.pages?.size ?: 0
+        val end = sidePad + n * (cellWidth + colGap) + (if (tileShown) cellWidth + colGap else 0f) - colGap + sidePad
+        (end - width).coerceAtLeast(0f)
+    } else (contentHeight() - height).coerceAtLeast(0f)
+    private fun setOffset(value: Float) {
+        val before = offset; offset = value.coerceIn(0f, maxOffset())
+        if (offset != before) requestThumbnails(scrolled = true)
+    }
     private fun thumbRect(page: Page, index: Int, viewTop: Float, out: RectF) {
         val (w, h) = thumbSize(page)
-        val left = colLeft(index) + (cellWidth - w) / 2
+        val left = colLeft(index) - scrollX + (cellWidth - w) / 2
         out.set(left, viewTop, left + w, viewTop + h)
     }
     private fun indexAt(x: Float, y: Float): Int {
         val pages = notebook?.pages ?: return -1
+        if (across) {
+            val rows = rowTops(pages)
+            if (y < rows[0] || y >= rows[1]) return -1
+            val contentX = x + offset - sidePad
+            val col = (contentX / (cellWidth + colGap)).toInt()
+            return col.takeIf { contentX >= 0 && contentX - col * (cellWidth + colGap) < cellWidth + colGap / 2 && it < pages.size } ?: -1
+        }
         val rows = rowTops(pages)
         val contentY = y + offset
         val row = (0 until rows.size - 1).firstOrNull { contentY >= rows[it] && contentY < rows[it + 1] - gap / 2 } ?: return -1
@@ -372,21 +434,23 @@ class PagePanel(
         val order = if (active == null) pages else pages.filterNot { it.id == active.pageId }.toMutableList().apply { add(active.target, pages[active.from]) }
         val tops = tops(order)
         order.forEachIndexed { index, page ->
-            val top = tops[index] - offset
+            val top = tops[index] - scrollY
             if (top > height || top + rowHeight(order, index / cols) < 0) return@forEachIndexed
+            if (across && (colLeft(index) - offset > width || colLeft(index) - offset + cellWidth < 0)) return@forEachIndexed
             if (page.id == active?.pageId) drawGhost(canvas, page, index, top) else drawCell(canvas, page, index, top, lifted = false)
         }
         if (tileShown) drawNewPage(canvas)
         if (active != null) {
             val page = pages[active.from]
-            drawCell(canvas, page, active.target, dragY - active.grabOffset, lifted = true, left = if (cols > 1) dragX - active.grabX else null)
+            // P730: across a phone the lifted page slides along the row.
+            drawCell(canvas, page, active.target, if (across) topPad else dragY - active.grabOffset, lifted = true, left = if (cols > 1) dragX - active.grabX else null)
         }
     }
 
     /** P607: the dashed New page tile: accent at 5% with a 45% dashed edge, a plus over "New page". */
     private fun drawNewPage(canvas: Canvas) {
         tileRect(tile)
-        if (tile.top > height || tile.bottom < 0) return
+        if (tile.top > height || tile.bottom < 0 || tile.left > width || tile.right < 0) return
         val accent = Glass.accent(night); val r = dp(12f)
         paint.style = Paint.Style.FILL; paint.color = accent; paint.alpha = if (tilePressed) 31 else 13
         canvas.drawRoundRect(tile, r, r, paint)
@@ -395,7 +459,7 @@ class PagePanel(
         tile.inset(dp(.75f), dp(.75f)); canvas.drawRoundRect(tile, r, r, paint); tile.inset(-dp(.75f), -dp(.75f))
         paint.pathEffect = null; paint.alpha = 255
         // The plus (22 dp, 1.75 stroke) and the name 4 dp below it, centred together.
-        labelPaint.typeface = Tokens.SANS_MEDIUM; labelPaint.fitText("New page", tile.width() - dp(8f), gridLabel, dp(13f))
+        labelPaint.typeface = Tokens.SANS_MEDIUM; labelPaint.fitText("New page", tile.width() - dp(8f), gridLabel, if (across) dp(10f) else dp(13f))
         val text = labelPaint.textSize; val block = dp(22f) + dp(4f) + text
         val cx = tile.centerX(); val top = tile.centerY() - block / 2
         val arm = dp(7f * 22f / 24f); val cy = top + dp(11f)
@@ -547,7 +611,7 @@ class PagePanel(
                     if (!scrolling && (abs(event.y - downY) > touchSlop || abs(event.x - downX) > touchSlop)) {
                         scrolling = true; removeCallbacks(longPress); pressedIndex = -1; if (tilePressed) { tilePressed = false; invalidate() }
                     }
-                    if (scrolling) { setOffset(offset - (event.y - lastY)); invalidate() }
+                    if (scrolling) { setOffset(offset - if (across) event.x - lastX else event.y - lastY); invalidate() }
                 }
                 lastX = event.x; lastY = event.y
             }
@@ -575,14 +639,15 @@ class PagePanel(
     private fun fling() {
         val tracker = velocity ?: return
         tracker.computeCurrentVelocity(1000, maxFling.toFloat())
-        val vy = tracker.yVelocity
+        val vy = if (across) tracker.xVelocity else tracker.yVelocity
         if (abs(vy) < minFling) return
-        scroller.fling(0, offset.roundToInt(), 0, -vy.roundToInt(), 0, 0, 0, maxOffset().roundToInt())
+        if (across) scroller.fling(offset.roundToInt(), 0, -vy.roundToInt(), 0, 0, maxOffset().roundToInt(), 0, 0)
+        else scroller.fling(0, offset.roundToInt(), 0, -vy.roundToInt(), 0, 0, 0, maxOffset().roundToInt())
         postInvalidateOnAnimation()
     }
 
     override fun computeScroll() {
-        if (scroller.computeScrollOffset()) { setOffset(scroller.currY.toFloat()); postInvalidateOnAnimation() }
+        if (scroller.computeScrollOffset()) { setOffset(if (across) scroller.currX.toFloat() else scroller.currY.toFloat()); postInvalidateOnAnimation() }
     }
 
     private fun tap(index: Int) {
@@ -599,7 +664,7 @@ class PagePanel(
         val snapshot = notebook ?: return
         if (downIndex !in snapshot.pages.indices || scrolling) return
         refusal?.let { onRefused?.invoke(it); spent = true; return }
-        val top = tops(snapshot.pages)[downIndex] - offset
+        val top = tops(snapshot.pages)[downIndex] - scrollY
         thumbRect(snapshot.pages[downIndex], downIndex, top, rect)
         drag = Drag(snapshot, snapshot.pages[downIndex].id, downIndex, lastY - top, lastX - rect.left); pressedIndex = -1; dragMoved = false
         dragX = lastX; dragY = lastY
@@ -621,7 +686,7 @@ class PagePanel(
         val (w, h) = thumbSize(pages[active.from])
         if (cols > 1) {
             // The grid: the slot whose preview centre is nearest the lifted page's centre.
-            val cx = dragX - active.grabX + w / 2; val cy = dragY - active.grabOffset + h / 2 + offset
+            val cx = dragX - active.grabX + w / 2 + scrollX; val cy = (if (across) topPad else dragY - active.grabOffset) + h / 2 + scrollY
             val tops = tops(pages)
             active.target = pages.indices.minByOrNull { slot ->
                 val dx = colLeft(slot) + cellWidth / 2 - cx; val dy = tops[slot] + thumbSize(pages[slot]).second / 2 - cy
@@ -667,6 +732,9 @@ class PagePanel(
         /** P607: the floating Pages card's width, from the board; the strip's previews are [STRIP_THUMB_DP] wide inside it. */
         const val PREFERRED_WIDTH_DP = 188f
         const val STRIP_THUMB_DP = 140f
+        /** P730 (board 24): the previews in the strip across a phone, and the New page tile's height to width. */
+        const val ACROSS_THUMB_DP = 64f
+        const val ACROSS_TILE_RATIO = 1.414f
         /** P201 step 6: the organizer board's preview width; the grid fits as many columns of at least this as it can. */
         const val GRID_CELL_DP = 168f
         const val GRID_CELL_MIN_DP = 136f
